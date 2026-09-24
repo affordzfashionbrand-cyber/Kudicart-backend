@@ -1,17 +1,21 @@
-import { Controller, Post, Body } from '@nestjs/common';
+import { Controller, Post, Body, HttpCode, HttpStatus } from '@nestjs/common';
 import { AuthService } from './auth.service';
+import { SendOtpDto } from './dto/send-otp.dto';
+import { VerifyOtpDto } from './dto/verify-otp.dto';
 
 @Controller('api/v1/auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('phone/send-otp')
-  async sendOtp(@Body() body: { phoneNumber: string }) {
-    return this.authService.sendOtp(body.phoneNumber);
+  @HttpCode(HttpStatus.OK)
+  async sendOtp(@Body() dto: SendOtpDto) {
+    return this.authService.sendOtp(dto.phoneNumber);
   }
 
   @Post('phone/verify-otp')
-  async verifyOtp(@Body() body: { phoneNumber: string; otp: string }) {
-    return this.authService.verifyOtp(body.phoneNumber, body.otp);
+  @HttpCode(HttpStatus.OK)
+  async verifyOtp(@Body() dto: VerifyOtpDto) {
+    return this.authService.verifyOtp(dto.phoneNumber, dto.otp);
   }
 }

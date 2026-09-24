@@ -1,5 +1,6 @@
 import { Controller, Get, Param, Query } from '@nestjs/common';
 import { CatalogService } from './catalog.service';
+import { GetProductsDto } from './dto/get-products.dto';
 
 @Controller('api/v1')
 export class CatalogController {
@@ -11,11 +12,8 @@ export class CatalogController {
   }
 
   @Get('products')
-  async getProducts(
-    @Query('category') category?: string,
-    @Query('search') search?: string,
-  ) {
-    return this.catalogService.getProducts(category, search);
+  async getProducts(@Query() query: GetProductsDto) {
+    return this.catalogService.getProducts(query);
   }
 
   @Get('products/:id')

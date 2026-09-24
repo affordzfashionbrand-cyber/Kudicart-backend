@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 
 @Injectable()
@@ -8,7 +8,7 @@ export class CartService {
   async getCart(userId: string) {
     const store = this.prisma.getStore();
     const userCartItems = store.cartItems.filter((ci) => ci.userId === userId);
-    
+
     const items = userCartItems.map((ci) => {
       const prod = store.products.find((p) => p.id === ci.productId);
       return {
@@ -23,6 +23,7 @@ export class CartService {
         quantity: ci.quantity,
         image: prod?.image || '',
         altText: prod?.altText || '',
+        stockAvailable: prod?.stockQuantity ?? 10,
       };
     });
 
@@ -41,45 +42,89 @@ export class CartService {
     };
   }
 
-  async addItem(userId: string, productId: string, size?: string) {
+  async addItem(userId: string, productId: string, size?: string, quantity: number = 1) {
     const store = this.prisma.getStore();
+    const product = store.products.find((p) => p.id === productId);
+
+    if (!product) {
+      throw new NotFoundException(`Product with ID ${productId} not found`);
+    }
+
+    if (product.stockQuantity <= 0) {
+      throw new BadRequestException(`Product '${product.title}' is currently out of stock`);
+    }
+
+    const itemSize = size || (product.sizes && product.sizes.length > 0 ? product.sizes[0] : 'Free Size');
     const existing = store.cartItems.find(
-      (ci) => ci.userId === userId && ci.productId === productId && ci.size === (size || 'Size M'),
+      (ci) => ci.userId === userId && ci.productId === productId && ci.size === itemSize,
     );
+
     if (existing) {
-      existing.quantity += 1;
+      if (existing.quantity + quantity > product.stockQuantity) {
+        throw new BadRequestException(
+          `Cannot add more items. Only ${product.stockQuantity} units available in stock.`,
+        );
+      }
+      existing.quantity += quantity;
     } else {
+      if (quantity > product.stockQuantity) {
+        throw new BadRequestException(
+          `Requested quantity (${quantity}) exceeds available stock (${product.stockQuantity}).`,
+        );
+      }
       store.cartItems.push({
-        id: `cart-${Date.now()}`,
+        id: `cart-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         userId,
         productId,
-        size: size || 'Size M',
-        quantity: 1,
+        size: itemSize,
+        quantity,
       });
     }
+
     return this.getCart(userId);
   }
 
-  async updateQuantity(id: string, delta: number) {
+  async updateQuantity(userId: string, id: string, delta: number) {
     const store = this.prisma.getStore();
-    const itemIndex = store.cartItems.findIndex((ci) => ci.id === id);
-    if (itemIndex > -1) {
-      const newQty = store.cartItems[itemIndex].quantity + delta;
-      if (newQty <= 0) {
-        store.cartItems.splice(itemIndex, 1);
-      } else {
-        store.cartItems[itemIndex].quantity = newQty;
-      }
+    const itemIndex = store.cartItems.findIndex((ci) => ci.id === id && ci.userId === userId);
+
+    if (itemIndex === -1) {
+      throw new NotFoundException(`Cart item ${id} not found`);
     }
-    return this.getCart('usr-1');
+
+    const item = store.cartItems[itemIndex];
+    const product = store.products.find((p) => p.id === item.productId);
+    const newQty = item.quantity + delta;
+
+    if (newQty <= 0) {
+      store.cartItems.splice(itemIndex, 1);
+    } else {
+      if (product && newQty > product.stockQuantity) {
+        throw new BadRequestException(
+          `Cannot increase quantity. Only ${product.stockQuantity} units available.`,
+        );
+      }
+      item.quantity = newQty;
+    }
+
+    return this.getCart(userId);
   }
 
-  async removeItem(id: string) {
+  async removeItem(userId: string, id: string) {
     const store = this.prisma.getStore();
-    const itemIndex = store.cartItems.findIndex((ci) => ci.id === id);
-    if (itemIndex > -1) {
-      store.cartItems.splice(itemIndex, 1);
+    const itemIndex = store.cartItems.findIndex((ci) => ci.id === id && ci.userId === userId);
+
+    if (itemIndex === -1) {
+      throw new NotFoundException(`Cart item ${id} not found`);
     }
-    return this.getCart('usr-1');
+
+    store.cartItems.splice(itemIndex, 1);
+    return this.getCart(userId);
+  }
+
+  async clearCart(userId: string) {
+    const store = this.prisma.getStore();
+    store.cartItems = store.cartItems.filter((ci) => ci.userId !== userId);
+    return { success: true, message: 'Cart cleared successfully' };
   }
 }
