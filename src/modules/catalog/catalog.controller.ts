@@ -11,6 +11,16 @@ export class CatalogController {
     return this.catalogService.getCategories();
   }
 
+  @Get('dark-stores')
+  async getDarkStores() {
+    return this.catalogService.getDarkStores();
+  }
+
+  @Get('coupons/active')
+  async getActiveCoupons() {
+    return this.catalogService.getActiveCoupons();
+  }
+
   @Get('products')
   async getProducts(@Query() query: GetProductsDto) {
     return this.catalogService.getProducts(query);

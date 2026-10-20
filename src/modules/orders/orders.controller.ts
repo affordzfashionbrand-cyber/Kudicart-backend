@@ -30,6 +30,14 @@ export class OrdersController {
     return this.ordersService.checkout(user.id, body);
   }
 
+  @Post('verify-payment')
+  @HttpCode(HttpStatus.OK)
+  async verifyPayment(
+    @Body() body: { orderId: string; paymentId: string; signature: string },
+  ) {
+    return this.ordersService.verifyPayment(body.orderId, body.paymentId, body.signature);
+  }
+
   @Get()
   async getOrders(@CurrentUser() user: AuthenticatedUser) {
     return this.ordersService.getOrders(user.id, user.role, user.driverId);

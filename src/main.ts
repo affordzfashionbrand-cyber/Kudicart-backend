@@ -4,12 +4,19 @@ import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
 async function bootstrap() {
-  const logger = new Logger('KudiCartBackend');
+  const logger = new Logger('AffordzBackend');
   const app = await NestFactory.create(AppModule);
 
-  // Enable CORS for all clients (Customer RN, Driver RN, Admin/Vendor Web)
+  // Configure CORS with fail-closed production origin validation
+  const isProduction = process.env.APP_ENV === 'production';
+  const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim())
+    : isProduction
+      ? ['https://affordz.com', 'https://admin.affordz.com', 'https://vendor.affordz.com']
+      : true;
+
   app.enableCors({
-    origin: true,
+    origin: allowedOrigins,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
   });
@@ -31,7 +38,7 @@ async function bootstrap() {
 
   const port = process.env.PORT || 3001;
   await app.listen(port);
-  logger.log(`KudiCart Backend REST API running on http://localhost:${port}`);
+  logger.log(`Affordz Backend REST API running on http://localhost:${port}`);
   logger.log(`Customer & Driver App APIs initialized with strict validation & RBAC`);
 }
 bootstrap();

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PrismaService } from './prisma/prisma.service';
 import { AuthController } from './modules/auth/auth.controller';
 import { AuthService } from './modules/auth/auth.service';
+import { FirebaseAdminService } from './modules/auth/firebase-admin.service';
 import { UsersController } from './modules/users/users.controller';
 import { UsersService } from './modules/users/users.service';
 import { CatalogController } from './modules/catalog/catalog.controller';
@@ -38,6 +39,7 @@ import { SupportService } from './modules/support/support.service';
   ],
   providers: [
     PrismaService,
+    FirebaseAdminService,
     AuthService,
     UsersService,
     CatalogService,

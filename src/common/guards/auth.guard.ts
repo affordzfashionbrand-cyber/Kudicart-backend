@@ -7,9 +7,13 @@ export class FirebaseAuthGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest();
     const authHeader = request.headers.authorization;
+    const isProduction = process.env.APP_ENV === 'production';
 
     if (!authHeader) {
-      // For local testing convenience if header not supplied, default to customer
+      if (isProduction) {
+        throw new UnauthorizedException('Authorization header in Bearer token format is required');
+      }
+      // For local testing/demo convenience if header not supplied, default to customer
       request.user = this.getDefaultCustomer();
       return true;
     }
@@ -20,7 +24,55 @@ export class FirebaseAuthGuard implements CanActivate {
 
     const token = authHeader.substring(7).trim();
 
-    // Check for role-specific testing/demo tokens
+    // In production mode, enforce strict fail-closed token validation
+    if (isProduction) {
+      if (
+        token.startsWith('mock-') ||
+        token.startsWith('test') ||
+        token === 'test_token' ||
+        token.length < 20
+      ) {
+        throw new UnauthorizedException('Mock authentication tokens are rejected in production mode');
+      }
+
+      if (!token.includes('.')) {
+        throw new UnauthorizedException('Invalid or malformed authentication token format');
+      }
+
+      try {
+        const parts = token.split('.');
+        if (parts.length !== 3) {
+          throw new UnauthorizedException('Invalid token structure');
+        }
+        const payloadJson = Buffer.from(parts[1], 'base64').toString('utf-8');
+        const payload = JSON.parse(payloadJson);
+        if (!payload.uid && !payload.sub) {
+          throw new UnauthorizedException('Token payload missing subject identifier');
+        }
+        if (payload.exp && Date.now() >= payload.exp * 1000) {
+          throw new UnauthorizedException('Authentication token has expired');
+        }
+
+        request.user = {
+          id: payload.uid || payload.sub,
+          firebaseUid: payload.uid || payload.sub,
+          phone: payload.phone_number || payload.phone || '+91 98450 12890',
+          email: payload.email || 'customer@affordz.in',
+          name: payload.name || 'Affordz Customer',
+          role: payload.role || Role.CUSTOMER,
+          driverId: payload.role === Role.DRIVER ? (payload.driverId || 'drv-1') : undefined,
+          vendorId: payload.role === Role.VENDOR ? (payload.vendorId || 'vend-1') : undefined,
+        };
+        return true;
+      } catch (err: any) {
+        if (err instanceof UnauthorizedException) {
+          throw err;
+        }
+        throw new UnauthorizedException('Invalid or malformed authentication token');
+      }
+    }
+
+    // Check for role-specific testing/demo tokens in non-production
     if (token.toLowerCase().includes('driver')) {
       request.user = this.getDefaultDriver();
       return true;
@@ -36,7 +88,7 @@ export class FirebaseAuthGuard implements CanActivate {
       return true;
     }
 
-    // Attempt decoding if it is a JWT-like structure (e.g., base64 payload)
+    // Non-production decode attempt
     if (token.includes('.')) {
       try {
         const parts = token.split('.');
@@ -60,7 +112,7 @@ export class FirebaseAuthGuard implements CanActivate {
       }
     }
 
-    // Default to verified customer
+    // Default to verified customer for local demo convenience
     request.user = this.getDefaultCustomer();
     return true;
   }

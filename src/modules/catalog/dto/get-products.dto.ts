@@ -11,5 +11,29 @@ export class GetProductsDto {
 
   @IsOptional()
   @IsString()
-  sort?: 'price_asc' | 'price_desc' | 'rating' | 'popular';
+  sort?: 'price_asc' | 'price_desc' | 'rating' | 'popular' | 'newest';
+
+  @IsOptional()
+  @IsString()
+  sortBy?: 'price_asc' | 'price_desc' | 'rating' | 'popular' | 'newest';
+
+  @IsOptional()
+  @IsString()
+  fulfillmentType?: 'DARK_STORE' | 'VENDOR';
+
+  @IsOptional()
+  @IsString()
+  tryAndBuyOnly?: string;
+
+  @IsOptional()
+  minPrice?: string | number;
+
+  @IsOptional()
+  maxPrice?: string | number;
+
+  @IsOptional()
+  page?: string | number;
+
+  @IsOptional()
+  limit?: string | number;
 }

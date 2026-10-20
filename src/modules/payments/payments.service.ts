@@ -5,15 +5,26 @@ import * as crypto from 'crypto';
 @Injectable()
 export class PaymentsService {
   private readonly razorpayKeySecret =
-    process.env.RAZORPAY_KEY_SECRET || 'rzp_test_secret_KudiCartSecureKey_2026';
+    process.env.RAZORPAY_KEY_SECRET || 'rzp_test_secret_AffordzSecureKey_2026';
   private readonly razorpayKeyId =
-    process.env.RAZORPAY_KEY_ID || 'rzp_test_KudiCartClientKey';
+    process.env.RAZORPAY_KEY_ID || 'rzp_test_AffordzClientKey';
 
   constructor(private prisma: PrismaService) {}
 
   async createRazorpayOrder(amount: number, orderId?: string) {
     if (!amount || amount <= 0) {
       throw new BadRequestException('Amount must be greater than zero');
+    }
+
+    const isProduction = process.env.APP_ENV === 'production';
+    if (
+      isProduction &&
+      (!process.env.RAZORPAY_KEY_SECRET ||
+        process.env.RAZORPAY_KEY_SECRET === 'rzp_test_secret_AffordzSecureKey_2026')
+    ) {
+      throw new BadRequestException(
+        'Production payment gateway not configured. Failing closed for security.',
+      );
     }
 
     const store = this.prisma.getStore();
@@ -34,7 +45,7 @@ export class PaymentsService {
       currency: 'INR',
       keyId: this.razorpayKeyId,
       notes: {
-        platform: 'KudiCart',
+        platform: 'Affordz',
         orderId: orderId || null,
       },
     };
@@ -61,11 +72,19 @@ export class PaymentsService {
       .update(expectedData)
       .digest('hex');
 
-    // Allow valid HMAC signature OR simulated valid signature in test environment
-    const isValid =
-      signature === generatedSignature ||
-      signature === 'sig_abc' ||
-      signature.startsWith('test_sig_');
+    const isProduction = process.env.APP_ENV === 'production';
+    if (
+      isProduction &&
+      (!process.env.RAZORPAY_KEY_SECRET ||
+        process.env.RAZORPAY_KEY_SECRET === 'rzp_test_secret_AffordzSecureKey_2026')
+    ) {
+      throw new BadRequestException(
+        'Production payment gateway secret not configured. Failing closed for security.',
+      );
+    }
+    const isValid = isProduction
+      ? signature === generatedSignature
+      : (signature === generatedSignature || signature === 'sig_abc' || signature.startsWith('test_sig_'));
 
     if (!isValid) {
       order.paymentStatus = 'FAILED';

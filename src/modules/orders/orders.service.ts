@@ -8,12 +8,16 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { StateMachineService, OrderStatus } from './state-machine.service';
 import { CheckoutDto } from './dto/checkout.dto';
 import { Role } from '../../common/enums/role.enum';
+import { PaymentsService } from '../payments/payments.service';
+import { CartService } from '../cart/cart.service';
 
 @Injectable()
 export class OrdersService {
   constructor(
     private prisma: PrismaService,
     private stateMachine: StateMachineService,
+    private paymentsService: PaymentsService,
+    private cartService: CartService,
   ) {}
 
   async checkout(userId: string, dto: CheckoutDto) {
@@ -57,19 +61,46 @@ export class OrdersService {
         title: prod.title,
         brand: prod.brand,
         size: ci.size,
+        trialSize: ci.trialSize || null,
         price: prod.price,
         quantity: ci.quantity,
         image: prod.image,
       });
     }
 
-    // 4. Authoritative Pricing
+    // 4. Authoritative Pricing & Coupon Resolution
     const itemTotal = items.reduce((acc, item) => acc + item.price * item.quantity, 0);
-    const deliveryFee = 40;
-    const taxes = Math.round(itemTotal * 0.05); // 5% GST
-    const grandTotal = itemTotal + deliveryFee + taxes;
 
-    const orderNumber = `KC-${Math.floor(10000 + Math.random() * 90000)}`;
+    const appliedCode = dto.couponCode || this.cartService.getAppliedCoupon(userId);
+    let discountAmount = 0;
+    let validCouponCode: string | null = null;
+
+    if (appliedCode) {
+      const coupon = store.coupons.find(
+        (c) => c.code.toUpperCase() === appliedCode.trim().toUpperCase(),
+      );
+      if (coupon && coupon.isActive && itemTotal >= coupon.minOrderValue) {
+        validCouponCode = coupon.code;
+        if (coupon.discountType === 'PERCENTAGE') {
+          discountAmount = Math.round((itemTotal * coupon.discountValue) / 100);
+          if (coupon.maxDiscount) {
+            discountAmount = Math.min(discountAmount, coupon.maxDiscount);
+          }
+        } else {
+          discountAmount = Math.min(itemTotal, coupon.discountValue);
+        }
+      }
+    }
+
+    const deliveryFee = itemTotal >= 1499 ? 0 : 40;
+    const taxes = Math.round(itemTotal * 0.05); // 5% GST
+    const grandTotal = Math.max(0, itemTotal - discountAmount) + deliveryFee + taxes;
+
+    const isTryAndBuy = Boolean(
+      dto.isTryAndBuy || userCartItems.some((ci) => Boolean(ci.trialSize)),
+    );
+
+    const orderNumber = `AF-${Math.floor(10000 + Math.random() * 90000)}`;
     const razorpayOrderId =
       dto.paymentMethod === 'RAZORPAY' ? `rzp_order_${Date.now()}` : undefined;
 
@@ -88,8 +119,11 @@ export class OrdersService {
       itemTotal,
       deliveryFee,
       taxes,
+      discountAmount,
+      couponCode: validCouponCode,
+      isTryAndBuy,
       grandTotal,
-      etaMinutes: 35,
+      etaMinutes: isTryAndBuy ? 20 : 35,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       items,
@@ -105,10 +139,36 @@ export class OrdersService {
 
     store.orders.unshift(newOrder as any);
 
-    // 5. Clear Cart
-    store.cartItems = store.cartItems.filter((ci) => ci.userId !== userId);
+    // 5. Clear Cart and reset coupon
+    await this.cartService.clearCart(userId);
 
     return newOrder;
+  }
+
+  async verifyPayment(orderId: string, paymentId: string, signature: string) {
+    const verification = await this.paymentsService.verifyRazorpaySignature(
+      orderId,
+      paymentId,
+      signature,
+    );
+
+    const store = this.prisma.getStore();
+    const order = store.orders.find((o) => o.id === orderId || o.orderNumber === orderId);
+
+    if (order && order.status === 'PLACED') {
+      order.status = 'ACCEPTED' as OrderStatus;
+      order.history.push({
+        status: 'ACCEPTED' as OrderStatus,
+        time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+        note: 'Payment verified: order accepted automatically',
+        actor: 'SYSTEM',
+      });
+    }
+
+    return {
+      ...verification,
+      orderStatus: order?.status || 'ACCEPTED',
+    };
   }
 
   async getOrders(userId: string, role: string = Role.CUSTOMER, driverId?: string) {
@@ -191,6 +251,9 @@ export class OrdersService {
       itemTotal: order.itemTotal,
       deliveryFee: order.deliveryFee,
       taxes: order.taxes,
+      discountAmount: (order as any).discountAmount || 0,
+      couponCode: (order as any).couponCode || null,
+      isTryAndBuy: (order as any).isTryAndBuy || false,
       grandTotal: order.grandTotal,
       paymentMethod: order.paymentMethod,
       paymentStatus: order.paymentStatus,

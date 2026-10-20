@@ -37,3 +37,8 @@ lerna-debug.log*
 .env
 .env.*.local
 .env.local
+
+# Secrets & Service Account Keys
+secrets/
+*.json.secret
+

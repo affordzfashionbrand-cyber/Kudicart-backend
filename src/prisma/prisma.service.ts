@@ -1,7 +1,11 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
 
 @Injectable()
-export class PrismaService implements OnModuleInit, OnModuleDestroy {
+export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(PrismaService.name);
+  public isConnectedToDb = false;
+
   // Authoritative in-memory data store with enterprise multi-actor state
   private store = {
     users: [
@@ -75,6 +79,48 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
         },
       },
     ],
+    darkStores: [
+      {
+        id: 'hub-indiranagar',
+        name: 'Indiranagar Express Hub',
+        locality: 'Indiranagar',
+        address: '100ft Road, HAL 2nd Stage, Indiranagar, Bengaluru 560038',
+        lat: 12.9716,
+        lng: 77.6412,
+        deliveryMinutes: 18,
+        isActive: true,
+      },
+      {
+        id: 'hub-koramangala',
+        name: 'Koramangala Fashion Vault',
+        locality: 'Koramangala',
+        address: '80 Feet Road, 4th Block, Koramangala, Bengaluru 560034',
+        lat: 12.9352,
+        lng: 77.6245,
+        deliveryMinutes: 20,
+        isActive: true,
+      },
+      {
+        id: 'hub-lavelle',
+        name: 'Lavelle Concierge Hub',
+        locality: 'Lavelle Road',
+        address: 'Lavelle Road, Shantala Nagar, Ashok Nagar, Bengaluru 560001',
+        lat: 12.9719,
+        lng: 77.5997,
+        deliveryMinutes: 15,
+        isActive: true,
+      },
+      {
+        id: 'hub-whitefield',
+        name: 'Whitefield Prestige Hub',
+        locality: 'Whitefield',
+        address: 'ITPL Main Road, Whitefield, Bengaluru 560066',
+        lat: 12.9698,
+        lng: 77.75,
+        deliveryMinutes: 25,
+        isActive: true,
+      },
+    ],
     vendors: [
       {
         id: 'vend-1',
@@ -91,6 +137,34 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
         address: '42 Commercial Street, Tasker Town, Bengaluru, Karnataka 560001',
         phone: '+91 80 2558 7711',
         contactPerson: 'Rohan Verma',
+      },
+    ],
+    coupons: [
+      {
+        id: 'cpn-1',
+        code: 'AFFORDZ10',
+        discountType: 'PERCENTAGE',
+        discountValue: 10,
+        minOrderValue: 999,
+        maxDiscount: 300,
+        usageLimit: 1000,
+        usedCount: 14,
+        startDate: new Date('2026-01-01').toISOString(),
+        endDate: new Date('2026-12-31').toISOString(),
+        isActive: true,
+      },
+      {
+        id: 'cpn-2',
+        code: 'FIRSTDROP',
+        discountType: 'FLAT',
+        discountValue: 200,
+        minOrderValue: 799,
+        maxDiscount: 200,
+        usageLimit: 500,
+        usedCount: 28,
+        startDate: new Date('2026-01-01').toISOString(),
+        endDate: new Date('2026-12-31').toISOString(),
+        isActive: true,
       },
     ],
     categories: [
@@ -114,12 +188,15 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
         rating: 4.8,
         reviewsCount: 89,
         stockQuantity: 10,
-        stockBadge: 'In Stock',
+        stockBadge: '18m Delivery',
         readyToShip: true,
         category: 'Kurtis',
         sizes: ['S', 'M', 'L', 'XL', 'XXL'],
         fabric: 'Pure Mulmul Silk',
         origin: 'Jaipur, Rajasthan',
+        fulfillmentType: 'DARK_STORE',
+        darkStoreHubId: 'hub-indiranagar',
+        tryAndBuyEligible: true,
         image:
           'https://lh3.googleusercontent.com/aida-public/AB6AXuBTs6-ZqrlCWEJVbPDPREz0wpb5KSte4RfbM_CFWtYByj1Qc_k44_GCyF1iH4BGfJnWitJDsFkbG5QdTkr1lWbmeRjm4Sjw1-H24gH-93XY9maRVKsweEwf47isp-cXHwTuC01nyYYwhghENAssQln3RbbqPdr5ZU7vbKVIAZzaBN3nCBPzrEWX99MdjRBISiVH6LhmgYy1UufvPL6FavGOUabgo-pl4fxAqy5IIErLKuy3XyzrqnSLzg',
         altText:
@@ -143,12 +220,15 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
         rating: 4.9,
         reviewsCount: 142,
         stockQuantity: 15,
-        stockBadge: 'In Stock',
+        stockBadge: 'Boutique Artisan',
         readyToShip: true,
         category: 'Sarees',
         sizes: ['Free Size (5.5m + 0.8m)'],
         fabric: 'Fine Cotton Silk',
         origin: 'Varanasi, UP',
+        fulfillmentType: 'VENDOR',
+        darkStoreHubId: null,
+        tryAndBuyEligible: false,
         image:
           'https://lh3.googleusercontent.com/aida-public/AB6AXuBZmXmAng2VIvmt-e5UoQ1MrsXUMl1p1ftqAD3jjKM_YhlObUmOfd_rwaYD9cuGHuKnJVJBq6kagdOAfjiCSzvvDeVpdrAoGZBOD7YgEfEhdUx85DVetiWSmEdkgQISuSVzZXuSiadjUZUFFvsv0XIZp7_tRq9rvE-Exol7J2LYupakSoB-rwJjs7Y3evVbNoXHjav-QXpye1FUGXeKzjdjw_34arHkcmA3NY6gd6xMd-6DRSq6M5oNfw',
         altText:
@@ -169,16 +249,47 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
         rating: 4.7,
         reviewsCount: 76,
         stockQuantity: 8,
-        stockBadge: 'In Stock',
+        stockBadge: '20m Delivery',
         readyToShip: true,
         category: 'Dresses',
         sizes: ['S', 'M', 'L', 'XL'],
         fabric: 'Premium Rayon Weave',
         origin: 'Sanganer, Jaipur',
+        fulfillmentType: 'DARK_STORE',
+        darkStoreHubId: 'hub-koramangala',
+        tryAndBuyEligible: true,
         image:
           'https://lh3.googleusercontent.com/aida-public/AB6AXuChjjRPXtK6wGlAzoX8MBkuhS5YQslHvyJa70gSCTmiApO-Lv00JijbP2efRpHEXOYf7Sb03MXrwmH90rYSHdWR_oiv_PNVMCQPGogU99bT_moi70avCMo2utLRF3l_PH6o7WaUE_ndCaN1oW4g9nWiFuH3yLqZDFknFOazu7KzBYjldvcFKSVuQDqubPby_0bCn0qmp1p5scLFl83Y1KDLoHjsLtaL4FCmrZV4k7E3Zx-u5XYrt3g3KQ',
         altText:
           'Flowing tiered maxi dress with delicate floral motifs in blush pink and rose berry tones.',
+        galleryImages: [],
+      },
+      {
+        id: 'prod-4',
+        vendorId: 'vend-1',
+        categoryId: 'kurtis',
+        brand: 'Avanya DarkStore Curated',
+        title: 'Chanderi Silk Festive Kurti',
+        description:
+          '18-Minute Try & Buy Dark Store Express. Pure Chanderi woven with gota patti detailing.',
+        price: 1599,
+        originalPrice: 2899,
+        discount: '45% OFF',
+        rating: 4.9,
+        reviewsCount: 112,
+        stockQuantity: 12,
+        stockBadge: '18m Delivery',
+        readyToShip: true,
+        category: 'Kurtis',
+        sizes: ['S', 'M', 'L', 'XL'],
+        fabric: 'Chanderi Silk',
+        origin: 'Madhya Pradesh',
+        fulfillmentType: 'DARK_STORE',
+        darkStoreHubId: 'hub-indiranagar',
+        tryAndBuyEligible: true,
+        image:
+          'https://images.unsplash.com/photo-1583391733956-3750e0ff4e8b?auto=format&fit=crop&w=800&q=80',
+        altText: 'Chanderi Silk Festive Kurti',
         galleryImages: [],
       },
     ],
@@ -210,6 +321,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
         userId: 'usr-1',
         productId: 'prod-1',
         size: 'Size M',
+        trialSize: 'Size L' as string | undefined,
         quantity: 1,
       },
     ],
@@ -231,6 +343,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
         taxes: 65,
         grandTotal: 1404,
         etaMinutes: 12,
+        isTryAndBuy: true,
+        couponCode: 'AFFORDZ10',
+        discountAmount: 129.9,
         createdAt: new Date('2026-09-24T14:15:00Z').toISOString(),
         updatedAt: new Date('2026-09-24T14:55:00Z').toISOString(),
         items: [
@@ -240,6 +355,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
             title: 'Embroidered Anarkali Kurta Set',
             brand: 'Avanya Ethnic',
             size: 'Size M',
+            trialSize: 'Size L',
             price: 1299,
             quantity: 1,
             image:
@@ -282,8 +398,27 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     ],
   };
 
-  async onModuleInit() {}
-  async onModuleDestroy() {}
+  async onModuleInit() {
+    if (process.env.DATABASE_URL && process.env.APP_ENV === 'production') {
+      try {
+        await this.$connect();
+        this.isConnectedToDb = true;
+        this.logger.log('PrismaService: Successfully connected to PostgreSQL database.');
+      } catch (err: any) {
+        this.logger.warn(
+          `PrismaService: PostgreSQL connection failed (${err.message}). Operating with validated fallback store.`,
+        );
+      }
+    } else {
+      this.logger.log('PrismaService: Running in hybrid demo mode with authoritative in-memory store.');
+    }
+  }
+
+  async onModuleDestroy() {
+    if (this.isConnectedToDb) {
+      await this.$disconnect();
+    }
+  }
 
   getStore() {
     return this.store;

@@ -10,6 +10,10 @@ export class AddCartItemDto {
   size?: string;
 
   @IsOptional()
+  @IsString()
+  trialSize?: string;
+
+  @IsOptional()
   @IsInt()
   @Min(1, { message: 'Quantity must be at least 1' })
   quantity?: number;

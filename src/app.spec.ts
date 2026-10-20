@@ -1,3 +1,20 @@
+jest.mock('firebase-admin/app', () => ({
+  initializeApp: jest.fn(),
+  getApps: jest.fn(() => []),
+  cert: jest.fn(),
+}));
+
+jest.mock('firebase-admin/auth', () => ({
+  getAuth: jest.fn(() => ({
+    verifyIdToken: jest.fn(async () => ({
+      uid: 'fb-user-123',
+      phone_number: '+91 98450 12890',
+      email: 'customer@affordz.in',
+      name: 'Ananya Sharma',
+    })),
+  })),
+}));
+
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { AppModule } from './app.module';
@@ -15,7 +32,7 @@ import { SupportService } from './modules/support/support.service';
 import { PrismaService } from './prisma/prisma.service';
 import { Role } from './common/enums/role.enum';
 
-describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & State Machine', () => {
+describe('Affordz Backend — Customer & Driver Apps Full Business Logic & State Machine', () => {
   let authService: AuthService;
   let usersService: UsersService;
   let catalogService: CatalogService;
@@ -59,6 +76,15 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
       expect(verifyRes.role).toBe(Role.CUSTOMER);
       expect(verifyRes.user.name).toBe('Ananya Sharma');
       expect(verifyRes.token).toBeDefined();
+    });
+
+    it('Customer Auth: logs in via Firebase ID token and returns authenticated JWT session', async () => {
+      const fbRes = await authService.loginFirebase('mock-firebase-id-token-xyz');
+      expect(fbRes.success).toBe(true);
+      expect(fbRes.role).toBe(Role.CUSTOMER);
+      expect(fbRes.token).toBeDefined();
+      expect(fbRes.token.split('.').length).toBe(3);
+      expect(fbRes.user.phone).toBe('+91 98450 12890');
     });
 
     it('Driver Auth: identifies delivery partner by phone and returns driver profile', async () => {
@@ -111,11 +137,50 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
       expect(sorted[0].price).toBeLessThanOrEqual(sorted[sorted.length - 1].price);
     });
 
-    it('Catalog: fetches single product with vendor details', async () => {
+    it('Catalog: fetches single product with vendor details and dark store hub', async () => {
       const product = await catalogService.getProductById('prod-1');
       expect(product.title).toContain('Anarkali');
       expect(product.vendor).toBeDefined();
       expect(product.vendor?.storeName).toBe('Avanya Ethnic Boutique');
+      expect(product.darkStoreHub).toBeDefined();
+      expect(product.darkStoreHub?.deliveryMinutes).toBe(18);
+    });
+
+    it('Catalog: lists active Dark Store express fulfillment hubs', async () => {
+      const hubs = await catalogService.getDarkStores();
+      expect(hubs.length).toBe(4);
+      expect(hubs.find((h) => h.locality === 'Indiranagar')).toBeDefined();
+      expect(hubs.find((h) => h.locality === 'Koramangala')).toBeDefined();
+    });
+
+    it('Catalog: filters by fulfillmentType (DARK_STORE vs VENDOR)', async () => {
+      const darkStoreProducts = await catalogService.getProducts({ fulfillmentType: 'DARK_STORE' });
+      expect(darkStoreProducts.length).toBeGreaterThan(0);
+      expect(darkStoreProducts.every((p: any) => p.fulfillmentType === 'DARK_STORE')).toBe(true);
+
+      const vendorProducts = await catalogService.getProducts({ fulfillmentType: 'VENDOR' });
+      expect(vendorProducts.length).toBeGreaterThan(0);
+      expect(vendorProducts.every((p: any) => p.fulfillmentType === 'VENDOR')).toBe(true);
+    });
+
+    it('Catalog: retrieves active coupons for customer checkout', async () => {
+      const coupons = await catalogService.getActiveCoupons();
+      expect(coupons.length).toBeGreaterThanOrEqual(2);
+      expect(coupons.find((c) => c.code === 'AFFORDZ10')).toBeDefined();
+      expect(coupons.find((c) => c.code === 'FIRSTDROP')).toBeDefined();
+    });
+
+    it('Catalog: calculates product counts and filters by price and pagination', async () => {
+      const categories = await catalogService.getCategories();
+      const kurtiCat = categories.find((c) => c.id === 'kurtis');
+      expect(kurtiCat?.productCount).toBeGreaterThanOrEqual(1);
+      expect(kurtiCat?.countText).toContain('styles');
+
+      const cheapProducts = await catalogService.getProducts({ maxPrice: 1500 });
+      expect(cheapProducts.every((p) => p.price <= 1500)).toBe(true);
+
+      const paged = await catalogService.getProducts({ page: 1, limit: 1 });
+      expect(paged.length).toBe(1);
     });
   });
 
@@ -171,6 +236,27 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
       expect(cart.items.length).toBe(1);
       expect(cart.items[0].productId).toBe('prod-2');
     });
+
+    it('Cart: applies coupon and calculates authoritative discount and free delivery above ₹1,499', async () => {
+      await cartService.clearCart('usr-1');
+      // Add items totaling >= 1499
+      await cartService.addItem('usr-1', 'prod-1', 'Size M', 2); // 1299 * 2 = 2598
+      let cart = await cartService.getCart('usr-1');
+      expect(cart.itemTotal).toBe(2598);
+      expect(cart.deliveryFee).toBe(0); // Free above 1499
+
+      // Apply AFFORDZ10 (10% discount, max 300)
+      const couponRes = await cartService.applyCoupon('usr-1', 'AFFORDZ10');
+      expect(couponRes.coupon).toBeDefined();
+      expect(couponRes.coupon.code).toBe('AFFORDZ10');
+      expect(couponRes.discountAmount).toBe(260); // 10% of 2598 = 260
+      expect(couponRes.grandTotal).toBe(2598 - 260 + 0 + Math.round(2598 * 0.05));
+
+      // Remove coupon
+      const removed = await cartService.removeCoupon('usr-1');
+      expect(removed.coupon).toBeNull();
+      expect(removed.discountAmount).toBe(0);
+    });
   });
 
   describe('6. Orders, Checkout & Live Tracking', () => {
@@ -190,7 +276,7 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
       });
 
       expect(order.status).toBe('PLACED');
-      expect(order.orderNumber).toMatch(/^KC-\d+/);
+      expect(order.orderNumber).toMatch(/^AF-\d+/);
       expect(order.items.length).toBe(1);
       expect(order.items[0].quantity).toBe(2);
 
@@ -229,6 +315,34 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
       expect(tracking.driver).toBeDefined();
       expect(tracking.driver?.name).toBe('Rajesh Kumar');
       expect(tracking.driver?.currentLocation).toBeDefined();
+    });
+
+    it('Checkout: supports Try & Buy flow and verifies payment transitioning order to ACCEPTED', async () => {
+      await cartService.clearCart('usr-1');
+      await cartService.addItem('usr-1', 'prod-1', 'M', 1, 'L'); // with trialSize L
+
+      const order = await ordersService.checkout('usr-1', {
+        addressId: 'addr-1',
+        paymentMethod: 'RAZORPAY',
+        isTryAndBuy: true,
+      });
+
+      expect(order.isTryAndBuy).toBe(true);
+      expect(order.items[0].trialSize).toBe('L');
+      expect(order.status).toBe('PLACED');
+
+      // Verify payment
+      const verifyRes = await ordersService.verifyPayment(
+        order.id,
+        'pay_test_trybuy_123',
+        'sig_abc',
+      );
+      expect(verifyRes.verified).toBe(true);
+      expect(verifyRes.orderStatus).toBe('ACCEPTED');
+
+      const updatedOrder = await ordersService.getOrderById(order.id);
+      expect(updatedOrder.status).toBe('ACCEPTED');
+      expect(updatedOrder.paymentStatus).toBe('COMPLETED');
     });
   });
 

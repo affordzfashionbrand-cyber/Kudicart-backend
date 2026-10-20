@@ -13,6 +13,7 @@ import {
 import { CartService } from './cart.service';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
+import { ApplyCouponDto } from './dto/apply-coupon.dto';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
@@ -32,7 +33,13 @@ export class CartController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: AddCartItemDto,
   ) {
-    return this.cartService.addItem(user.id, body.productId, body.size, body.quantity || 1);
+    return this.cartService.addItem(
+      user.id,
+      body.productId,
+      body.size,
+      body.quantity || 1,
+      body.trialSize,
+    );
   }
 
   @Patch('items/:id')
@@ -50,6 +57,21 @@ export class CartController {
     @Param('id') id: string,
   ) {
     return this.cartService.removeItem(user.id, id);
+  }
+
+  @Post('coupons/apply')
+  @HttpCode(HttpStatus.OK)
+  async applyCoupon(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: ApplyCouponDto,
+  ) {
+    return this.cartService.applyCoupon(user.id, body.code);
+  }
+
+  @Delete('coupons/remove')
+  @HttpCode(HttpStatus.OK)
+  async removeCoupon(@CurrentUser() user: AuthenticatedUser) {
+    return this.cartService.removeCoupon(user.id);
   }
 
   @Delete()
