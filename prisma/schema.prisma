@@ -71,6 +71,7 @@ model User {
   reviews      Review[]
   tickets      SupportTicket[]
   vendor       Vendor?
+  driverProfile DriverProfile?
 }
 
 model Address {
@@ -223,6 +224,7 @@ model Order {
   history           OrderStatusHistory[]
   tickets           SupportTicket[]
   reviews           Review[]
+  tryAndBuySession  TryAndBuySession?
 }
 
 model OrderItem {
@@ -273,4 +275,109 @@ model Review {
   rating    Int
   comment   String
   createdAt DateTime @default(now())
+}
+
+model DriverProfile {
+  id                  String           @id @default(uuid())
+  userId              String           @unique
+  user                User             @relation(fields: [userId], references: [id])
+  fullName            String
+  phone               String
+  aadhaarNumber       String?
+  panNumber           String?
+  dob                 String?
+  licenseNumber       String?
+  workPreference      String           @default("PART_TIME")
+  tier                String           @default("Silver Tier")
+  rating              Float            @default(4.9)
+  completedDeliveries Int              @default(0)
+  isOnline            Boolean          @default(false)
+  kycStatus           String           @default("PENDING")
+  rejectionReason     String?
+  vehicleRegistration String?
+  vehicleType         String?
+  vehicleMake         String?
+  vehicleModel        String?
+  rcStatus            String           @default("Under review")
+  rcNumber            String?
+  selfieUrl           String?
+  currentLat          Float?
+  currentLng          Float?
+  currentHeading      Float?
+  documents           DriverDocument[]
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+}
+
+model DriverDocument {
+  id              String        @id @default(uuid())
+  driverId        String
+  driver          DriverProfile @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  type            String
+  side            String
+  fileName        String
+  fileUrl         String
+  fileSize        String?
+  mimeType        String?
+  status          String        @default("PENDING")
+  rejectionReason String?
+  verifiedAt      DateTime?
+  createdAt       DateTime      @default(now())
+}
+
+model DriverSlot {
+  id          String              @id @default(uuid())
+  dateKey     String
+  timeRange   String
+  demand      String              @default("Normal demand")
+  bonusText   String?
+  capacity    Int                 @default(5)
+  isLocked    Boolean             @default(false)
+  bookings    DriverSlotBooking[]
+  createdAt   DateTime            @default(now())
+}
+
+model DriverSlotBooking {
+  id        String     @id @default(uuid())
+  slotId    String
+  slot      DriverSlot @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  driverId  String
+  status    String     @default("BOOKED")
+  bookedAt  DateTime   @default(now())
+
+  @@unique([slotId, driverId])
+}
+
+model DriverNotification {
+  id          String   @id @default(uuid())
+  driverId    String
+  category    String
+  title       String
+  body        String
+  read        Boolean  @default(false)
+  amount      String?
+  actionRoute String?
+  actionLabel String?
+  createdAt   DateTime @default(now())
+}
+
+model TryAndBuySession {
+  id                         String    @id @default(uuid())
+  orderId                    String    @unique
+  order                      Order     @relation(fields: [orderId], references: [id])
+  driverId                   String
+  stage                      String    @default("HANDOVER_PENDING")
+  trialDurationMinutes       Int       @default(20)
+  handoverConfirmedAt        DateTime?
+  trialStartedAt             DateTime?
+  trialEndsAt                DateTime?
+  finalPayableTotal          Float?
+  refundAmount               Float?
+  amountDue                  Float?
+  paymentStatus              String?
+  returnManifestId           String?
+  storeReconciliationStatus String?
+  storeReconciledAt          DateTime?
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
 }

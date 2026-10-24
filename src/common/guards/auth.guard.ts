@@ -13,8 +13,17 @@ export class FirebaseAuthGuard implements CanActivate {
       if (isProduction) {
         throw new UnauthorizedException('Authorization header in Bearer token format is required');
       }
-      // For local testing/demo convenience if header not supplied, default to customer
-      request.user = this.getDefaultCustomer();
+      // For local testing/demo convenience if header not supplied, check route context
+      const reqUrl = request.originalUrl || request.url || '';
+      if (reqUrl.includes('/driver')) {
+        request.user = this.getDefaultDriver();
+      } else if (reqUrl.includes('/admin')) {
+        request.user = this.getDefaultAdmin();
+      } else if (reqUrl.includes('/vendor')) {
+        request.user = this.getDefaultVendor();
+      } else {
+        request.user = this.getDefaultCustomer();
+      }
       return true;
     }
 

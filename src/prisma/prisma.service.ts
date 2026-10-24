@@ -1,5 +1,14 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import {
+  INITIAL_DARK_STORES,
+  INITIAL_DRIVERS,
+  INITIAL_SHIFTS,
+  INITIAL_SLOTS,
+  INITIAL_SURGES,
+  INITIAL_NOTIFICATIONS,
+} from './initial-data';
+import { INITIAL_EARNINGS_WEEKS } from './initial-earnings';
 
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
@@ -52,75 +61,14 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         createdAt: new Date('2026-01-01T00:00:00Z').toISOString(),
       },
     ],
-    drivers: [
-      {
-        id: 'drv-1',
-        userId: 'usr-driver-1',
-        name: 'Rajesh Kumar',
-        phone: '+91 98765 43210',
-        email: 'rajesh.driver@kudicart.in',
-        photo:
-          'https://lh3.googleusercontent.com/aida-public/AB6AXuB-9n0OJClXNM6d0TX37sDPYy2u14Q2urWrIDrGrcsqp-xeOqvJWO4kLCkJM2p4l8e4m4L2wDCHqTawwJ4RiTjZPrGzg0jToIbTJpMggV8VY-XM8NL1FIq9KmGLwPNEJ_9rmCB4K-W2qmOS5AXnWOrQVPZSlvSNve7Z3L9QAVxRKy5jXEY_LUYbxNPc7m3PZ877qBOS_WWQ8dabL-BBYfbKqFLHaaegb80kVZpY-Z_FPvHZPdgyE2SFDA',
-        vehicle: 'KA 03 EV 4821 (Electric Scooter)',
-        isOnline: true,
-        kycStatus: 'APPROVED',
-        kycDocuments: [
-          { type: 'Aadhaar Card', status: 'VERIFIED', verifiedAt: '2026-01-11T12:00:00Z' },
-          { type: 'Driving License', number: 'DL-04202209418', status: 'VERIFIED', verifiedAt: '2026-01-11T12:00:00Z' },
-          { type: 'Vehicle RC', number: 'KA03EV4821', status: 'VERIFIED', verifiedAt: '2026-01-11T12:00:00Z' },
-        ],
-        rating: 4.9,
-        completedDeliveries: 428,
-        currentLocation: {
-          latitude: 12.9716,
-          longitude: 77.5946,
-          heading: 45,
-          updatedAt: new Date().toISOString(),
-        },
-      },
-    ],
-    darkStores: [
-      {
-        id: 'hub-indiranagar',
-        name: 'Indiranagar Express Hub',
-        locality: 'Indiranagar',
-        address: '100ft Road, HAL 2nd Stage, Indiranagar, Bengaluru 560038',
-        lat: 12.9716,
-        lng: 77.6412,
-        deliveryMinutes: 18,
-        isActive: true,
-      },
-      {
-        id: 'hub-koramangala',
-        name: 'Koramangala Fashion Vault',
-        locality: 'Koramangala',
-        address: '80 Feet Road, 4th Block, Koramangala, Bengaluru 560034',
-        lat: 12.9352,
-        lng: 77.6245,
-        deliveryMinutes: 20,
-        isActive: true,
-      },
-      {
-        id: 'hub-lavelle',
-        name: 'Lavelle Concierge Hub',
-        locality: 'Lavelle Road',
-        address: 'Lavelle Road, Shantala Nagar, Ashok Nagar, Bengaluru 560001',
-        lat: 12.9719,
-        lng: 77.5997,
-        deliveryMinutes: 15,
-        isActive: true,
-      },
-      {
-        id: 'hub-whitefield',
-        name: 'Whitefield Prestige Hub',
-        locality: 'Whitefield',
-        address: 'ITPL Main Road, Whitefield, Bengaluru 560066',
-        lat: 12.9698,
-        lng: 77.75,
-        deliveryMinutes: 25,
-        isActive: true,
-      },
-    ],
+    drivers: JSON.parse(JSON.stringify(INITIAL_DRIVERS)),
+    shifts: JSON.parse(JSON.stringify(INITIAL_SHIFTS)),
+    slots: JSON.parse(JSON.stringify(INITIAL_SLOTS)),
+    earningsWeeks: JSON.parse(JSON.stringify(INITIAL_EARNINGS_WEEKS)),
+    surges: JSON.parse(JSON.stringify(INITIAL_SURGES)),
+    notifications: JSON.parse(JSON.stringify(INITIAL_NOTIFICATIONS)),
+    tryAndBuySessions: [] as any[],
+    darkStores: JSON.parse(JSON.stringify(INITIAL_DARK_STORES)),
     vendors: [
       {
         id: 'vend-1',
@@ -203,7 +151,6 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
           'Editorial studio photo of a female model wearing an opulent deep berry-red Anarkali kurta set with golden zari embroidery.',
         galleryImages: [
           'https://lh3.googleusercontent.com/aida-public/AB6AXuBTs6-ZqrlCWEJVbPDPREz0wpb5KSte4RfbM_CFWtYByj1Qc_k44_GCyF1iH4BGfJnWitJDsFkbG5QdTkr1lWbmeRjm4Sjw1-H24gH-93XY9maRVKsweEwf47isp-cXHwTuC01nyYYwhghENAssQln3RbbqPdr5ZU7vbKVIAZzaBN3nCBPzrEWX99MdjRBISiVH6LhmgYy1UufvPL6FavGOUabgo-pl4fxAqy5IIErLKuy3XyzrqnSLzg',
-          'https://lh3.googleusercontent.com/aida-public/AB6AXuD59d0OJClXNM6d0TX37sDPYy2u14Q2urWrIDrGrcsqp-xeOqvJWO4kLCkJM2p4l8e4m4L2wDCHqTawwJ4RiTjZPrGzg0jToIbTJpMggV8VY-XM8NL1FIq9KmGLwPNEJ_9rmCB4K-W2qmOS5AXnWOrQVPZSlvSNve7Z3L9QAVxRKy5jXEY_LUYbxNPc7m3PZ877qBOS_WWQ8dabL-BBYfbKqFLHaaegb80kVZpY-Z_FPvHZPdgyE2SFDA',
         ],
       },
       {
@@ -358,6 +305,8 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
             trialSize: 'Size L',
             price: 1299,
             quantity: 1,
+            decision: 'KEEP',
+            collected: true,
             image:
               'https://lh3.googleusercontent.com/aida-public/AB6AXuBTs6-ZqrlCWEJVbPDPREz0wpb5KSte4RfbM_CFWtYByj1Qc_k44_GCyF1iH4BGfJnWitJDsFkbG5QdTkr1lWbmeRjm4Sjw1-H24gH-93XY9maRVKsweEwf47isp-cXHwTuC01nyYYwhghENAssQln3RbbqPdr5ZU7vbKVIAZzaBN3nCBPzrEWX99MdjRBISiVH6LhmgYy1UufvPL6FavGOUabgo-pl4fxAqy5IIErLKuy3XyzrqnSLzg',
           },
@@ -367,7 +316,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
           { status: 'ACCEPTED', time: '2:17 PM', note: 'Vendor accepted order', actor: 'VENDOR' },
           { status: 'PREPARING', time: '2:25 PM', note: 'Quality check & gift packaging', actor: 'VENDOR' },
           { status: 'READY_FOR_PICKUP', time: '2:40 PM', note: 'Ready at store counter', actor: 'VENDOR' },
-          { status: 'ASSIGNED', time: '2:42 PM', note: 'Admin assigned rider Rajesh Kumar', actor: 'ADMIN' },
+          { status: 'ASSIGNED', time: '2:42 PM', note: 'Admin assigned rider Rahul Sharma', actor: 'ADMIN' },
           { status: 'PICKED_UP', time: '2:50 PM', note: 'Picked up from vendor', actor: 'DRIVER' },
           { status: 'OUT_FOR_DELIVERY', time: '2:55 PM', note: 'Out for express delivery', actor: 'DRIVER' },
         ],
@@ -410,7 +359,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         );
       }
     } else {
-      this.logger.log('PrismaService: Running in hybrid demo mode with authoritative in-memory store.');
+      this.logger.log('PrismaService: Running in hybrid mode with authoritative in-memory store.');
     }
   }
 

@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaService } from './prisma/prisma.service';
+import { PrismaModule } from './prisma/prisma.module';
 import { AuthController } from './modules/auth/auth.controller';
 import { AuthService } from './modules/auth/auth.service';
 import { FirebaseAdminService } from './modules/auth/firebase-admin.service';
@@ -14,17 +14,16 @@ import { AddressService } from './modules/address/address.service';
 import { OrdersController } from './modules/orders/orders.controller';
 import { OrdersService } from './modules/orders/orders.service';
 import { StateMachineService } from './modules/orders/state-machine.service';
-import { DriverController } from './modules/driver/driver.controller';
-import { DriverService } from './modules/driver/driver.service';
 import { PaymentsController } from './modules/payments/payments.controller';
 import { PaymentsService } from './modules/payments/payments.service';
 import { ReviewsController } from './modules/reviews/reviews.controller';
 import { ReviewsService } from './modules/reviews/reviews.service';
 import { SupportController } from './modules/support/support.controller';
 import { SupportService } from './modules/support/support.service';
+import { DriverModule } from './modules/driver/driver.module';
 
 @Module({
-  imports: [],
+  imports: [PrismaModule, DriverModule],
   controllers: [
     AuthController,
     UsersController,
@@ -32,13 +31,11 @@ import { SupportService } from './modules/support/support.service';
     CartController,
     AddressController,
     OrdersController,
-    DriverController,
     PaymentsController,
     ReviewsController,
     SupportController,
   ],
   providers: [
-    PrismaService,
     FirebaseAdminService,
     AuthService,
     UsersService,
@@ -47,11 +44,10 @@ import { SupportService } from './modules/support/support.service';
     AddressService,
     OrdersService,
     StateMachineService,
-    DriverService,
     PaymentsService,
     ReviewsService,
     SupportService,
   ],
-  exports: [PrismaService, StateMachineService],
+  exports: [PrismaModule, StateMachineService, DriverModule],
 })
 export class AppModule {}
