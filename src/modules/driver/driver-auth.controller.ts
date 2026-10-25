@@ -26,7 +26,7 @@ export class DriverAuthController {
   async sendOtp(@Body() dto: DriverSendOtpDto) {
     const raw = dto.phoneNumber || dto.phone;
     if (!raw) {
-      throw new BadRequestException('Enter a valid mobile number');
+      throw new BadRequestException('Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.');
     }
     return this.authService.sendOtp(raw);
   }
@@ -44,7 +44,7 @@ export class DriverAuthController {
   async verifyOtp(@Body() dto: DriverVerifyOtpDto) {
     const raw = dto.phoneNumber || dto.phone;
     if (!raw) {
-      throw new BadRequestException('Enter a valid mobile number');
+      throw new BadRequestException('Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.');
     }
     return this.authService.verifyOtp(raw, dto.otp);
   }

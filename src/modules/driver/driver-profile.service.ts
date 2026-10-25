@@ -82,10 +82,41 @@ export class DriverProfileService {
     }
 
     if (dto.phone) driver.phone = dto.phone;
-    if (dto.aadhaarNumber) driver.aadhaarNumber = dto.aadhaarNumber;
-    if (dto.panNumber) driver.panNumber = dto.panNumber.toUpperCase();
-    if (dto.dob) driver.dob = dto.dob;
-    if (dto.licenseNumber) driver.licenseNumber = dto.licenseNumber;
+    if (dto.aadhaarNumber) {
+      const cleanAadhaar = dto.aadhaarNumber.replace(/\s/g, '');
+      if (cleanAadhaar.length !== 12 || /^([0-9])\1{11}$/.test(cleanAadhaar)) {
+        throw new BadRequestException('Aadhaar number must contain 12 valid digits');
+      }
+      driver.aadhaarNumber = cleanAadhaar;
+    }
+    if (dto.panNumber) driver.panNumber = dto.panNumber.toUpperCase().trim();
+    if (dto.dob) {
+      const parts = dto.dob.trim().split('/');
+      if (parts.length === 3) {
+        const day = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10) - 1;
+        const year = parseInt(parts[2], 10);
+        const birthDate = new Date(year, month, day);
+        const now = new Date();
+        if (
+          isNaN(birthDate.getTime()) ||
+          birthDate.getDate() !== day ||
+          birthDate.getMonth() !== month ||
+          birthDate.getFullYear() !== year
+        ) {
+          throw new BadRequestException('Invalid date of birth');
+        }
+        if (birthDate > now) {
+          throw new BadRequestException('Date of birth cannot be in the future');
+        }
+        const ageYears = (now.getTime() - birthDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+        if (ageYears < 18) {
+          throw new BadRequestException('Driver must be at least 18 years old');
+        }
+      }
+      driver.dob = dto.dob.trim();
+    }
+    if (dto.licenseNumber) driver.licenseNumber = dto.licenseNumber.trim();
     if (dto.workPreference) driver.workPreference = dto.workPreference as any;
     if (dto.photo) driver.photo = dto.photo;
     if (dto.name) driver.name = dto.name;
@@ -177,13 +208,12 @@ export class DriverProfileService {
   async submitKyc(driverId: string | undefined) {
     const driver = this.resolveDriver(driverId);
 
-    // Ensure documents exist
+    // Ensure documents exist (PAN card only has a front face; Aadhaar, DL, and RC require both sides)
     const docs = driver.documents;
     const isComplete = Boolean(
       docs?.aadhaar?.front &&
         docs?.aadhaar?.back &&
         docs?.pan?.front &&
-        docs?.pan?.back &&
         docs?.drivingLicence?.front &&
         docs?.drivingLicence?.back &&
         docs?.vehicleRc?.front &&
@@ -193,7 +223,7 @@ export class DriverProfileService {
 
     if (!isComplete) {
       throw new BadRequestException(
-        'All required documents (Aadhaar, PAN, DL, RC, Selfie) must be uploaded before submitting KYC.',
+        'All required documents (Aadhaar front & back, PAN front, DL front & back, RC front & back, Selfie) must be uploaded before submitting KYC.',
       );
     }
 

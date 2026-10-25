@@ -37,8 +37,8 @@ async function bootstrap() {
   );
 
   const port = process.env.PORT || 3001;
-  await app.listen(port);
-  logger.log(`Affordz Backend REST API running on http://localhost:${port}`);
+  await app.listen(port, '0.0.0.0');
+  logger.log(`Affordz Backend REST API running on http://0.0.0.0:${port}`);
   logger.log(`Customer & Driver App APIs initialized with strict validation & RBAC`);
 }
 bootstrap();

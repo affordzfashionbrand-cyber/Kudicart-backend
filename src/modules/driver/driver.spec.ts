@@ -16,7 +16,7 @@ jest.mock('firebase-admin/auth', () => ({
 }));
 
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, ForbiddenException, ConflictException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, ConflictException, UnauthorizedException, HttpException } from '@nestjs/common';
 import { AppModule } from '../../app.module';
 import { DriverAuthService } from './driver-auth.service';
 import { DriverProfileService } from './driver-profile.service';
@@ -59,20 +59,66 @@ describe('KudiCart Driver Partner Backend — Complete Domain & Security Test Su
     it('generates secure 6-digit OTP and verifies valid code', async () => {
       const sendRes = await authService.sendOtp('+91 98765 43210');
       expect(sendRes.success).toBe(true);
-      expect(sendRes.message).toContain('OTP sent successfully');
+      expect(sendRes.message).toMatch(/(OTP sent successfully|Verification OTP generated)/);
 
-      const verifyRes = await authService.verifyOtp('+91 98765 43210', '123456');
+      const otpCode = authService.getOtpForTesting('+91 98765 43210')!;
+      expect(otpCode).toMatch(/^\d{6}$/);
+
+      const verifyRes = await authService.verifyOtp('+91 98765 43210', otpCode);
       expect(verifyRes.token).toBeDefined();
       expect(verifyRes.role).toBe(Role.DRIVER);
       expect(verifyRes.user.driverId).toBe('drv-1');
     });
 
+    it('blocks getOtpForTesting in production environment', () => {
+      const originalEnv = process.env.NODE_ENV;
+      try {
+        process.env.NODE_ENV = 'production';
+        expect(() => authService.getOtpForTesting('9876543210')).toThrow(UnauthorizedException);
+      } finally {
+        process.env.NODE_ENV = originalEnv;
+      }
+    });
+
+    it('enforces both per-phone and per-IP rate limiting', () => {
+      RateLimitGuard.resetAll();
+      const reflector = new Reflector();
+      const guard = new RateLimitGuard(reflector);
+
+      // Mock reflector returning limit of 2 requests per 60 seconds
+      jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue({ points: 2, duration: 60 });
+
+      const createMockContext = (ip: string, phone?: string) =>
+        ({
+          getHandler: () => ({ name: 'sendOtp' }),
+          getClass: () => ({ name: 'DriverAuthController' }),
+          switchToHttp: () => ({
+            getRequest: () => ({
+              headers: { 'x-forwarded-for': ip },
+              body: phone ? { phone } : {},
+            }),
+            getResponse: () => ({ setHeader: jest.fn() }),
+          }),
+        } as any);
+
+      // 1st request from IP 1 with phone 9876543210 -> allowed
+      expect(guard.canActivate(createMockContext('1.2.3.4', '9876543210'))).toBe(true);
+      // 2nd request from IP 1 with phone 9876543210 -> allowed
+      expect(guard.canActivate(createMockContext('1.2.3.4', '9876543210'))).toBe(true);
+      // 3rd request from IP 1 with different phone -> blocked by IP rate limit
+      expect(() => guard.canActivate(createMockContext('1.2.3.4', '9999988888'))).toThrow(HttpException);
+
+      // Request from IP 2 with phone 9876543210 -> blocked by PHONE rate limit
+      expect(() => guard.canActivate(createMockContext('5.6.7.8', '9876543210'))).toThrow(HttpException);
+    });
+
     it('rejects invalid numbers like 1234567890, non-Indian prefixes, and repeated digits', async () => {
-      await expect(authService.sendOtp('1234567890')).rejects.toThrow('Enter a valid mobile number');
-      await expect(authService.sendOtp('+91 1234567890')).rejects.toThrow('Enter a valid mobile number');
-      await expect(authService.sendOtp('+91 5555555555')).rejects.toThrow('Enter a valid mobile number');
-      await expect(authService.sendOtp('+91 9999999999')).rejects.toThrow('Enter a valid mobile number');
-      await expect(authService.sendOtp('9876')).rejects.toThrow('Enter a valid mobile number');
+      const canonicalMsg = 'Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.';
+      await expect(authService.sendOtp('1234567890')).rejects.toThrow(canonicalMsg);
+      await expect(authService.sendOtp('+91 1234567890')).rejects.toThrow(canonicalMsg);
+      await expect(authService.sendOtp('+91 5555555555')).rejects.toThrow(canonicalMsg);
+      await expect(authService.sendOtp('+91 9999999999')).rejects.toThrow(canonicalMsg);
+      await expect(authService.sendOtp('9876')).rejects.toThrow(canonicalMsg);
     });
 
     it('rejects invalid OTP attempts', async () => {
@@ -133,6 +179,28 @@ describe('KudiCart Driver Partner Backend — Complete Domain & Security Test Su
       await expect(profileService.updateAvailability('drv-1', true)).rejects.toThrow(
         ForbiddenException,
       );
+    });
+
+    it('requires PAN front side for KYC submission and does not mandate non-existent PAN back', async () => {
+      const store = prismaService.getStore();
+      const driver = store.drivers.find((d) => d.id === 'drv-1')!;
+
+      // Complete docs with PAN front only (no PAN back)
+      driver.documents = {
+        aadhaar: { front: { uri: 'a1.jpg' } as any, back: { uri: 'a2.jpg' } as any, status: 'PENDING' },
+        pan: { front: { uri: 'pan_front.jpg' } as any, back: null, status: 'PENDING' },
+        drivingLicence: { front: { uri: 'dl1.jpg' } as any, back: { uri: 'dl2.jpg' } as any, status: 'PENDING' },
+        vehicleRc: { front: { uri: 'rc1.jpg' } as any, back: { uri: 'rc2.jpg' } as any, status: 'PENDING' },
+        selfie: { uri: 'selfie.jpg' } as any,
+      };
+
+      const res = await profileService.submitKyc('drv-1');
+      expect(res.success).toBe(true);
+      expect(res.kycStatus).toBe('PENDING');
+
+      // Removing PAN front causes rejection
+      driver.documents.pan.front = null;
+      await expect(profileService.submitKyc('drv-1')).rejects.toThrow(BadRequestException);
     });
   });
 
