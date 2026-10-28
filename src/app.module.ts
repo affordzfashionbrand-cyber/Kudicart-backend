@@ -21,9 +21,10 @@ import { ReviewsService } from './modules/reviews/reviews.service';
 import { SupportController } from './modules/support/support.controller';
 import { SupportService } from './modules/support/support.service';
 import { DriverModule } from './modules/driver/driver.module';
+import { AdminModule } from './modules/admin/admin.module';
 
 @Module({
-  imports: [PrismaModule, DriverModule],
+  imports: [PrismaModule, DriverModule, AdminModule],
   controllers: [
     AuthController,
     UsersController,
@@ -48,6 +49,6 @@ import { DriverModule } from './modules/driver/driver.module';
     ReviewsService,
     SupportService,
   ],
-  exports: [PrismaModule, StateMachineService, DriverModule],
+  exports: [PrismaModule, StateMachineService, DriverModule, AdminModule],
 })
 export class AppModule {}

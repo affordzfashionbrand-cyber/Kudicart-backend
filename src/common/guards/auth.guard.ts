@@ -18,7 +18,8 @@ export class FirebaseAuthGuard implements CanActivate {
       if (reqUrl.includes('/driver')) {
         request.user = this.getDefaultDriver();
       } else if (reqUrl.includes('/admin')) {
-        request.user = this.getDefaultAdmin();
+        // Unauthenticated access to admin endpoints is denied
+        throw new UnauthorizedException('Authorization header in Bearer token format is required for administrative operations');
       } else if (reqUrl.includes('/vendor')) {
         request.user = this.getDefaultVendor();
       } else {
@@ -81,6 +82,36 @@ export class FirebaseAuthGuard implements CanActivate {
       }
     }
 
+    // Check token expiration for all JWTs if exp claim exists
+    if (token.includes('.')) {
+      try {
+        const parts = token.split('.');
+        if (parts.length === 3) {
+          const payloadJson = Buffer.from(parts[1], 'base64').toString('utf-8');
+          const payload = JSON.parse(payloadJson);
+          if (payload.exp && Math.floor(Date.now() / 1000) >= payload.exp) {
+            throw new UnauthorizedException('Authentication token has expired');
+          }
+          request.user = {
+            id: payload.uid || payload.sub || 'usr-1',
+            firebaseUid: payload.uid || payload.sub || 'fb-user-123',
+            phone: payload.phone_number || payload.phone || '+91 98450 12890',
+            email: payload.email || 'customer@kudicart.in',
+            name: payload.name || 'Ananya Sharma',
+            role: payload.role || Role.CUSTOMER,
+            driverId: payload.role === Role.DRIVER ? (payload.driverId || 'drv-1') : undefined,
+            vendorId: payload.role === Role.VENDOR ? (payload.vendorId || 'vend-1') : undefined,
+          };
+          return true;
+        }
+      } catch (err) {
+        if (err instanceof UnauthorizedException) {
+          throw err;
+        }
+        // Fallback to customer if decode fails
+      }
+    }
+
     // Check for role-specific testing/demo tokens in non-production
     if (token.toLowerCase().includes('driver')) {
       request.user = this.getDefaultDriver();
@@ -95,30 +126,6 @@ export class FirebaseAuthGuard implements CanActivate {
     if (token.toLowerCase().includes('vendor')) {
       request.user = this.getDefaultVendor();
       return true;
-    }
-
-    // Non-production decode attempt
-    if (token.includes('.')) {
-      try {
-        const parts = token.split('.');
-        if (parts.length === 3) {
-          const payloadJson = Buffer.from(parts[1], 'base64').toString('utf-8');
-          const payload = JSON.parse(payloadJson);
-          request.user = {
-            id: payload.uid || payload.sub || 'usr-1',
-            firebaseUid: payload.uid || payload.sub || 'fb-user-123',
-            phone: payload.phone_number || '+91 98450 12890',
-            email: payload.email || 'customer@kudicart.in',
-            name: payload.name || 'Ananya Sharma',
-            role: payload.role || Role.CUSTOMER,
-            driverId: payload.role === Role.DRIVER ? (payload.driverId || 'drv-1') : undefined,
-            vendorId: payload.role === Role.VENDOR ? (payload.vendorId || 'vend-1') : undefined,
-          };
-          return true;
-        }
-      } catch {
-        // Fallback to customer if decode fails
-      }
     }
 
     // Default to verified customer for local demo convenience
