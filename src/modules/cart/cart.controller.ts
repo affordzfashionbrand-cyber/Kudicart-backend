@@ -39,6 +39,7 @@ export class CartController {
       body.size,
       body.quantity || 1,
       body.trialSize,
+      body.color,
     );
   }
 

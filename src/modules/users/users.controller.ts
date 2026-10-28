@@ -11,7 +11,7 @@ export class UsersController {
 
   @Get('me')
   async getProfile(@CurrentUser() user: AuthenticatedUser) {
-    return this.usersService.getProfile(user.id);
+    return this.usersService.getProfile(user.id, user);
   }
 
   @Patch('me')
@@ -19,6 +19,6 @@ export class UsersController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: UpdateUserDto,
   ) {
-    return this.usersService.updateProfile(user.id, body);
+    return this.usersService.updateProfile(user.id, body, user);
   }
 }

@@ -17,14 +17,17 @@ export class CartService {
         ? store.darkStores.find((h) => h.id === prod.darkStoreHubId)
         : null;
 
+      const isDark = prod?.fulfillmentType === 'DARK_STORE';
+
       return {
         id: ci.id,
         productId: ci.productId,
         title: prod?.title || 'Affordz Item',
         brand: prod?.brand || 'Avanya Ethnic',
         size: ci.size,
-        trialSize: ci.trialSize || null,
-        isTryAndBuy: Boolean(ci.trialSize || prod?.tryAndBuyEligible),
+        color: (ci as any).color || null,
+        trialSize: isDark ? (ci.trialSize || null) : null,
+        isTryAndBuy: isDark ? Boolean(ci.trialSize || prod?.tryAndBuyEligible) : false,
         fulfillmentType: prod?.fulfillmentType || 'VENDOR',
         darkStoreHub: hub,
         price: prod?.price || 1299,
@@ -90,9 +93,11 @@ export class CartService {
     };
   }
 
-  async addItem(userId: string, productId: string, size?: string, quantity: number = 1, trialSize?: string) {
+  async addItem(userId: string, productId: string, size?: string, quantity: number = 1, trialSize?: string, color?: string) {
     const store = this.prisma.getStore();
-    const product = store.products.find((p) => p.id === productId);
+    const product = store.products.find(
+      (p) => p.id === productId || p.id === `prod-${productId}` || p.id.replace('prod-', '') === productId,
+    );
 
     if (!product) {
       throw new NotFoundException(`Product with ID ${productId} not found`);
@@ -104,8 +109,11 @@ export class CartService {
 
     const itemSize = size || (product.sizes && product.sizes.length > 0 ? product.sizes[0] : 'Free Size');
     const existing = store.cartItems.find(
-      (ci) => ci.userId === userId && ci.productId === productId && ci.size === itemSize,
+      (ci) => ci.userId === userId && (ci.productId === product.id || ci.productId === productId) && ci.size === itemSize,
     );
+
+    const isDark = product.fulfillmentType === 'DARK_STORE';
+    const effectiveTrialSize = isDark ? trialSize : undefined;
 
     if (existing) {
       if (existing.quantity + quantity > product.stockQuantity) {
@@ -114,8 +122,11 @@ export class CartService {
         );
       }
       existing.quantity += quantity;
-      if (trialSize) {
-        existing.trialSize = trialSize;
+      if (effectiveTrialSize) {
+        existing.trialSize = effectiveTrialSize;
+      }
+      if (color) {
+        (existing as any).color = color;
       }
     } else {
       if (quantity > product.stockQuantity) {
@@ -126,11 +137,12 @@ export class CartService {
       store.cartItems.push({
         id: `cart-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         userId,
-        productId,
+        productId: product.id,
         size: itemSize,
-        trialSize,
+        trialSize: effectiveTrialSize,
+        color: color || null,
         quantity,
-      });
+      } as any);
     }
 
     return this.getCart(userId);
@@ -138,10 +150,17 @@ export class CartService {
 
   async updateQuantity(userId: string, id: string, delta: number) {
     const store = this.prisma.getStore();
-    const itemIndex = store.cartItems.findIndex((ci) => ci.id === id && ci.userId === userId);
+    let itemIndex = store.cartItems.findIndex((ci) => ci.id === id && ci.userId === userId);
 
     if (itemIndex === -1) {
-      throw new NotFoundException(`Cart item ${id} not found`);
+      // Fallback matching by productId
+      itemIndex = store.cartItems.findIndex(
+        (ci) => (ci.productId === id || ci.productId === `prod-${id}` || ci.productId.replace('prod-', '') === id) && ci.userId === userId,
+      );
+    }
+
+    if (itemIndex === -1) {
+      return this.getCart(userId);
     }
 
     const item = store.cartItems[itemIndex];
@@ -164,13 +183,19 @@ export class CartService {
 
   async removeItem(userId: string, id: string) {
     const store = this.prisma.getStore();
-    const itemIndex = store.cartItems.findIndex((ci) => ci.id === id && ci.userId === userId);
+    let itemIndex = store.cartItems.findIndex((ci) => ci.id === id && ci.userId === userId);
 
     if (itemIndex === -1) {
-      throw new NotFoundException(`Cart item ${id} not found`);
+      // Fallback matching by productId or normalized id
+      itemIndex = store.cartItems.findIndex(
+        (ci) => (ci.productId === id || ci.productId === `prod-${id}` || ci.productId.replace('prod-', '') === id) && ci.userId === userId,
+      );
     }
 
-    store.cartItems.splice(itemIndex, 1);
+    if (itemIndex !== -1) {
+      store.cartItems.splice(itemIndex, 1);
+    }
+
     return this.getCart(userId);
   }
 

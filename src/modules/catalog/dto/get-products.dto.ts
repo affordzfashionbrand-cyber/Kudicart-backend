@@ -7,6 +7,18 @@ export class GetProductsDto {
 
   @IsOptional()
   @IsString()
+  subCategory?: string;
+
+  @IsOptional()
+  @IsString()
+  subSubCategory?: string;
+
+  @IsOptional()
+  @IsString()
+  gender?: string;
+
+  @IsOptional()
+  @IsString()
   search?: string;
 
   @IsOptional()

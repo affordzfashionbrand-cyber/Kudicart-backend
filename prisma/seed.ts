@@ -139,18 +139,18 @@ async function main() {
   // 5. Categories
   console.log('Seeding Categories...');
   const categories = [
-    { id: 'cat-1', name: 'Atelier Wear', countText: '148 designs', icon: 'Sparkles' },
-    { id: 'cat-2', name: 'Formal Studio', countText: '86 tailored pieces', icon: 'Briefcase' },
-    { id: 'cat-3', name: 'Evening Gala', countText: '62 gowns & kurtas', icon: 'Crown' },
-    { id: 'cat-4', name: 'Casual Luxe', countText: '112 essentials', icon: 'Shirt' },
-    { id: 'cat-5', name: 'Vault Accessories', countText: '44 statement accents', icon: 'Gem' },
-    { id: 'cat-6', name: 'Footwear', countText: '58 handcrafted pairs', icon: 'Footprints' },
+    { id: 'cat-1', name: 'Atelier Wear', slug: 'atelier-wear', level: 1, countText: '148 designs', icon: 'Sparkles' },
+    { id: 'cat-2', name: 'Formal Studio', slug: 'formal-studio', level: 1, countText: '86 tailored pieces', icon: 'Briefcase' },
+    { id: 'cat-3', name: 'Evening Gala', slug: 'evening-gala', level: 1, countText: '62 gowns & kurtas', icon: 'Crown' },
+    { id: 'cat-4', name: 'Casual Luxe', slug: 'casual-luxe', level: 1, countText: '112 essentials', icon: 'Shirt' },
+    { id: 'cat-5', name: 'Vault Accessories', slug: 'vault-accessories', level: 1, countText: '44 statement accents', icon: 'Gem' },
+    { id: 'cat-6', name: 'Footwear', slug: 'footwear-studio', level: 1, countText: '58 handcrafted pairs', icon: 'Footprints' },
   ];
 
   for (const cat of categories) {
     await prisma.category.upsert({
       where: { id: cat.id },
-      update: { name: cat.name, countText: cat.countText, icon: cat.icon },
+      update: { name: cat.name, slug: cat.slug, level: cat.level, countText: cat.countText, icon: cat.icon },
       create: cat,
     });
   }

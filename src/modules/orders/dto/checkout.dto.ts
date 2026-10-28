@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsString, IsIn, IsOptional, IsBoolean } from 'class-validator';
+import { IsNotEmpty, IsString, IsIn, IsOptional, IsBoolean, IsArray, IsNumber } from 'class-validator';
 
 export class CheckoutDto {
   @IsNotEmpty({ message: 'addressId is required' })
@@ -16,4 +16,24 @@ export class CheckoutDto {
   @IsOptional()
   @IsBoolean()
   isTryAndBuy?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  items?: any[];
+
+  @IsOptional()
+  @IsNumber()
+  itemTotal?: number;
+
+  @IsOptional()
+  @IsNumber()
+  deliveryFee?: number;
+
+  @IsOptional()
+  @IsNumber()
+  taxes?: number;
+
+  @IsOptional()
+  @IsNumber()
+  grandTotal?: number;
 }

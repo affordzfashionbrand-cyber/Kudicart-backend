@@ -22,6 +22,7 @@ export class FirebaseAdminService implements OnModuleInit {
     // Try finding service account in standard paths
     const possiblePaths = [
       path.resolve(process.cwd(), 'secrets', 'firebase-service-account.json'),
+      path.resolve(process.cwd(), 'kudicart-backend', 'secrets', 'firebase-service-account.json'),
       path.resolve(process.cwd(), '..', 'kudicart-backend', 'secrets', 'firebase-service-account.json'),
       path.resolve(__dirname, '..', '..', '..', 'secrets', 'firebase-service-account.json'),
     ];

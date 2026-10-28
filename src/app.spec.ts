@@ -137,6 +137,41 @@ describe('Affordz Backend — Customer & Driver Apps Full Business Logic & State
       expect(sorted[0].price).toBeLessThanOrEqual(sorted[sorted.length - 1].price);
     });
 
+    it('Catalog Search: multi-token fuzzy and relevance search engine', async () => {
+      // Multi-token: "mulmul kurti" matches Anarkali Set with Mulmul Silk & Kurti category
+      const multiTokenResults = await catalogService.searchProducts({ search: 'mulmul kurti' });
+      expect(multiTokenResults.length).toBeGreaterThan(0);
+      expect(multiTokenResults[0].title).toContain('Anarkali');
+
+      // Brand search: "Avanya"
+      const brandResults = await catalogService.searchProducts({ search: 'Avanya' });
+      expect(brandResults.length).toBeGreaterThan(0);
+      expect(brandResults.every((p) => p.brand.toLowerCase().includes('avanya'))).toBe(true);
+
+      // Filtered search: "silk" with fulfillmentType "DARK_STORE"
+      const darkStoreSilk = await catalogService.searchProducts({
+        search: 'silk',
+        fulfillmentType: 'DARK_STORE',
+      });
+      expect(darkStoreSilk.every((p) => p.fulfillmentType === 'DARK_STORE')).toBe(true);
+    });
+
+    it('Catalog Suggestions: provides autocompletions, categories, brands, and instant picks', async () => {
+      // 1. With search query "kur"
+      const suggestions = await catalogService.getSearchSuggestions({ q: 'kur' });
+      expect(suggestions.query).toBe('kur');
+      expect(suggestions.suggestions.length).toBeGreaterThan(0);
+      expect(suggestions.suggestions.some((s) => s.text.toLowerCase().includes('kur'))).toBe(true);
+      expect(suggestions.recentPicks.length).toBeGreaterThan(0);
+
+      // 2. Empty query returns trending searches & popular categories
+      const emptySuggestions = await catalogService.getSearchSuggestions();
+      expect(emptySuggestions.trending.length).toBeGreaterThan(0);
+      expect(emptySuggestions.categories.length).toBeGreaterThan(0);
+      expect(emptySuggestions.brands.length).toBeGreaterThan(0);
+      expect(emptySuggestions.recentPicks.length).toBeGreaterThan(0);
+    });
+
     it('Catalog: fetches single product with vendor details and dark store hub', async () => {
       const product = await catalogService.getProductById('prod-1');
       expect(product.title).toContain('Anarkali');
