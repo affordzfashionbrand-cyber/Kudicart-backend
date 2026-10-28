@@ -21,9 +21,12 @@ import { ReviewsService } from './modules/reviews/reviews.service';
 import { SupportController } from './modules/support/support.controller';
 import { SupportService } from './modules/support/support.service';
 import { DriverModule } from './modules/driver/driver.module';
+import { AdminModule } from './modules/admin/admin.module';
+import { HealthModule } from './modules/health/health.module';
+import { PaymentsWebhookController } from './modules/payments/payments-webhook.controller';
 
 @Module({
-  imports: [PrismaModule, DriverModule],
+  imports: [PrismaModule, DriverModule, AdminModule, HealthModule],
   controllers: [
     AuthController,
     UsersController,
@@ -32,6 +35,7 @@ import { DriverModule } from './modules/driver/driver.module';
     AddressController,
     OrdersController,
     PaymentsController,
+    PaymentsWebhookController,
     ReviewsController,
     SupportController,
   ],

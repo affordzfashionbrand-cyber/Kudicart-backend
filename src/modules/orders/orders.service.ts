@@ -311,8 +311,8 @@ export class OrdersService {
     };
   }
 
-  async trackOrder(id: string) {
-    const order = await this.getOrderById(id);
+  async trackOrder(id: string, userId?: string, role?: string) {
+    const order = await this.getOrderById(id, userId, role);
     const store = this.prisma.getStore();
     const milestones = this.stateMachine.getMilestones(order.status as OrderStatus);
 
@@ -534,6 +534,21 @@ export class OrdersService {
     }
 
     this.stateMachine.validateTransition(order.status as OrderStatus, nextStatus, actorRole);
+
+    // If order cancelled, restore reserved inventory stock atomically
+    if (nextStatus === 'CANCELLED' && order.items && order.items.length > 0) {
+      for (const item of order.items) {
+        const prod = store.products.find(
+          (p) =>
+            p.id === item.productId ||
+            p.id === `prod-${item.productId}` ||
+            p.id.replace('prod-', '') === item.productId,
+        );
+        if (prod) {
+          prod.stockQuantity += item.quantity || 1;
+        }
+      }
+    }
 
     order.status = nextStatus;
     order.updatedAt = new Date().toISOString();

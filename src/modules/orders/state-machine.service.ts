@@ -9,28 +9,35 @@ export type OrderStatus =
   | 'ASSIGNED'
   | 'PICKED_UP'
   | 'OUT_FOR_DELIVERY'
-  | 'DELIVERED';
+  | 'DELIVERED'
+  | 'CANCELLED';
 
 @Injectable()
 export class StateMachineService {
   private readonly validTransitions: Record<OrderStatus, OrderStatus[]> = {
-    PLACED: ['ACCEPTED'],
-    ACCEPTED: ['PREPARING'],
-    PREPARING: ['READY_FOR_PICKUP'],
-    READY_FOR_PICKUP: ['ASSIGNED'],
-    ASSIGNED: ['PICKED_UP'],
+    PLACED: ['ACCEPTED', 'CANCELLED'],
+    ACCEPTED: ['PREPARING', 'CANCELLED'],
+    PREPARING: ['READY_FOR_PICKUP', 'CANCELLED'],
+    READY_FOR_PICKUP: ['ASSIGNED', 'CANCELLED'],
+    ASSIGNED: ['PICKED_UP', 'CANCELLED'],
     PICKED_UP: ['OUT_FOR_DELIVERY'],
     OUT_FOR_DELIVERY: ['DELIVERED'],
     DELIVERED: [],
+    CANCELLED: [],
   };
 
   // Role permissions per transition (D-034)
   private readonly transitionRoles: Record<string, Role[]> = {
     'PLACED->ACCEPTED': [Role.VENDOR, Role.ADMIN],
+    'PLACED->CANCELLED': [Role.CUSTOMER, Role.ADMIN],
     'ACCEPTED->PREPARING': [Role.VENDOR, Role.ADMIN],
+    'ACCEPTED->CANCELLED': [Role.CUSTOMER, Role.ADMIN],
     'PREPARING->READY_FOR_PICKUP': [Role.VENDOR, Role.ADMIN],
+    'PREPARING->CANCELLED': [Role.ADMIN],
     'READY_FOR_PICKUP->ASSIGNED': [Role.ADMIN],
+    'READY_FOR_PICKUP->CANCELLED': [Role.ADMIN],
     'ASSIGNED->PICKED_UP': [Role.DRIVER, Role.ADMIN],
+    'ASSIGNED->CANCELLED': [Role.ADMIN],
     'PICKED_UP->OUT_FOR_DELIVERY': [Role.DRIVER, Role.ADMIN],
     'OUT_FOR_DELIVERY->DELIVERED': [Role.DRIVER, Role.ADMIN],
   };
@@ -69,6 +76,7 @@ export class StateMachineService {
     ];
 
     const orderMap: Record<OrderStatus, number> = {
+      CANCELLED: 0,
       PLACED: 1,
       ACCEPTED: 2,
       PREPARING: 3,

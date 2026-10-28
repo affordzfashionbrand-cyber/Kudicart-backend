@@ -91,7 +91,7 @@ model Address {
 model Category {
   id           String     @id @default(uuid())
   name         String
-  slug         String     @unique
+  slug         String?    @unique
   level        Int        @default(1) // 1: Main Category, 2: SubCategory, 3: SubSubCategory
   parentId     String?
   parent       Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
@@ -118,8 +118,10 @@ model Vendor {
   userId    String    @unique
   user      User      @relation(fields: [userId], references: [id])
   storeName String
-  products  Product[]
-  createdAt DateTime  @default(now())
+  products      Product[]
+  ledgerEntries LedgerEntry[]
+  payouts       VendorPayout[]
+  createdAt     DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 }
 
@@ -240,6 +242,8 @@ model Order {
   tickets           SupportTicket[]
   reviews           Review[]
   tryAndBuySession  TryAndBuySession?
+  transactions      PaymentTransaction[]
+  ledgerEntries     LedgerEntry[]
 }
 
 model OrderItem {
@@ -395,4 +399,61 @@ model TryAndBuySession {
   storeReconciledAt          DateTime?
   createdAt                  DateTime  @default(now())
   updatedAt                  DateTime  @updatedAt
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  userEmail  String?
+  userRole   String?
+  action     String
+  entityType String
+  entityId   String
+  details    String?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+}
+
+model PaymentTransaction {
+  id              String   @id @default(uuid())
+  orderId         String
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  paymentId       String   @unique
+  razorpayOrderId String?
+  signature       String?
+  amount          Float
+  currency        String   @default("INR")
+  status          String
+  method          String?
+  eventId         String?  @unique
+  failureReason   String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model LedgerEntry {
+  id           String   @id @default(uuid())
+  orderId      String?
+  order        Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  vendorId     String?
+  vendor       Vendor?  @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  driverId     String?
+  entryType    String
+  amount       Float
+  description  String
+  balanceAfter Float?
+  createdAt    DateTime @default(now())
+}
+
+model VendorPayout {
+  id           String   @id @default(uuid())
+  vendorId     String
+  vendor       Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  amount       Float
+  status       String   @default("PENDING")
+  referenceId  String?
+  payoutMethod String?  @default("BANK_TRANSFER")
+  notes        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }

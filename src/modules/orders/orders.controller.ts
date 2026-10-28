@@ -52,8 +52,11 @@ export class OrdersController {
   }
 
   @Get(':id/track')
-  async trackOrder(@Param('id') id: string) {
-    return this.ordersService.trackOrder(id);
+  async trackOrder(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.ordersService.trackOrder(id, user.id, user.role);
   }
 
   // Admin Manual Rider Assignment (D-006)
