@@ -10,6 +10,21 @@ import {
 } from './initial-data';
 import { INITIAL_EARNINGS_WEEKS } from './initial-earnings';
 import { INITIAL_CATEGORIES_HIERARCHY } from './initial-categories';
+import {
+  INITIAL_ADMIN_USERS,
+  INITIAL_ADMIN_ROLES,
+  INITIAL_ROLE_PERMISSIONS,
+  INITIAL_ADMIN_VENDORS,
+  INITIAL_ADMIN_DRIVERS,
+  INITIAL_ADMIN_CUSTOMERS,
+  INITIAL_AUDIT_EVENTS,
+  INITIAL_VENDOR_LEDGER,
+  INITIAL_ADMIN_PAYMENTS,
+  INITIAL_ADMIN_REVIEWS,
+  INITIAL_SUPPORT_TICKETS,
+  INITIAL_OPERATIONAL_NOTIFICATIONS,
+  DEFAULT_WORKSPACE_PREFERENCES,
+} from './initial-admin-data';
 
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
@@ -578,6 +593,19 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         createdAt: new Date('2026-09-24T14:30:00Z').toISOString(),
       },
     ],
+    adminUsers: JSON.parse(JSON.stringify(INITIAL_ADMIN_USERS)),
+    adminRoles: JSON.parse(JSON.stringify(INITIAL_ADMIN_ROLES)),
+    rolePermissions: JSON.parse(JSON.stringify(INITIAL_ROLE_PERMISSIONS)),
+    adminVendors: JSON.parse(JSON.stringify(INITIAL_ADMIN_VENDORS)),
+    adminDrivers: JSON.parse(JSON.stringify(INITIAL_ADMIN_DRIVERS)),
+    adminCustomers: JSON.parse(JSON.stringify(INITIAL_ADMIN_CUSTOMERS)),
+    auditEvents: JSON.parse(JSON.stringify(INITIAL_AUDIT_EVENTS)),
+    vendorLedger: JSON.parse(JSON.stringify(INITIAL_VENDOR_LEDGER)),
+    adminPayments: JSON.parse(JSON.stringify(INITIAL_ADMIN_PAYMENTS)),
+    adminReviews: JSON.parse(JSON.stringify(INITIAL_ADMIN_REVIEWS)),
+    adminSupportTickets: JSON.parse(JSON.stringify(INITIAL_SUPPORT_TICKETS)),
+    operationalNotifications: JSON.parse(JSON.stringify(INITIAL_OPERATIONAL_NOTIFICATIONS)),
+    workspacePreferences: JSON.parse(JSON.stringify(DEFAULT_WORKSPACE_PREFERENCES)),
   };
 
   async onModuleInit() {
@@ -607,5 +635,60 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       p.tryAndBuyEligible = p.fulfillmentType === 'DARK_STORE';
     });
     return this.store;
+  }
+
+  recordAuditEvent(event: {
+    actorId?: string;
+    actorName?: string;
+    actorRole?: string;
+    actionType: string;
+    entityId: string;
+    entityName?: string;
+    entityType: string;
+    ipAddress?: string;
+    userAgent?: string;
+    summary: string;
+    targetDescription?: string;
+    changePayload?: Record<string, any>;
+    entityLink?: string;
+  }) {
+    const now = new Date();
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const timestampShort = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const timestampFull = `${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()}, ${timestampShort} IST`;
+
+    const actorName = event.actorName || 'Operations Admin';
+    const initials = actorName
+      .split(' ')
+      .map((w) => w[0])
+      .join('')
+      .slice(0, 2)
+      .toUpperCase();
+
+    const auditEntry = {
+      id: `AUD-${Date.now().toString().slice(-5)}`,
+      timestamp: timestampShort,
+      timestampFull,
+      actorId: event.actorId || 'ADM-001',
+      actorName,
+      actorRole: event.actorRole || 'Central Ops Lead',
+      actorInitials: initials,
+      actionType: event.actionType,
+      entityId: event.entityId,
+      entityName: event.entityName || event.entityId,
+      entityType: event.entityType,
+      ipAddress: event.ipAddress || '127.0.0.1',
+      gatewayVpn: 'MUM-VPN-NODE-01',
+      userAgent: event.userAgent || 'KudiCart Admin Portal',
+      sessionTokenHash: `sha256:${Date.now().toString(16)}`,
+      summary: event.summary,
+      targetDescription: event.targetDescription || `${event.entityType} ${event.entityId}`,
+      changePayload: event.changePayload || {},
+      entityLink: event.entityLink,
+    };
+
+    this.store.auditEvents.unshift(auditEntry);
+    return auditEntry;
   }
 }

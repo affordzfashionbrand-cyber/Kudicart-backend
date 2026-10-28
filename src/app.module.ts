@@ -52,6 +52,6 @@ import { PaymentsWebhookController } from './modules/payments/payments-webhook.c
     ReviewsService,
     SupportService,
   ],
-  exports: [PrismaModule, StateMachineService, DriverModule],
+  exports: [PrismaModule, StateMachineService, DriverModule, AdminModule],
 })
 export class AppModule {}
