@@ -11,6 +11,7 @@ import {
   UpdateProductStatusDto,
   UpdateProductStockDto,
 } from '../dto/admin-domain.dto';
+import { CreateDarkStoreProductDto } from '../dto/create-dark-store-product.dto';
 
 @Injectable()
 export class AdminCatalogService {
@@ -103,6 +104,7 @@ export class AdminCatalogService {
         code: newCategory.code,
         name: newCategory.name,
         slug: newCategory.slug,
+        parentCategory: newCategory.parentCategory,
       },
       entityLink: `/admin/categories`,
     });
@@ -122,14 +124,15 @@ export class AdminCatalogService {
       throw new NotFoundException(`Category record '${id}' was not found.`);
     }
 
+    const previousState = { ...category };
+
     if (dto.name) category.name = dto.name.trim();
-    if (dto.code) category.code = dto.code.trim().toUpperCase();
     if (dto.slug) category.slug = dto.slug.trim();
     if (dto.description !== undefined) category.description = dto.description;
     if (dto.parentCategory !== undefined) category.parentCategory = dto.parentCategory;
     if (dto.status) {
       category.status = dto.status;
-      category.isActive = dto.status === 'ACTIVE';
+      category.isActive = dto.status !== 'INACTIVE';
     }
     if (dto.displayOrder !== undefined) category.displayOrder = dto.displayOrder;
     category.updatedAt = new Date().toISOString();
@@ -141,9 +144,12 @@ export class AdminCatalogService {
       entityId: category.id,
       entityName: category.name,
       entityType: 'Product' as any,
-      summary: `Updated category '${category.name}' details`,
+      summary: `Updated apparel category '${category.name}' details and status`,
       targetDescription: `Catalog Category Tree`,
-      changePayload: { ...dto },
+      changePayload: {
+        previous: previousState,
+        updated: category,
+      },
       entityLink: `/admin/categories`,
     });
 
@@ -199,9 +205,11 @@ export class AdminCatalogService {
   async listProducts(query: AdminQueryDto) {
     const store = this.prisma.getStore();
     let products = store.products.map((p: any) => {
-      const vendor = (store.adminVendors || []).find((v: any) => v.id === p.vendorId) || {
-        storeName: 'Avanya Ethnic Boutique',
-      };
+      const vendor =
+        (store.adminVendors || []).find((v: any) => v.id === p.vendorId) ||
+        (store.vendors || []).find((v: any) => v.id === p.vendorId) || {
+          storeName: p.fulfillmentType === 'DARK_STORE' ? 'Affordz Official Store' : 'Avanya Ethnic Boutique',
+        };
 
       const stockStatus =
         p.stockQuantity <= 0
@@ -225,7 +233,7 @@ export class AdminCatalogService {
         fulfillmentType: p.fulfillmentType || 'DARK_STORE',
         listingStatus: p.listingStatus || 'ACTIVE',
         tryAndBuyEligible: p.tryAndBuyEligible !== false,
-        hubAssignment: p.hubAssignment || 'Bandra West Terminal Hub, Mumbai',
+        hubAssignment: p.hubAssignment || 'Indiranagar Express Pod',
         primaryImageUrl: p.image,
         galleryImages: (p.galleryImages || []).map((url: string, idx: number) => ({
           url,
@@ -252,66 +260,98 @@ export class AdminCatalogService {
           p.title.toLowerCase().includes(q) ||
           p.brand.toLowerCase().includes(q) ||
           p.sku.toLowerCase().includes(q) ||
+          p.category.toLowerCase().includes(q) ||
           p.vendorName.toLowerCase().includes(q),
       );
     }
 
-    // Filter by status tab
-    if (query.status && query.status !== 'ALL') {
-      if (query.status === 'ACTIVE') {
-        products = products.filter((p: any) => p.listingStatus === 'ACTIVE');
-      } else if (query.status === 'LOW_STOCK') {
-        products = products.filter((p: any) => p.stockStatus === 'LOW_STOCK');
-      } else if (query.status === 'OUT_OF_STOCK') {
-        products = products.filter((p: any) => p.stockStatus === 'OUT_OF_STOCK');
-      } else if (query.status === 'DRAFT') {
-        products = products.filter((p: any) => p.listingStatus === 'DRAFT' || p.listingStatus === 'REVIEW');
-      } else {
-        products = products.filter((p: any) => p.listingStatus === query.status);
-      }
-    }
-
     // Filter by category
     if (query.category && query.category !== 'ALL') {
-      products = products.filter((p: any) => p.category.toLowerCase() === query.category.toLowerCase());
+      products = products.filter(
+        (p: any) => p.category.toLowerCase() === query.category.toLowerCase(),
+      );
     }
 
     // Filter by vendor
     if (query.vendor && query.vendor !== 'ALL') {
-      products = products.filter((p: any) => p.vendorName === query.vendor);
+      products = products.filter(
+        (p: any) =>
+          p.vendorName.toLowerCase() === query.vendor.toLowerCase() ||
+          p.vendorId === query.vendor,
+      );
     }
 
     // Filter by fulfillment
-    if (query.fulfillmentType && query.fulfillmentType !== 'ALL') {
-      products = products.filter((p: any) => p.fulfillmentType === query.fulfillmentType);
+    const fulfillmentFilter = query.fulfillmentType || (query as any).fulfillment;
+    if (fulfillmentFilter && fulfillmentFilter !== 'ALL') {
+      products = products.filter((p: any) => p.fulfillmentType === fulfillmentFilter);
+    }
+
+    // Filter by status tab
+    if (query.status && query.status !== 'ALL') {
+      if (query.status === 'LOW_STOCK') {
+        products = products.filter((p: any) => p.stockStatus === 'LOW_STOCK');
+      } else if (query.status === 'OUT_OF_STOCK') {
+        products = products.filter((p: any) => p.stockStatus === 'OUT_OF_STOCK');
+      } else if (query.status === 'ACTIVE') {
+        products = products.filter((p: any) => p.listingStatus === 'ACTIVE');
+      } else if (query.status === 'DRAFT') {
+        products = products.filter((p: any) => p.listingStatus === 'DRAFT' || p.listingStatus === 'REVIEW');
+      }
     }
 
     const total = products.length;
-    const page = Number(query.page) || 1;
-    const limit = Number(query.limit) || 10;
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.max(1, Number(query.limit) || 20);
     const startIndex = (page - 1) * limit;
-    const paginated = products.slice(startIndex, startIndex + limit);
+    const paginatedProducts = products.slice(startIndex, startIndex + limit);
 
     return {
-      data: paginated,
+      data: paginatedProducts,
       total,
       page,
       limit,
-      totalPages: Math.ceil(total / limit) || 1,
     };
   }
 
   async getProductById(id: string) {
-    const listRes = await this.listProducts({ limit: 1000 });
-    const product = listRes.data.find(
-      (p: any) => p.id === id || p.sku.toLowerCase() === id.toLowerCase() || p.id.replace('prod-', '') === id,
+    const store = this.prisma.getStore();
+    const product = store.products.find(
+      (p: any) => p.id === id || p.id.replace('prod-', '') === id,
     );
 
     if (!product) {
-      throw new NotFoundException(`Product record '${id}' was not found.`);
+      throw new NotFoundException(`Product record '${id}' was not found in catalog.`);
     }
 
-    return product;
+    const vendor =
+      (store.adminVendors || []).find((v: any) => v.id === product.vendorId) ||
+      (store.vendors || []).find((v: any) => v.id === product.vendorId) || {
+        id: product.vendorId || 'vend-affordz-official',
+        storeName: product.fulfillmentType === 'DARK_STORE' ? 'Affordz Official Store' : 'Avanya Ethnic Boutique',
+        rating: 4.8,
+        contactPerson: 'Meera Deshmukh',
+      };
+
+    const specifications = [
+      { label: 'Fabric Weave', value: product.fabric || 'Pure Silk / Cotton blend' },
+      { label: 'Origin Atelier', value: product.origin || 'Mumbai Studio' },
+      { label: 'Available Sizes', value: Array.isArray(product.sizes) ? product.sizes.join(', ') : 'S, M, L, XL' },
+      { label: 'Fulfillment Class', value: product.fulfillmentType === 'DARK_STORE' ? 'Dark Store Express' : 'Vendor Dispatch' },
+    ];
+
+    const galleryImages = (product.galleryImages || [product.image]).map((url: string, idx: number) => ({
+      url,
+      label: idx === 0 ? 'Primary Asset' : `Angle ${idx + 1}`,
+      tag: idx === 0 ? 'Primary' : undefined,
+    }));
+
+    return {
+      ...product,
+      specifications,
+      galleryImages,
+      vendor,
+    };
   }
 
   async updateProductStatus(id: string, dto: UpdateProductStatusDto, actorId?: string, actorName?: string) {
@@ -331,7 +371,7 @@ export class AdminCatalogService {
     this.prisma.recordAuditEvent({
       actorId,
       actorName,
-      actionType: 'PRODUCT_STATUS_CHANGED' as any,
+      actionType: 'PRODUCT_STATUS_UPDATED' as any,
       entityId: product.id,
       entityName: product.title,
       entityType: 'Product' as any,
@@ -387,6 +427,179 @@ export class AdminCatalogService {
       success: true,
       message: `Product stock updated to ${dto.stockQuantity} units.`,
       product,
+    };
+  }
+
+  async createDarkStoreProduct(
+    dto: CreateDarkStoreProductDto,
+    actorId?: string,
+    actorName?: string,
+  ) {
+    if (dto.fulfillmentType && dto.fulfillmentType !== 'DARK_STORE') {
+      throw new BadRequestException(
+        'Admin product creation strictly supports DARK_STORE fulfillment. Vendor products must be submitted via the Vendor Portal.',
+      );
+    }
+
+    if (dto.originalPrice < dto.price) {
+      throw new BadRequestException(
+        `Original Price (MRP ₹${dto.originalPrice}) cannot be less than Selling Price (₹${dto.price}).`,
+      );
+    }
+
+    const store = this.prisma.getStore();
+
+    // 1. Validate Category
+    let category = (store.categories || []).find(
+      (c: any) =>
+        c.id === dto.categoryId ||
+        c.slug === dto.categoryId ||
+        c.name?.toLowerCase() === dto.categoryId.toLowerCase(),
+    );
+    if (!category && this.prisma.isConnectedToDb) {
+      try {
+        category = await this.prisma.category.findUnique({ where: { id: dto.categoryId } });
+      } catch (e) {}
+    }
+    if (!category) {
+      throw new BadRequestException(`Selected Category '${dto.categoryId}' does not exist or is inactive.`);
+    }
+
+    // 2. Validate Dark Store Hub
+    let hub = (store.darkStores || []).find(
+      (h: any) =>
+        h.id === dto.darkStoreHubId ||
+        h.id?.replace('hub-', '') === dto.darkStoreHubId,
+    );
+    if (!hub && this.prisma.isConnectedToDb) {
+      try {
+        hub = await this.prisma.darkStoreHub.findUnique({ where: { id: dto.darkStoreHubId } });
+      } catch (e) {}
+    }
+    if (!hub) {
+      throw new BadRequestException(`Selected Dark Store Hub '${dto.darkStoreHubId}' does not exist or is inactive.`);
+    }
+
+    // 3. Derive discount percentage
+    const discountPct = Math.round(((dto.originalPrice - dto.price) / dto.originalPrice) * 100);
+    const discount = discountPct > 0 ? `${discountPct}% OFF` : '0% OFF';
+
+    // 4. Reserve Affordz Official Store Vendor
+    const officialVendorId = 'vend-affordz-official';
+    const officialStoreName = 'Affordz Official Store';
+
+    const productId = `prod-${Date.now()}`;
+    const cleanBrand = dto.brand?.trim() || officialStoreName;
+
+    const newProductEntity = {
+      id: productId,
+      vendorId: officialVendorId,
+      categoryId: category.id,
+      brand: cleanBrand,
+      title: dto.title.trim(),
+      description: dto.description.trim(),
+      price: Number(dto.price),
+      originalPrice: Number(dto.originalPrice),
+      discount,
+      rating: 4.8,
+      reviewsCount: 0,
+      stockQuantity: Number(dto.stockQuantity),
+      stockBadge: 'DARK STORE STOCK',
+      readyToShip: dto.readyToShip !== false,
+      gender: 'Women',
+      sizes: dto.sizes,
+      fabric: dto.fabric?.trim() || null,
+      origin: dto.origin?.trim() || null,
+      tags: ['dark-store', 'official-store', 'fast-delivery'],
+      image: dto.image.trim(),
+      altText: dto.altText.trim(),
+      galleryImages:
+        Array.isArray(dto.galleryImages) && dto.galleryImages.length > 0
+          ? dto.galleryImages
+          : [dto.image.trim()],
+      fulfillmentType: 'DARK_STORE',
+      darkStoreHubId: hub.id,
+      hubAssignment: hub.name || hub.locality || 'Indiranagar Express Pod',
+      tryAndBuyEligible: true,
+      category: category.name,
+      vendorName: officialStoreName,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    // 5. Persist to PostgreSQL if connected
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.vendor.upsert({
+          where: { id: officialVendorId },
+          update: { storeName: officialStoreName },
+          create: {
+            id: officialVendorId,
+            userId: actorId || 'usr-admin-1',
+            storeName: officialStoreName,
+          },
+        });
+
+        await this.prisma.product.create({
+          data: {
+            id: newProductEntity.id,
+            vendorId: officialVendorId,
+            categoryId: category.id,
+            brand: newProductEntity.brand,
+            title: newProductEntity.title,
+            description: newProductEntity.description,
+            price: newProductEntity.price,
+            originalPrice: newProductEntity.originalPrice,
+            discount: newProductEntity.discount,
+            rating: newProductEntity.rating,
+            reviewsCount: newProductEntity.reviewsCount,
+            stockQuantity: newProductEntity.stockQuantity,
+            stockBadge: newProductEntity.stockBadge,
+            readyToShip: newProductEntity.readyToShip,
+            sizes: newProductEntity.sizes,
+            fabric: newProductEntity.fabric,
+            origin: newProductEntity.origin,
+            image: newProductEntity.image,
+            altText: newProductEntity.altText,
+            galleryImages: newProductEntity.galleryImages,
+            fulfillmentType: 'DARK_STORE' as any,
+            darkStoreHubId: hub.id,
+            tryAndBuyEligible: true,
+          },
+        });
+      } catch (err: any) {
+        // Fallback store handles in-memory presentation
+      }
+    }
+
+    // 6. Update authoritative in-memory store
+    (store.products as any[]).unshift(newProductEntity as any);
+
+    // 7. Audit log event
+    this.prisma.recordAuditEvent({
+      actorId: actorId || 'ADM-001',
+      actorName: actorName || 'Operations Admin',
+      actionType: 'PRODUCT_CREATED' as any,
+      entityId: newProductEntity.id,
+      entityName: newProductEntity.title,
+      entityType: 'Product' as any,
+      summary: `Created Dark Store product '${newProductEntity.title}' for Affordz Official Store (Hub: ${hub.name || hub.id}, Stock: ${newProductEntity.stockQuantity})`,
+      targetDescription: `Catalog SKU #${newProductEntity.id}`,
+      changePayload: {
+        id: newProductEntity.id,
+        price: newProductEntity.price,
+        originalPrice: newProductEntity.originalPrice,
+        discount: newProductEntity.discount,
+        hubId: hub.id,
+        stock: newProductEntity.stockQuantity,
+      },
+      entityLink: `/admin/products/${newProductEntity.id}`,
+    });
+
+    return {
+      success: true,
+      message: `Dark Store product '${newProductEntity.title}' created and assigned to Affordz Official Store.`,
+      product: newProductEntity,
     };
   }
 }

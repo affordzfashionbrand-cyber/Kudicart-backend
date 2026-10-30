@@ -479,6 +479,78 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
       await catalogService.updateProductStatus('prod-1', { listingStatus: 'ACTIVE' });
       await catalogService.updateProductStock('prod-1', { stockQuantity: 10 });
     });
+
+    it('Products: creates Dark Store product bound to Affordz Official Store (vend-affordz-official)', async () => {
+      const res = await catalogService.createDarkStoreProduct(
+        {
+          title: 'Banarasi Brocade Festive Kurta',
+          description: 'Handwoven silk with fine zari border and tailored silhouette.',
+          categoryId: 'kurtis',
+          darkStoreHubId: 'hub-indiranagar',
+          price: 1599,
+          originalPrice: 2999,
+          stockQuantity: 30,
+          sizes: ['M', 'L', 'XL'],
+          fabric: 'Banarasi Brocade Silk',
+          origin: 'Varanasi Atelier',
+          image: 'https://images.unsplash.com/photo-1583391733956-3750e0ff4e8b',
+          altText: 'Festive Banarasi Brocade Kurta',
+          readyToShip: true,
+        },
+        'usr-admin-1',
+        'Operations Admin',
+      );
+
+      expect(res.success).toBe(true);
+      expect(res.product.vendorId).toBe('vend-affordz-official');
+      expect(res.product.vendorName).toBe('Affordz Official Store');
+      expect(res.product.fulfillmentType).toBe('DARK_STORE');
+      expect(res.product.tryAndBuyEligible).toBe(true);
+      expect(res.product.discount).toBe('47% OFF');
+      expect(res.product.darkStoreHubId).toBe('hub-indiranagar');
+    });
+
+    it('Products: rejects Dark Store creation if originalPrice is less than price', async () => {
+      await expect(
+        catalogService.createDarkStoreProduct(
+          {
+            title: 'Faulty Pricing Product',
+            description: 'Test invalid pricing',
+            categoryId: 'kurtis',
+            darkStoreHubId: 'hub-indiranagar',
+            price: 2500,
+            originalPrice: 1500,
+            stockQuantity: 10,
+            sizes: ['M'],
+            image: 'https://example.com/test.jpg',
+            altText: 'Test',
+          },
+          'usr-admin-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('Products: rejects Dark Store creation if fulfillmentType is VENDOR', async () => {
+      await expect(
+        catalogService.createDarkStoreProduct(
+          {
+            title: 'Invalid Fulfillment',
+            description: 'Attempting vendor fulfillment via admin',
+            categoryId: 'kurtis',
+            darkStoreHubId: 'hub-indiranagar',
+            price: 1000,
+            originalPrice: 1500,
+            stockQuantity: 10,
+            sizes: ['M'],
+            image: 'https://example.com/test.jpg',
+            altText: 'Test',
+            fulfillmentType: 'VENDOR' as any,
+          },
+          'usr-admin-1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+    });
+
   });
 
   // ================= 7. ORDERS & DELIVERY ASSIGNMENTS =================

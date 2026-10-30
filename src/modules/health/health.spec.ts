@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { HealthController } from './health.controller';
 import { PrismaService } from '../../prisma/prisma.service';
+import { QueueService } from '../queue/queue.service';
 
 describe('HealthController (Item 20 in Go-Live Release Gate)', () => {
   let controller: HealthController;
@@ -8,7 +9,7 @@ describe('HealthController (Item 20 in Go-Live Release Gate)', () => {
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [HealthController],
-      providers: [PrismaService],
+      providers: [PrismaService, QueueService],
     }).compile();
 
     controller = module.get<HealthController>(HealthController);
@@ -24,6 +25,8 @@ describe('HealthController (Item 20 in Go-Live Release Gate)', () => {
     expect(res.status).toBe('UP');
     expect(res.service).toBe('affordz-backend');
     expect(res.database).toBeDefined();
+    expect(res.queue).toBeDefined();
+    expect(res.queue.provider).toBe('BullMQ');
     expect(res.security.failClosedGuards).toBe(true);
     expect(res.security.autoDispatchDisabled).toBe(true);
   });

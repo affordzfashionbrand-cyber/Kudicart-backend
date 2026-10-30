@@ -1,11 +1,15 @@
 import { Controller, Get, HttpCode, HttpStatus } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { QueueService } from '../queue/queue.service';
 
 @Controller()
 export class HealthController {
   private readonly startTime = Date.now();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly queueService: QueueService,
+  ) {}
 
   @Get('health')
   @HttpCode(HttpStatus.OK)
@@ -52,6 +56,7 @@ export class HealthController {
         provider: 'supabase-postgresql',
         latencyMs,
       },
+      queue: this.queueService.getQueueStatus(),
       system: {
         nodeVersion: process.version,
         platform: process.platform,

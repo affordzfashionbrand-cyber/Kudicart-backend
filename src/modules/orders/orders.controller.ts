@@ -14,15 +14,18 @@ import { CheckoutDto } from './dto/checkout.dto';
 import { AssignDriverDto } from './dto/assign-driver.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
+import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
+import { RateLimit } from '../../common/decorators/rate-limit.decorator';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
 @Controller('api/v1/orders')
-@UseGuards(FirebaseAuthGuard)
+@UseGuards(FirebaseAuthGuard, RateLimitGuard)
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
   @Post('checkout')
   @HttpCode(HttpStatus.CREATED)
+  @RateLimit({ points: 10, duration: 60 }) // Max 10 checkouts per minute per user
   async checkout(
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: CheckoutDto,
@@ -32,6 +35,7 @@ export class OrdersController {
 
   @Post('verify-payment')
   @HttpCode(HttpStatus.OK)
+  @RateLimit({ points: 20, duration: 60 }) // Max 20 verification attempts per minute
   async verifyPayment(
     @Body() body: { orderId: string; paymentId: string; signature: string },
   ) {
@@ -59,54 +63,21 @@ export class OrdersController {
     return this.ordersService.trackOrder(id, user.id, user.role);
   }
 
-  // Admin Manual Rider Assignment (D-006)
-  @Post(':id/assign-driver')
-  @HttpCode(HttpStatus.OK)
-  async assignDriver(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('id') id: string,
-    @Body() body: AssignDriverDto,
-  ) {
-    return this.ordersService.assignDriver(id, body.driverId, user.role);
-  }
-
-  // Vendor State Transition: Accept
-  @Post(':id/vendor-accept')
-  @HttpCode(HttpStatus.OK)
-  async vendorAccept(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('id') id: string,
-  ) {
-    return this.ordersService.vendorAccept(id, user.role);
-  }
-
-  // Vendor State Transition: Prepare
-  @Post(':id/vendor-prepare')
-  @HttpCode(HttpStatus.OK)
-  async vendorPrepare(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('id') id: string,
-  ) {
-    return this.ordersService.vendorPrepare(id, user.role);
-  }
-
-  // Vendor State Transition: Ready for Pickup
-  @Post(':id/vendor-ready')
-  @HttpCode(HttpStatus.OK)
-  async vendorReady(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param('id') id: string,
-  ) {
-    return this.ordersService.vendorReadyForPickup(id, user.role);
-  }
-
-  // Status transition with role check
   @Patch(':id/status')
   async updateStatus(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() body: UpdateOrderStatusDto,
   ) {
-    return this.ordersService.updateStatus(id, body.status, body.note, user.role);
+    return this.ordersService.updateStatus(id, body.status, user.role, user.id);
+  }
+
+  @Post(':id/assign')
+  async assignDriver(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: AssignDriverDto,
+  ) {
+    return this.ordersService.assignDriver(id, body.driverId, user.role);
   }
 }

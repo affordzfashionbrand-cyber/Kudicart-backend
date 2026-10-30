@@ -21,7 +21,8 @@ ON CONFLICT ("id") DO NOTHING;
 -- 3. Vendor
 INSERT INTO "Vendor" ("id", "userId", "storeName", "createdAt", "updatedAt")
 VALUES
-('vend-1', 'usr-vendor-1', 'Avanya Haute Atelier', NOW(), NOW())
+('vend-1', 'usr-vendor-1', 'Avanya Haute Atelier', NOW(), NOW()),
+('vend-affordz-official', 'usr-admin-1', 'Affordz Official Store', NOW(), NOW())
 ON CONFLICT ("id") DO NOTHING;
 
 -- 4. Customer Address

@@ -24,9 +24,11 @@ import { DriverModule } from './modules/driver/driver.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { HealthModule } from './modules/health/health.module';
 import { PaymentsWebhookController } from './modules/payments/payments-webhook.controller';
+import { QueueModule } from './modules/queue/queue.module';
+import { MediaModule } from './modules/media/media.module';
 
 @Module({
-  imports: [PrismaModule, DriverModule, AdminModule, HealthModule],
+  imports: [PrismaModule, DriverModule, AdminModule, HealthModule, QueueModule, MediaModule],
   controllers: [
     AuthController,
     UsersController,
@@ -52,6 +54,6 @@ import { PaymentsWebhookController } from './modules/payments/payments-webhook.c
     ReviewsService,
     SupportService,
   ],
-  exports: [PrismaModule, StateMachineService, DriverModule, AdminModule],
+  exports: [PrismaModule, StateMachineService, DriverModule, AdminModule, QueueModule, MediaModule],
 })
 export class AppModule {}

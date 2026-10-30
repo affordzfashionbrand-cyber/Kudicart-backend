@@ -118,11 +118,21 @@ Phase 22: Deployment (AWS, CI/CD)
 **Status:** [ ]
 - [ ] Product entity (with relations).
 - [ ] Product CRUD (admin + vendor-scoped).
-- [ ] Pricing management.
-- [ ] Stock management.
-- [ ] Product image management (Cloudinary).
+- [ ] Admin Dark Store product creation (`POST /api/v1/admin/products`).
+- [ ] Dark Store hub validation & assignment (`darkStoreHubId`).
+- [ ] Pricing management (sellingPrice <= originalPrice in INR).
+- [ ] Stock management (`stockQuantity`).
+- [ ] Product image management (Supabase Storage per DCR-002).
 - [ ] Public catalog browsing API.
 - [ ] Product detail API.
+
+### Concrete Implementation File Bindings
+- Admin Products Controller: `src/modules/admin/controllers/admin-products.controller.ts`
+- Admin Hubs Controller: `src/modules/admin/controllers/admin-hubs.controller.ts`
+- Admin Catalog Service: `src/modules/admin/services/admin-catalog.service.ts`
+- Create Product DTO: `src/modules/admin/dto/create-dark-store-product.dto.ts`
+- Catalog Service: `src/modules/catalog/catalog.service.ts`
+- Prisma Schema & DB Persistence: `prisma/schema.prisma`, `prisma/seed.ts`
 
 ---
 
@@ -214,10 +224,16 @@ Phase 22: Deployment (AWS, CI/CD)
 
 # 18. Phase 16 — Media Module
 **Status:** [ ]
-- [ ] Cloudinary SDK integration.
-- [ ] Upload endpoint.
-- [ ] URL management.
-- [ ] Media deletion.
+- [ ] Supabase Storage client integration (Amended per DCR-002).
+- [ ] Admin media upload endpoint (`POST /api/v1/admin/media/upload`).
+- [ ] Asset path generation (`products/{uuid}-{filename}`) & validation.
+- [ ] Public CDN URL generation.
+- [ ] Media deletion / orphan cleanup.
+
+### Concrete Implementation File Bindings
+- Media Service: `src/modules/media/supabase-storage.service.ts`
+- Media Controller: `src/modules/media/media.controller.ts`
+- Media Module: `src/modules/media/media.module.ts`
 
 ---
 

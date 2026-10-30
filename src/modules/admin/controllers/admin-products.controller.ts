@@ -1,15 +1,19 @@
 import {
   Controller,
   Get,
+  Post,
   Patch,
   Param,
   Query,
   Body,
   UseGuards,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { AdminCatalogService } from '../services/admin-catalog.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
 import { UpdateProductStatusDto, UpdateProductStockDto } from '../dto/admin-domain.dto';
+import { CreateDarkStoreProductDto } from '../dto/create-dark-store-product.dto';
 import { FirebaseAuthGuard } from '../../../common/guards/auth.guard';
 import { RolesGuard } from '../../../common/guards/roles.guard';
 import { Roles } from '../../../common/decorators/roles.decorator';
@@ -25,6 +29,15 @@ export class AdminProductsController {
   @Get()
   async listProducts(@Query() query: AdminQueryDto) {
     return this.catalogService.listProducts(query);
+  }
+
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async createDarkStoreProduct(
+    @Body() dto: CreateDarkStoreProductDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.catalogService.createDarkStoreProduct(dto, actor?.id, actor?.name);
   }
 
   @Get(':id')
@@ -50,4 +63,3 @@ export class AdminProductsController {
     return this.catalogService.updateProductStock(id, dto, actor?.id, actor?.name);
   }
 }
-

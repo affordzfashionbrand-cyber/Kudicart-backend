@@ -27,8 +27,10 @@
 **Firebase Cloud Messaging (FCM)** via Firebase Admin SDK.
 
 ## D-BE-06 — Media Storage
-**Status:** `LOCKED`
-**Cloudinary** for media upload, processing, and CDN.
+**Status:** `LOCKED` (Amended via DCR-002)
+**Supabase Storage** for product media assets and image CDN. Image binaries are stored in Supabase Storage buckets, and public URLs are persisted in PostgreSQL. (Previously Cloudinary; amended per product owner directive).
+
+---
 
 ## D-BE-07 — Maps Provider
 **Status:** `LOCKED`
@@ -105,6 +107,16 @@ Do NOT implement:
 ## D-BE-20 — Reporting Boundary
 **Status:** `LOCKED`
 Admin dashboard cards, basic aggregations, CSV export. No BI platform, no Power BI/Tableau integration, no predictive analytics.
+
+## D-BE-22 — Affordz Official Store & Dark Store Ownership
+**Status:** `LOCKED`
+Dark Store products are platform-owned inventory of the **Affordz Official Store**.
+- Admin creates `DARK_STORE` fulfillment products only.
+- Admin creation endpoints do not accept client-provided `vendorId`; the backend automatically binds the reserved Affordz Official Store `vendorId` server-side.
+- Vendors manage only their own vendor-fulfilled products via vendor-authenticated endpoints with strict tenant scoping.
+- Every Dark Store product requires an active `darkStoreHubId`.
+- Scalar inventory tracking via `stockQuantity` (no per-size or per-hub split).
+- `tryAndBuyEligible` is enforced server-side strictly for `DARK_STORE` fulfillment products.
 
 ---
 

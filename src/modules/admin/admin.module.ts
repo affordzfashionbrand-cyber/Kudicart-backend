@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../prisma/prisma.module';
+import { PaymentReconciliationService } from '../payments/payment-reconciliation.service';
 
 // Controllers
 import { AdminAuthController } from './controllers/admin-auth.controller';
@@ -8,6 +9,7 @@ import { AdminUsersController } from './controllers/admin-users.controller';
 import { AdminVendorsController } from './controllers/admin-vendors.controller';
 import { AdminCategoriesController } from './controllers/admin-categories.controller';
 import { AdminProductsController } from './controllers/admin-products.controller';
+import { AdminHubsController } from './controllers/admin-hubs.controller';
 import { AdminOrdersController } from './controllers/admin-orders.controller';
 import { AdminDeliveryPartnersController } from './controllers/admin-delivery-partners.controller';
 import { AdminAssignmentsController } from './controllers/admin-assignments.controller';
@@ -47,6 +49,7 @@ import { AdminSettingsService } from './services/admin-settings.service';
     AdminVendorsController,
     AdminCategoriesController,
     AdminProductsController,
+    AdminHubsController,
     AdminOrdersController,
     AdminDeliveryPartnersController,
     AdminAssignmentsController,
@@ -61,6 +64,7 @@ import { AdminSettingsService } from './services/admin-settings.service';
     AdminSettingsController,
   ],
   providers: [
+    PaymentReconciliationService,
     AdminAuthService,
     AdminDashboardService,
     AdminUsersService,
@@ -78,6 +82,7 @@ import { AdminSettingsService } from './services/admin-settings.service';
     AdminSettingsService,
   ],
   exports: [
+    PaymentReconciliationService,
     AdminAuthService,
     AdminDashboardService,
     AdminUsersService,

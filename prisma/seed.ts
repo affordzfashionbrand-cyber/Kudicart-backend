@@ -121,6 +121,17 @@ async function main() {
   });
 
   // 4. Customer Address
+  await prisma.vendor.upsert({
+    where: { userId: admin.id },
+    update: {},
+    create: {
+      id: 'vend-affordz-official',
+      userId: admin.id,
+      storeName: 'Affordz Official Store',
+    },
+  });
+
+  // 4. Customer Address
   console.log('Seeding Customer Address...');
   await prisma.address.upsert({
     where: { id: 'addr-1' },

@@ -85,14 +85,22 @@ export class AdminDashboardService {
         pendingBoutiquesCount,
         driverKycCount,
       },
+      operationalQueues: {
+        unassignedOrders: unassignedCount,
+        pendingBoutiques: pendingBoutiquesCount,
+        driverKyc: driverKycCount,
+      },
       metrics: {
         totalOrders,
         gov,
+        grossVolume: gov,
         activeVendors,
         totalVendors,
         deliveryFleetCount,
+        activeDeliveryFleet: deliveryFleetCount,
       },
       pipelineCounts,
+      lifecyclePipeline: pipelineCounts,
       queues: {
         pendingBoutiques,
         driverKycQueue,
@@ -105,4 +113,3 @@ export class AdminDashboardService {
     };
   }
 }
-
