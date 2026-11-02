@@ -14,6 +14,11 @@ enum Role {
   ADMIN
 }
 
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
 enum OrderStatus {
   PLACED
   ACCEPTED
@@ -61,6 +66,7 @@ model User {
   name         String
   avatar       String?
   role         Role            @default(CUSTOMER)
+  status       UserStatus      @default(ACTIVE)
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 
@@ -75,17 +81,24 @@ model User {
 }
 
 model Address {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  label     String
-  line1     String
-  locality  String
-  city      String
-  isDefault Boolean  @default(false)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  orders    Order[]
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label          String
+  recipientName  String?
+  recipientPhone String?
+  line1          String
+  line2          String?
+  locality       String
+  city           String
+  state          String?
+  pincode        String   @default("560038")
+  latitude       Float?
+  longitude      Float?
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  orders         Order[]
 }
 
 model Category {
@@ -166,6 +179,12 @@ model Product {
   darkStoreHubId    String?
   darkStoreHub      DarkStoreHub?   @relation(fields: [darkStoreHubId], references: [id])
   tryAndBuyEligible Boolean         @default(false)
+  colors            Json?
+  colorGroupId      String?
+  colorName         String?
+  colorHex          String?
+  specifications    Json?
+  certification     String?
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
   cartItems         CartItem[]
@@ -219,8 +238,9 @@ model Order {
   customer          User                 @relation("CustomerOrders", fields: [customerId], references: [id])
   driverId          String?
   driver            User?                @relation("DriverOrders", fields: [driverId], references: [id])
-  addressId         String
-  address           Address              @relation(fields: [addressId], references: [id])
+  addressId         String?
+  address           Address?             @relation(fields: [addressId], references: [id], onDelete: SetNull)
+  deliveryAddress   Json?
   status            OrderStatus          @default(PLACED)
   paymentMethod     PaymentMethod
   paymentStatus     PaymentStatus        @default(PENDING)

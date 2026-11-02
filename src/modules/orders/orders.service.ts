@@ -42,9 +42,9 @@ export class OrdersService {
       store.addresses.push(address);
     }
 
-    // 2. Validate Cart (Supports server-side cart & client-provided items)
-    let userCartItems = store.cartItems.filter((ci) => ci.userId === userId);
-    if (userCartItems.length === 0 && dto.items && dto.items.length > 0) {
+    // 2. Validate Cart (Supports server-side cart & client-provided items / standalone Buy Now)
+    let userCartItems: any[];
+    if (dto.isBuyNow && dto.items && dto.items.length > 0) {
       userCartItems = dto.items.map((it: any) => ({
         id: it.id || `ci-${Date.now()}`,
         userId,
@@ -57,6 +57,22 @@ export class OrdersService {
         price: it.price,
         image: it.image,
       }));
+    } else {
+      userCartItems = store.cartItems.filter((ci) => ci.userId === userId);
+      if (userCartItems.length === 0 && dto.items && dto.items.length > 0) {
+        userCartItems = dto.items.map((it: any) => ({
+          id: it.id || `ci-${Date.now()}`,
+          userId,
+          productId: it.productId || it.id,
+          size: it.size || 'M',
+          trialSize: it.trialSize || null,
+          quantity: it.quantity || 1,
+          title: it.title,
+          brand: it.brand,
+          price: it.price,
+          image: it.image,
+        }));
+      }
     }
 
     if (userCartItems.length === 0) {
@@ -150,6 +166,17 @@ export class OrdersService {
       hasDarkStoreProduct && (dto.isTryAndBuy || userCartItems.some((ci) => Boolean(ci.trialSize))),
     );
 
+    // Authoritative serviceability validation for Dark Store items & Try & Buy (DCR-001)
+    if (hasDarkStoreProduct || isTryAndBuy) {
+      const serviceability = this.checkServiceability(address);
+      if (!serviceability.isServiceable) {
+        throw new BadRequestException(
+          serviceability.reason ||
+            'Delivery address is outside the 8.0 km instant drop radius for Indiranagar Express Hub. Instant delivery and Try & Buy are not available for this location.',
+        );
+      }
+    }
+
     const orderNumber = `AF-${Math.floor(10000 + Math.random() * 90000)}`;
     const razorpayOrderId =
       dto.paymentMethod === 'RAZORPAY' ? `rzp_order_${Date.now()}` : undefined;
@@ -189,17 +216,25 @@ export class OrdersService {
 
     store.orders.unshift(newOrder as any);
 
-    // 5. Clear Cart and reset coupon
-    await this.cartService.clearCart(userId);
+    // 5. Clear Cart and reset coupon (skipped for standalone Buy Now to preserve user bag)
+    if (!dto.isBuyNow) {
+      await this.cartService.clearCart(userId);
+    }
 
     return newOrder;
   }
 
-  async verifyPayment(orderId: string, paymentId: string, signature: string) {
+  async verifyPayment(
+    orderId: string,
+    paymentId: string,
+    signature: string,
+    razorpayOrderId?: string,
+  ) {
     const verification = await this.paymentsService.verifyRazorpaySignature(
       orderId,
       paymentId,
       signature,
+      razorpayOrderId,
     );
 
     const store = this.prisma.getStore();
@@ -289,6 +324,7 @@ export class OrdersService {
     if (order.driverId) {
       const drv = store.drivers.find((d) => d.id === order.driverId);
       if (drv) {
+        const isLiveDelivering = ['PICKED_UP', 'OUT_FOR_DELIVERY'].includes(order.status);
         driverInfo = {
           id: drv.id,
           name: drv.name,
@@ -296,7 +332,7 @@ export class OrdersService {
           vehicle: drv.vehicle,
           photo: drv.photo,
           rating: drv.rating,
-          currentLocation: drv.currentLocation,
+          currentLocation: isLiveDelivering ? drv.currentLocation : null,
         };
       }
     }
@@ -316,10 +352,11 @@ export class OrdersService {
     const store = this.prisma.getStore();
     const milestones = this.stateMachine.getMilestones(order.status as OrderStatus);
 
-    let driver = order.driver;
-    if (!driver && order.driverId) {
+    let driver = null;
+    if (order.driverId) {
       const drv = store.drivers.find((d) => d.id === order.driverId);
       if (drv) {
+        const isLiveDelivering = ['PICKED_UP', 'OUT_FOR_DELIVERY'].includes(order.status);
         driver = {
           id: drv.id,
           name: drv.name,
@@ -327,23 +364,9 @@ export class OrdersService {
           vehicle: drv.vehicle,
           photo: drv.photo,
           rating: drv.rating,
-          currentLocation: drv.currentLocation,
+          currentLocation: isLiveDelivering ? drv.currentLocation : null,
         };
       }
-    }
-
-    // Default to active EV pilot for express tracking if not yet bound
-    if (!driver && store.drivers && store.drivers.length > 0) {
-      const activeDrv = store.drivers[0];
-      driver = {
-        id: activeDrv.id,
-        name: activeDrv.name,
-        phone: activeDrv.phone,
-        vehicle: activeDrv.vehicle,
-        photo: activeDrv.photo,
-        rating: activeDrv.rating,
-        currentLocation: activeDrv.currentLocation,
-      };
     }
 
     // Dynamic express countdown based on 8-stage state machine
@@ -560,5 +583,76 @@ export class OrdersService {
     });
 
     return this.getOrderById(order.id);
+  }
+
+  checkServiceability(address: any): { isServiceable: boolean; distanceKm?: number; reason?: string } {
+    const hubLat = 12.9784;
+    const hubLng = 77.6408;
+    const maxRadiusKm = 8.0;
+
+    if (address?.latitude && address?.longitude) {
+      const R = 6371;
+      const dLat = ((hubLat - address.latitude) * Math.PI) / 180;
+      const dLon = ((hubLng - address.longitude) * Math.PI) / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos((address.latitude * Math.PI) / 180) *
+          Math.cos((hubLat * Math.PI) / 180) *
+          Math.sin(dLon / 2) *
+          Math.sin(dLon / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      const distance = Number((R * c).toFixed(1));
+      return {
+        isServiceable: distance <= maxRadiusKm,
+        distanceKm: distance,
+        reason:
+          distance > maxRadiusKm
+            ? `Delivery location is ${distance} km from Indiranagar Express Hub (exceeds our ${maxRadiusKm} km instant drop radius).`
+            : undefined,
+      };
+    }
+
+    const pin = (address?.pincode || '').replace(/\D/g, '');
+    const city = (address?.city || '').toLowerCase();
+    const isBengaluru =
+      city.includes('bengaluru') || city.includes('bangalore') || pin.startsWith('560');
+
+    if (!isBengaluru) {
+      return {
+        isServiceable: false,
+        reason:
+          'Instant 18-minute delivery is currently operational only within Bengaluru dark store hubs.',
+      };
+    }
+
+    // Supported PIN codes in Bangalore quick-commerce radius per DCR-001
+    const serviceablePins = [
+      '560038', '560008', '560071', '560017', '560095', '560034',
+      '560001', '560025', '560047', '560042', '560052', '560027',
+      '560020', '560002',
+    ];
+    if (serviceablePins.includes(pin)) {
+      return { isServiceable: true };
+    }
+
+    // Explicit non-serviceable Bangalore outer pincodes (> 8 km)
+    const nonServiceablePins = [
+      '560103', '560066', '560100', '560064', '560068', '560078', '560076',
+    ];
+    if (nonServiceablePins.includes(pin)) {
+      return {
+        isServiceable: false,
+        reason: `Pincode ${pin} is outside the 8.0 km instant drop radius for Indiranagar Express Hub.`,
+      };
+    }
+
+    // Default prefix check for inner Bengaluru
+    const isInnerBengaluru = /^(56000|56001|56002|56003|56004|56007)/.test(pin);
+    return {
+      isServiceable: isInnerBengaluru,
+      reason: isInnerBengaluru
+        ? undefined
+        : `Address area (${pin}) is outside the 8.0 km express radius.`,
+    };
   }
 }

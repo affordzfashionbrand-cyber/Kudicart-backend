@@ -9,8 +9,37 @@ import {
   Min,
   ArrayNotEmpty,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+
+export class ProductColorDto {
+  @IsString()
+  @IsNotEmpty()
+  name: string;
+
+  @IsString()
+  @IsNotEmpty()
+  hex: string;
+
+  @IsString()
+  @IsOptional()
+  image?: string;
+
+  @IsArray()
+  @IsOptional()
+  @IsString({ each: true })
+  galleryImages?: string[];
+
+  @IsInt()
+  @IsOptional()
+  @Type(() => Number)
+  stockQuantity?: number;
+
+  @IsString()
+  @IsOptional()
+  productId?: string;
+}
 
 export class CreateDarkStoreProductDto {
   @IsString()
@@ -64,6 +93,19 @@ export class CreateDarkStoreProductDto {
   @IsString()
   @IsOptional()
   origin?: string;
+
+  @IsArray()
+  @IsOptional()
+  @ValidateNested({ each: true })
+  @Type(() => ProductColorDto)
+  colors?: ProductColorDto[];
+
+  @IsOptional()
+  specifications?: Record<string, string>;
+
+  @IsString()
+  @IsOptional()
+  certification?: string;
 
   @IsString()
   @IsNotEmpty({ message: 'Primary product image is required' })

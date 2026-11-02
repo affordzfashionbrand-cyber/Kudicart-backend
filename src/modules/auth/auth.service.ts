@@ -81,6 +81,7 @@ export class AuthService {
         name: 'Affordz Customer',
         avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
         role: 'CUSTOMER',
+        status: 'ACTIVE',
         createdAt: new Date().toISOString(),
       };
       store.users.push(customerUser);
@@ -138,6 +139,7 @@ export class AuthService {
         name: decoded.name || 'Affordz Customer',
         avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
         role: 'CUSTOMER',
+        status: 'ACTIVE',
         createdAt: new Date().toISOString(),
       };
       store.users.push(user);

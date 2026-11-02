@@ -23,7 +23,7 @@ export class AddressController {
 
   @Get()
   async getAddresses(@CurrentUser() user: AuthenticatedUser) {
-    return this.addressService.getAddresses(user.id);
+    return this.addressService.getAddresses(user.id, user);
   }
 
   @Get(':id')
@@ -31,7 +31,7 @@ export class AddressController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
   ) {
-    return this.addressService.getAddressById(user.id, id);
+    return this.addressService.getAddressById(user.id, id, user);
   }
 
   @Post()
@@ -40,7 +40,7 @@ export class AddressController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: CreateAddressDto,
   ) {
-    return this.addressService.addAddress(user.id, body);
+    return this.addressService.addAddress(user.id, body, user);
   }
 
   @Patch(':id')
@@ -49,7 +49,7 @@ export class AddressController {
     @Param('id') id: string,
     @Body() body: UpdateAddressDto,
   ) {
-    return this.addressService.updateAddress(user.id, id, body);
+    return this.addressService.updateAddress(user.id, id, body, user);
   }
 
   @Patch(':id/default')
@@ -57,7 +57,7 @@ export class AddressController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
   ) {
-    return this.addressService.setDefaultAddress(user.id, id);
+    return this.addressService.setDefaultAddress(user.id, id, user);
   }
 
   @Delete(':id')
@@ -65,6 +65,6 @@ export class AddressController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
   ) {
-    return this.addressService.deleteAddress(user.id, id);
+    return this.addressService.deleteAddress(user.id, id, user);
   }
 }

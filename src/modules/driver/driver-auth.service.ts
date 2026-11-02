@@ -147,6 +147,7 @@ export class DriverAuthService {
         name: 'New Delivery Partner',
         avatar: null,
         role: 'DRIVER',
+        status: 'ACTIVE',
         createdAt: new Date().toISOString(),
       };
       store.users.push(driverUser);

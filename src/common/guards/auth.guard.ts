@@ -8,6 +8,13 @@ export class FirebaseAuthGuard implements CanActivate {
     const request = context.switchToHttp().getRequest();
     const authHeader = request.headers.authorization;
     const isProduction = process.env.APP_ENV === 'production';
+    const reqUrl = request.originalUrl || request.url || '';
+
+    // Allow public payment checkout session page and payment status queries
+    if (reqUrl.includes('/razorpay/checkout-session') || reqUrl.includes('/payments/status/')) {
+      request.user = this.getDefaultCustomer();
+      return true;
+    }
 
     if (!authHeader) {
       if (isProduction) {

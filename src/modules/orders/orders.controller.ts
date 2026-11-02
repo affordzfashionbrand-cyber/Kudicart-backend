@@ -37,9 +37,14 @@ export class OrdersController {
   @HttpCode(HttpStatus.OK)
   @RateLimit({ points: 20, duration: 60 }) // Max 20 verification attempts per minute
   async verifyPayment(
-    @Body() body: { orderId: string; paymentId: string; signature: string },
+    @Body() body: { orderId: string; paymentId: string; signature: string; razorpayOrderId?: string },
   ) {
-    return this.ordersService.verifyPayment(body.orderId, body.paymentId, body.signature);
+    return this.ordersService.verifyPayment(
+      body.orderId,
+      body.paymentId,
+      body.signature,
+      body.razorpayOrderId,
+    );
   }
 
   @Get()

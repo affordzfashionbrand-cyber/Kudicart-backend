@@ -266,6 +266,21 @@ export class DriverProfileService {
       updatedAt: new Date().toISOString(),
     };
 
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.driverProfile.updateMany({
+          where: { id: driver.id },
+          data: {
+            currentLat: dto.latitude,
+            currentLng: dto.longitude,
+            currentHeading: dto.heading || 0,
+          },
+        });
+      } catch {
+        // Fall back gracefully to memory store
+      }
+    }
+
     return {
       success: true,
       driverId: driver.id,

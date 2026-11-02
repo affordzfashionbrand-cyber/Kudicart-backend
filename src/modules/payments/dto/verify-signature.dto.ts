@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsString } from 'class-validator';
+import { IsNotEmpty, IsString, IsOptional } from 'class-validator';
 
 export class VerifySignatureDto {
   @IsNotEmpty({ message: 'orderId is required' })
@@ -12,4 +12,8 @@ export class VerifySignatureDto {
   @IsNotEmpty({ message: 'signature is required' })
   @IsString()
   signature: string;
+
+  @IsOptional()
+  @IsString()
+  razorpayOrderId?: string;
 }

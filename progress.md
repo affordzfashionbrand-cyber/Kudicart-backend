@@ -66,7 +66,7 @@ All Customer & Driver backend phases: **Verified & Passing.**
 |---|---|---|---|
 | B-BE-01 | Final architecture created (50 sections); awaiting user approval | All phases | PENDING_APPROVAL |
 | B-BE-02 | ORM choice (TypeORM vs Prisma) | Phase 1 | RESOLVED | Prisma with Supabase PostgreSQL locked |
-| B-BE-03 | Exact profile fields | Phase 3 | OPEN |
+| B-BE-03 | Exact profile fields (Customer & Address) | Phase 3 | RESOLVED | Customer & Address bounded field set approved per DCR-003 |
 | B-BE-04 | Vendor staff model | Phase 4 | OPEN |
 | B-BE-05 | KYC fields/statuses | Phase 3/11 | OPEN |
 | B-BE-06 | Product attributes/variants | Phase 6 | OPEN |
@@ -102,6 +102,8 @@ No decision changes recorded.
 | 2026-09-24 | Customer & Driver API Engine | `nest build` | PASS | Exit code 0, TypeScript compiled with zero errors |
 | 2026-09-24 | Customer & Driver App Test Suite | `npx jest --runInBand` | PASS | 29/29 tests passed across 11 modules (Auth, Users, Catalog, Cart, Address, Orders, State Machine, Driver, Payments, Reviews, Support) in 24.2s |
 | 2026-10-31 | Admin Catalog & Media Storage | Full backend test suite & build | PASS | 122/122 unit tests passed (100% across 8 test suites); `nest build` exit code 0 |
+| 2026-11-02 | Customer Profile & Address Module | PostgreSQL Migration & Service Persistence | PASS | 129/129 unit tests passed (100% across 9 test suites); `nest build` exit code 0 |
+| 2026-11-03 | Address Coordinates & Tracking Policy | DB Sync, Haversine Serviceability & Driver Location Gating | PASS | 129/129 unit tests passed (100% across 9 test suites); `nest build` exit code 0 |
 
 ---
 

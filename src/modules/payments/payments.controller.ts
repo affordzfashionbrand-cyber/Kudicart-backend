@@ -1,4 +1,14 @@
-import { Controller, Post, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Res,
+  UseGuards,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 import { CreateRazorpayOrderDto } from './dto/create-razorpay-order.dto';
 import { VerifySignatureDto } from './dto/verify-signature.dto';
@@ -23,7 +33,24 @@ export class PaymentsController {
       body.orderId,
       body.paymentId,
       body.signature,
+      body.razorpayOrderId,
     );
+  }
+
+  @Get('razorpay/checkout-session/:orderId')
+  async getCheckoutSession(
+    @Param('orderId') orderId: string,
+    @Res() res: any,
+  ) {
+    const html = await this.paymentsService.generateCheckoutHtml(orderId);
+    res.setHeader('Content-Type', 'text/html');
+    return res.send(html);
+  }
+
+  @Get('status/:orderId')
+  @HttpCode(HttpStatus.OK)
+  async getPaymentStatus(@Param('orderId') orderId: string) {
+    return this.paymentsService.getPaymentStatus(orderId);
   }
 
   @Post('cod/confirm')

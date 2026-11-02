@@ -1,4 +1,4 @@
-import { IsOptional, IsString, IsBoolean, Matches } from 'class-validator';
+import { IsOptional, IsString, IsBoolean, Matches, IsNumber } from 'class-validator';
 
 export class UpdateAddressDto {
   @IsOptional()
@@ -7,7 +7,19 @@ export class UpdateAddressDto {
 
   @IsOptional()
   @IsString()
+  recipientName?: string;
+
+  @IsOptional()
+  @IsString()
+  recipientPhone?: string;
+
+  @IsOptional()
+  @IsString()
   line1?: string;
+
+  @IsOptional()
+  @IsString()
+  line2?: string;
 
   @IsOptional()
   @IsString()
@@ -19,8 +31,20 @@ export class UpdateAddressDto {
 
   @IsOptional()
   @IsString()
-  @Matches(/^[1-9][0-9]{5}$/, { message: 'Pincode must be a 6-digit Indian Postal Code' })
+  state?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[1-9][0-9]{5}$/, { message: 'Pincode must be a valid 6-digit Indian Postal Code' })
   pincode?: string;
+
+  @IsOptional()
+  @IsNumber()
+  latitude?: number;
+
+  @IsOptional()
+  @IsNumber()
+  longitude?: number;
 
   @IsOptional()
   @IsBoolean()

@@ -18,6 +18,10 @@ export class CheckoutDto {
   isTryAndBuy?: boolean;
 
   @IsOptional()
+  @IsBoolean()
+  isBuyNow?: boolean;
+
+  @IsOptional()
   @IsArray()
   items?: any[];
 

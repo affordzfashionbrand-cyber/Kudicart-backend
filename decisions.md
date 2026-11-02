@@ -130,11 +130,11 @@ All production accounts (AWS, Supabase, Firebase, Razorpay, Cloudinary, Google M
 
 # 5. Open Decisions
 
-| ID | Decision still required |
-|---|---|
-| O-BE-01 | ORM choice (TypeORM vs Prisma) |
-| O-BE-02 | Exact profile fields (all actors) |
-| O-BE-03 | Vendor staff model |
+| ID | Decision still required | Status |
+|---|---|---|
+| O-BE-01 | ORM choice (TypeORM vs Prisma) | RESOLVED (Prisma with Supabase PostgreSQL) |
+| O-BE-02 | Exact profile fields (Customer & Address) | RESOLVED (Bounded field set approved per DCR-003) |
+| O-BE-03 | Vendor staff model | OPEN |
 | O-BE-04 | KYC fields/documents/statuses |
 | O-BE-05 | Product attributes/variants/units/tax |
 | O-BE-06 | Multi-vendor cart behavior |

@@ -43,6 +43,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         avatar:
           'https://lh3.googleusercontent.com/aida/AEtjO1VWtKT1o8SeNnSo4l3FyyDwDHs_2VrqMmxcyY66IrRg9rL8LkbbnuL2TffL_CyEaqzkwfMMb8tXKb4wQTNtgTrqXO9l2Yi8Pq4du2CXnP7lmY5vWpGHBTWfweA4JAHjIOXuFa59STYjuuXipREO_RT3mGzoprfKCWe-WrMubapxuDZ2B7UA-MwnQfHcf1AtMn-UkuyrLssuYf_YUriU8q2jFN8qIrperLt43xS0h1vE3Hgb0dCyrts8bMA',
         role: 'CUSTOMER',
+        status: 'ACTIVE',
         createdAt: new Date('2026-01-15T09:00:00Z').toISOString(),
       },
       {
@@ -54,6 +55,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         avatar:
           'https://lh3.googleusercontent.com/aida-public/AB6AXuB-9n0OJClXNM6d0TX37sDPYy2u14Q2urWrIDrGrcsqp-xeOqvJWO4kLCkJM2p4l8e4m4L2wDCHqTawwJ4RiTjZPrGzg0jToIbTJpMggV8VY-XM8NL1FIq9KmGLwPNEJ_9rmCB4K-W2qmOS5AXnWOrQVPZSlvSNve7Z3L9QAVxRKy5jXEY_LUYbxNPc7m3PZ877qBOS_WWQ8dabL-BBYfbKqFLHaaegb80kVZpY-Z_FPvHZPdgyE2SFDA',
         role: 'DRIVER',
+        status: 'ACTIVE',
         createdAt: new Date('2026-01-10T08:00:00Z').toISOString(),
       },
       {
@@ -64,6 +66,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         name: 'Meera Deshmukh',
         avatar: null,
         role: 'VENDOR',
+        status: 'ACTIVE',
         createdAt: new Date('2026-01-01T08:00:00Z').toISOString(),
       },
       {
@@ -74,6 +77,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         name: 'Operations Admin',
         avatar: null,
         role: 'ADMIN',
+        status: 'ACTIVE',
         createdAt: new Date('2026-01-01T00:00:00Z').toISOString(),
       },
     ],
@@ -162,6 +166,24 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         sizes: ['S', 'M', 'L', 'XL', 'XXL'],
         fabric: 'Pure Mulmul Silk',
         origin: 'Jaipur, Rajasthan',
+        colors: [
+          { name: 'Royal Berry Red', hex: '#881337' },
+          { name: 'Raw Honey Silk', hex: '#D4AF37' },
+          { name: 'Emerald Forest', hex: '#064E3B' },
+        ],
+        specifications: {
+          'Fabric Composition': '100% Pure Handloom Chanderi',
+          'Weave Technique': 'Banarasi Zari Kadwa Weft',
+          'Silhouette & Fit': 'Straight Couture Regular Fit',
+          'Neckline': 'Mandarin Collar with V-Placket',
+          'Sleeve Length': 'Three-Quarter Churidar Sleeves',
+          'Lining Material': 'Pure Mulmul Cotton (Breathable)',
+          'Transparency': 'Opaque (Fully Pre-Lined)',
+          'Ornamentation': 'Hand Zari Work & Zardozi Placket',
+          'Occasion': 'Festive, Sangeet & Intimate Weddings',
+          'Care Protocol': 'Dry Clean Recommended',
+        },
+        certification: 'Silk Mark Certified',
         fulfillmentType: 'DARK_STORE',
         darkStoreHubId: 'hub-indiranagar',
         tryAndBuyEligible: false,
@@ -633,7 +655,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   };
 
   async onModuleInit() {
-    if (process.env.DATABASE_URL && process.env.APP_ENV === 'production') {
+    if (process.env.DATABASE_URL) {
       try {
         await this.$connect();
         this.isConnectedToDb = true;

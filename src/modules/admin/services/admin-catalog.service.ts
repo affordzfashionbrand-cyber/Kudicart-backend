@@ -488,44 +488,91 @@ export class AdminCatalogService {
     const officialVendorId = 'vend-affordz-official';
     const officialStoreName = 'Affordz Official Store';
 
-    const productId = `prod-${Date.now()}`;
     const cleanBrand = dto.brand?.trim() || officialStoreName;
+    const baseTimestamp = Date.now();
+    const colorGroupId = `grp-${baseTimestamp}`;
 
-    const newProductEntity = {
-      id: productId,
-      vendorId: officialVendorId,
-      categoryId: category.id,
-      brand: cleanBrand,
-      title: dto.title.trim(),
-      description: dto.description.trim(),
-      price: Number(dto.price),
-      originalPrice: Number(dto.originalPrice),
-      discount,
-      rating: 4.8,
-      reviewsCount: 0,
-      stockQuantity: Number(dto.stockQuantity),
-      stockBadge: 'DARK STORE STOCK',
-      readyToShip: dto.readyToShip !== false,
-      gender: 'Women',
-      sizes: dto.sizes,
-      fabric: dto.fabric?.trim() || null,
-      origin: dto.origin?.trim() || null,
-      tags: ['dark-store', 'official-store', 'fast-delivery'],
-      image: dto.image.trim(),
-      altText: dto.altText.trim(),
-      galleryImages:
-        Array.isArray(dto.galleryImages) && dto.galleryImages.length > 0
-          ? dto.galleryImages
-          : [dto.image.trim()],
-      fulfillmentType: 'DARK_STORE',
-      darkStoreHubId: hub.id,
-      hubAssignment: hub.name || hub.locality || 'Indiranagar Express Pod',
-      tryAndBuyEligible: true,
-      category: category.name,
-      vendorName: officialStoreName,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+    // Resolve colorways and generate distinct separate products per colorway
+    const rawColors = Array.isArray(dto.colors) && dto.colors.length > 0 ? dto.colors : null;
+
+    // Cross-link sibling variants so each product references all color products
+    const siblingColors = rawColors
+      ? rawColors.map((c, idx) => ({
+          name: c.name,
+          hex: c.hex,
+          productId: c.productId || (idx === 0 ? `prod-${baseTimestamp}` : `prod-${baseTimestamp}-${idx + 1}`),
+          image: c.image?.trim() || dto.image.trim(),
+        }))
+      : [
+          {
+            name: 'Classic Fabric',
+            hex: '#111111',
+            productId: `prod-${baseTimestamp}`,
+            image: dto.image.trim(),
+          },
+        ];
+
+    // Build the separate product entities for each colorway
+    const createdProducts = siblingColors.map((colorItem, idx) => {
+      const specificColor = rawColors ? rawColors[idx] : null;
+      const productSpecificImage = specificColor?.image?.trim() || dto.image.trim();
+      const rawGallery =
+        Array.isArray(specificColor?.galleryImages) && specificColor.galleryImages.length > 0
+          ? specificColor.galleryImages.map((u: string) => u.trim()).filter(Boolean)
+          : Array.isArray(dto.galleryImages) && dto.galleryImages.length > 0
+            ? dto.galleryImages.map((u: string) => u.trim()).filter(Boolean)
+            : [productSpecificImage];
+
+      const productSpecificGallery = rawGallery.includes(productSpecificImage)
+        ? rawGallery
+        : [productSpecificImage, ...rawGallery];
+
+      const productSpecificStock =
+        specificColor?.stockQuantity != null
+          ? Number(specificColor.stockQuantity)
+          : Number(dto.stockQuantity);
+
+      return {
+        id: colorItem.productId,
+        colorGroupId,
+        colorName: colorItem.name,
+        colorHex: colorItem.hex,
+        vendorId: officialVendorId,
+        categoryId: category.id,
+        brand: cleanBrand,
+        title: rawColors && rawColors.length > 1 ? `${dto.title.trim()} - ${colorItem.name}` : dto.title.trim(),
+        description: dto.description.trim(),
+        price: Number(dto.price),
+        originalPrice: Number(dto.originalPrice),
+        discount,
+        rating: 4.8,
+        reviewsCount: 0,
+        stockQuantity: productSpecificStock,
+        stockBadge: 'DARK STORE STOCK',
+        readyToShip: dto.readyToShip !== false,
+        gender: 'Women',
+        sizes: dto.sizes,
+        fabric: dto.fabric?.trim() || null,
+        origin: dto.origin?.trim() || null,
+        colors: siblingColors,
+        specifications: dto.specifications || undefined,
+        certification: dto.certification?.trim() || 'Silk Mark Certified',
+        tags: ['dark-store', 'official-store', 'fast-delivery', colorItem.name.toLowerCase()],
+        image: productSpecificImage,
+        altText: `${dto.altText.trim()} in ${colorItem.name}`,
+        galleryImages: productSpecificGallery,
+        fulfillmentType: 'DARK_STORE',
+        darkStoreHubId: hub.id,
+        hubAssignment: hub.name || hub.locality || 'Indiranagar Express Pod',
+        tryAndBuyEligible: true,
+        category: category.name,
+        vendorName: officialStoreName,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    const primaryProduct = createdProducts[0];
 
     // 5. Persist to PostgreSQL if connected
     if (this.prisma.isConnectedToDb) {
@@ -540,66 +587,81 @@ export class AdminCatalogService {
           },
         });
 
-        await this.prisma.product.create({
-          data: {
-            id: newProductEntity.id,
-            vendorId: officialVendorId,
-            categoryId: category.id,
-            brand: newProductEntity.brand,
-            title: newProductEntity.title,
-            description: newProductEntity.description,
-            price: newProductEntity.price,
-            originalPrice: newProductEntity.originalPrice,
-            discount: newProductEntity.discount,
-            rating: newProductEntity.rating,
-            reviewsCount: newProductEntity.reviewsCount,
-            stockQuantity: newProductEntity.stockQuantity,
-            stockBadge: newProductEntity.stockBadge,
-            readyToShip: newProductEntity.readyToShip,
-            sizes: newProductEntity.sizes,
-            fabric: newProductEntity.fabric,
-            origin: newProductEntity.origin,
-            image: newProductEntity.image,
-            altText: newProductEntity.altText,
-            galleryImages: newProductEntity.galleryImages,
-            fulfillmentType: 'DARK_STORE' as any,
-            darkStoreHubId: hub.id,
-            tryAndBuyEligible: true,
-          },
-        });
+        for (const prod of createdProducts) {
+          try {
+            await this.prisma.product.create({
+              data: {
+                id: prod.id,
+                colorGroupId: prod.colorGroupId,
+                colorName: prod.colorName,
+                colorHex: prod.colorHex,
+                vendorId: officialVendorId,
+                categoryId: category.id,
+                brand: prod.brand,
+                title: prod.title,
+                description: prod.description,
+                price: prod.price,
+                originalPrice: prod.originalPrice,
+                discount: prod.discount,
+                rating: prod.rating,
+                reviewsCount: prod.reviewsCount,
+                stockQuantity: prod.stockQuantity,
+                stockBadge: prod.stockBadge,
+                readyToShip: prod.readyToShip,
+                sizes: prod.sizes,
+                fabric: prod.fabric,
+                origin: prod.origin,
+                image: prod.image,
+                altText: prod.altText,
+                galleryImages: prod.galleryImages,
+                fulfillmentType: 'DARK_STORE' as any,
+                darkStoreHubId: hub.id,
+                tryAndBuyEligible: true,
+              } as any,
+            });
+          } catch (e) {}
+        }
       } catch (err: any) {
         // Fallback store handles in-memory presentation
       }
     }
 
-    // 6. Update authoritative in-memory store
-    (store.products as any[]).unshift(newProductEntity as any);
+    // 6. Update authoritative in-memory store with each separate product
+    for (const prod of createdProducts) {
+      (store.products as any[]).unshift(prod as any);
+    }
 
     // 7. Audit log event
     this.prisma.recordAuditEvent({
       actorId: actorId || 'ADM-001',
       actorName: actorName || 'Operations Admin',
       actionType: 'PRODUCT_CREATED' as any,
-      entityId: newProductEntity.id,
-      entityName: newProductEntity.title,
+      entityId: primaryProduct.id,
+      entityName: primaryProduct.title,
       entityType: 'Product' as any,
-      summary: `Created Dark Store product '${newProductEntity.title}' for Affordz Official Store (Hub: ${hub.name || hub.id}, Stock: ${newProductEntity.stockQuantity})`,
-      targetDescription: `Catalog SKU #${newProductEntity.id}`,
+      summary: `Created ${createdProducts.length} separate Dark Store color products for '${dto.title}' (Hub: ${hub.name || hub.id}, Group: ${colorGroupId})`,
+      targetDescription: `Catalog Group #${colorGroupId}`,
       changePayload: {
-        id: newProductEntity.id,
-        price: newProductEntity.price,
-        originalPrice: newProductEntity.originalPrice,
-        discount: newProductEntity.discount,
+        id: primaryProduct.id,
+        group: colorGroupId,
+        colorwaysCount: createdProducts.length,
+        colors: siblingColors.map((c) => c.name),
+        price: primaryProduct.price,
+        originalPrice: primaryProduct.originalPrice,
         hubId: hub.id,
-        stock: newProductEntity.stockQuantity,
+        stock: primaryProduct.stockQuantity,
       },
-      entityLink: `/admin/products/${newProductEntity.id}`,
+      entityLink: `/admin/products/${primaryProduct.id}`,
     });
 
     return {
       success: true,
-      message: `Dark Store product '${newProductEntity.title}' created and assigned to Affordz Official Store.`,
-      product: newProductEntity,
+      message:
+        createdProducts.length > 1
+          ? `Created ${createdProducts.length} separate Dark Store colorway products for '${dto.title}'.`
+          : `Dark Store product '${primaryProduct.title}' created and assigned to Affordz Official Store.`,
+      product: primaryProduct,
+      colorways: createdProducts,
     };
   }
 }

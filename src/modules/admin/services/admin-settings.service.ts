@@ -64,14 +64,16 @@ export class AdminSettingsService {
 
   async getPreferences() {
     const store = this.prisma.getStore();
+    const prefs = store.workspacePreferences || {
+      defaultPageSize: 10,
+      currencyStandard: 'INR (₹)',
+      timestampFormat: 'IST',
+      highDensityRows: false,
+      audioAlertExceptions: true,
+    };
     return {
-      data: store.workspacePreferences || {
-        defaultPageSize: 10,
-        currencyStandard: 'INR (₹)',
-        timestampFormat: 'IST',
-        highDensityRows: false,
-        audioAlertExceptions: true,
-      },
+      ...prefs,
+      data: prefs,
     };
   }
 
