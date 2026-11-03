@@ -5,6 +5,11 @@ export class OrderPickupDto {
   @IsArray()
   @IsString({ each: true })
   packageImages?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  verificationPhotos?: string[];
 }
 
 export class OrderDeliverDto {

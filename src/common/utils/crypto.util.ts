@@ -1,6 +1,20 @@
 import * as crypto from 'crypto';
 
-const DEFAULT_SECRET = process.env.JWT_SECRET || 'kudicart_production_jwt_signing_key_secure_2026';
+/**
+ * Resolve JWT signing secret from environment.
+ * Rejects startup without JWT_SECRET in production.
+ */
+export function getJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    if (process.env.APP_ENV === 'production' || process.env.NODE_ENV === 'production') {
+      throw new Error('FATAL: JWT_SECRET environment variable is required in production mode');
+    }
+    // Isolated development / test secret (strictly blocked in production)
+    return 'kudicart_dev_testing_only_jwt_secret_not_for_production';
+  }
+  return secret;
+}
 
 /**
  * Hash a plain-text password using PBKDF2 with 100,000 iterations and a random salt
@@ -31,13 +45,14 @@ export function verifyPassword(password: string, combinedHash: string): boolean 
 }
 
 /**
- * Generate a standard 3-part HMAC-SHA256 JWT string
+ * Generate a standard 3-part HMAC-SHA256 JWT string with cryptographic signature
  */
 export function createJwtToken(
   payload: Record<string, any>,
-  secret: string = DEFAULT_SECRET,
+  secret?: string,
   expiresInSeconds: number = 86400, // 24 hours
 ): string {
+  const signingSecret = secret || getJwtSecret();
   const header = {
     alg: 'HS256',
     typ: 'JWT',
@@ -55,7 +70,7 @@ export function createJwtToken(
   const signatureInput = `${encodedHeader}.${encodedPayload}`;
 
   const signature = crypto
-    .createHmac('sha256', secret)
+    .createHmac('sha256', signingSecret)
     .update(signatureInput)
     .digest('base64url');
 
@@ -63,11 +78,11 @@ export function createJwtToken(
 }
 
 /**
- * Verify and decode an HMAC-SHA256 JWT string
+ * Verify and decode an HMAC-SHA256 JWT string with timing-safe signature comparison
  */
 export function verifyJwtToken(
   token: string,
-  secret: string = DEFAULT_SECRET,
+  secret?: string,
 ): { valid: boolean; payload?: any; error?: string } {
   if (!token || typeof token !== 'string') {
     return { valid: false, error: 'Token missing or invalid' };
@@ -79,22 +94,50 @@ export function verifyJwtToken(
   }
 
   const [encodedHeader, encodedPayload, signature] = parts;
-  const signatureInput = `${encodedHeader}.${encodedPayload}`;
+  if (!signature) {
+    return { valid: false, error: 'Token signature missing' };
+  }
 
-  // Validate signature in production or if secret matches
+  const signatureInput = `${encodedHeader}.${encodedPayload}`;
+  const verificationSecret = secret || getJwtSecret();
+
   try {
+    // Enforce JWT header algorithm restriction to prevent algorithm confusion attacks
+    const headerJson = Buffer.from(encodedHeader, 'base64url').toString('utf-8');
+    const header = JSON.parse(headerJson);
+    if (!header || header.alg !== 'HS256') {
+      return { valid: false, error: 'Unsupported or prohibited JWT algorithm' };
+    }
+
     const expectedSignature = crypto
-      .createHmac('sha256', secret)
+      .createHmac('sha256', verificationSecret)
       .update(signatureInput)
       .digest('base64url');
+
+    const sigBuffer = Buffer.from(signature);
+    const expBuffer = Buffer.from(expectedSignature);
+
+    // Cryptographic timing-safe signature verification to prevent timing attacks
+    if (
+      sigBuffer.length !== expBuffer.length ||
+      !crypto.timingSafeEqual(sigBuffer, expBuffer)
+    ) {
+      return { valid: false, error: 'Invalid token signature' };
+    }
 
     // Decode payload
     const payloadJson = Buffer.from(encodedPayload, 'base64url').toString('utf-8');
     const payload = JSON.parse(payloadJson);
 
     // Check expiration
-    if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) {
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.exp && now >= payload.exp) {
       return { valid: false, error: 'Token has expired' };
+    }
+
+    // Check not before if present
+    if (payload.nbf && now < payload.nbf) {
+      return { valid: false, error: 'Token is not yet valid' };
     }
 
     return { valid: true, payload };
@@ -102,4 +145,5 @@ export function verifyJwtToken(
     return { valid: false, error: err.message || 'Signature verification failed' };
   }
 }
+
 

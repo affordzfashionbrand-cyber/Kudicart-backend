@@ -27,11 +27,13 @@ export class DriverOrdersService {
   ) {}
 
   private resolveDriver(driverId?: string) {
+    if (!driverId) {
+      throw new BadRequestException('Driver identifier is required');
+    }
     const store = this.prisma.getStore();
-    const id = driverId || 'drv-1';
-    const driver = store.drivers.find((d) => d.id === id || d.userId === id);
+    const driver = store.drivers.find((d) => d.id === driverId || d.userId === driverId);
     if (!driver) {
-      throw new NotFoundException(`Driver with identifier ${id} not found`);
+      throw new NotFoundException(`Driver profile not found for identifier: ${driverId}`);
     }
     return driver;
   }
@@ -53,7 +55,7 @@ export class DriverOrdersService {
     }
 
     const unreadCount = store.notifications.filter(
-      (n) => (n.driverId === driver.id || n.driverId === 'drv-1') && !n.read,
+      (n) => n.driverId === driver.id && !n.read,
     ).length;
 
     return {
@@ -154,8 +156,9 @@ export class DriverOrdersService {
 
     order.status = 'PICKED_UP';
     order.updatedAt = new Date().toISOString();
-    if (dto?.packageImages) {
-      (order as any).pickupImages = dto.packageImages;
+    const pickupPhotos = dto?.packageImages || dto?.verificationPhotos;
+    if (pickupPhotos) {
+      (order as any).pickupImages = pickupPhotos;
     }
 
     order.history.push({
@@ -250,6 +253,23 @@ export class DriverOrdersService {
     }
 
     driver.completedDeliveries += 1;
+
+    // FIFO Re-Entry: Driver re-enters at the tail of the queue with fresh availableSince
+    if (driver.isOnline) {
+      const completionTime = new Date();
+      driver.availableSince = completionTime.toISOString();
+
+      if (this.prisma.isConnectedToDb) {
+        try {
+          await this.prisma.driverProfile.updateMany({
+            where: { OR: [{ id: driver.id }, { userId: driver.id }] },
+            data: { availableSince: completionTime },
+          });
+        } catch (dbErr: any) {
+          console.warn('Prisma driver FIFO re-entry update error:', dbErr?.message);
+        }
+      }
+    }
 
     order.history.push({
       status: 'DELIVERED',

@@ -14,6 +14,7 @@ import { AddressService } from './modules/address/address.service';
 import { OrdersController } from './modules/orders/orders.controller';
 import { OrdersService } from './modules/orders/orders.service';
 import { StateMachineService } from './modules/orders/state-machine.service';
+import { DispatchService } from './modules/orders/dispatch.service';
 import { PaymentsController } from './modules/payments/payments.controller';
 import { PaymentsService } from './modules/payments/payments.service';
 import { ReviewsController } from './modules/reviews/reviews.controller';
@@ -26,9 +27,12 @@ import { HealthModule } from './modules/health/health.module';
 import { PaymentsWebhookController } from './modules/payments/payments-webhook.controller';
 import { QueueModule } from './modules/queue/queue.module';
 import { MediaModule } from './modules/media/media.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
+import { VendorController } from './modules/vendor/vendor.controller';
+import { VendorService } from './modules/vendor/vendor.service';
 
 @Module({
-  imports: [PrismaModule, DriverModule, AdminModule, HealthModule, QueueModule, MediaModule],
+  imports: [PrismaModule, DriverModule, AdminModule, HealthModule, QueueModule, MediaModule, NotificationsModule],
   controllers: [
     AuthController,
     UsersController,
@@ -40,6 +44,7 @@ import { MediaModule } from './modules/media/media.module';
     PaymentsWebhookController,
     ReviewsController,
     SupportController,
+    VendorController,
   ],
   providers: [
     FirebaseAdminService,
@@ -53,7 +58,9 @@ import { MediaModule } from './modules/media/media.module';
     PaymentsService,
     ReviewsService,
     SupportService,
+    VendorService,
+    DispatchService,
   ],
-  exports: [PrismaModule, StateMachineService, DriverModule, AdminModule, QueueModule, MediaModule],
+  exports: [PrismaModule, StateMachineService, DispatchService, DriverModule, AdminModule, QueueModule, MediaModule],
 })
 export class AppModule {}

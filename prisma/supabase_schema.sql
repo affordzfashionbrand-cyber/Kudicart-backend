@@ -312,3 +312,108 @@ ALTER TABLE "Address" ADD COLUMN IF NOT EXISTS "pincode" TEXT NOT NULL DEFAULT '
 -- 4. Alter Order table to allow addressId to be nullable with SET NULL on delete, and store deliveryAddress snapshot
 ALTER TABLE "Order" ALTER COLUMN "addressId" DROP NOT NULL;
 ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "deliveryAddress" JSONB;
+
+-- Migration: 20261103_order_vendor_driver_status
+-- Description: Expand OrderStatus enum, add vendor/driverProfile relations to Order and TryAndBuySession, and create DispatchAssignment
+
+ALTER TYPE "OrderStatus" ADD VALUE IF NOT EXISTS 'RETURNING';
+ALTER TYPE "OrderStatus" ADD VALUE IF NOT EXISTS 'RETURNED';
+ALTER TYPE "OrderStatus" ADD VALUE IF NOT EXISTS 'CANCELLED';
+
+ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "vendorId" TEXT;
+ALTER TABLE "Order" ADD COLUMN IF NOT EXISTS "driverProfileId" TEXT;
+
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'Order_vendorId_fkey'
+    ) THEN
+        ALTER TABLE "Order" ADD CONSTRAINT "Order_vendorId_fkey"
+            FOREIGN KEY ("vendorId") REFERENCES "Vendor"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'Order_driverProfileId_fkey'
+    ) THEN
+        ALTER TABLE "Order" ADD CONSTRAINT "Order_driverProfileId_fkey"
+            FOREIGN KEY ("driverProfileId") REFERENCES "DriverProfile"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS "Order_customerId_idx" ON "Order"("customerId");
+CREATE INDEX IF NOT EXISTS "Order_vendorId_idx" ON "Order"("vendorId");
+CREATE INDEX IF NOT EXISTS "Order_driverId_idx" ON "Order"("driverId");
+CREATE INDEX IF NOT EXISTS "Order_driverProfileId_idx" ON "Order"("driverProfileId");
+CREATE INDEX IF NOT EXISTS "Order_status_idx" ON "Order"("status");
+CREATE INDEX IF NOT EXISTS "Order_createdAt_idx" ON "Order"("createdAt");
+
+CREATE TABLE IF NOT EXISTS "DispatchAssignment" (
+    "id" TEXT NOT NULL,
+    "orderId" TEXT NOT NULL,
+    "driverProfileId" TEXT,
+    "status" TEXT NOT NULL DEFAULT 'PENDING',
+    "offeredAt" TIMESTAMP(3),
+    "expiresAt" TIMESTAMP(3),
+    "respondedAt" TIMESTAMP(3),
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "DispatchAssignment_pkey" PRIMARY KEY ("id")
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "DispatchAssignment_orderId_key" ON "DispatchAssignment"("orderId");
+CREATE INDEX IF NOT EXISTS "DispatchAssignment_status_idx" ON "DispatchAssignment"("status");
+CREATE INDEX IF NOT EXISTS "DispatchAssignment_driverProfileId_idx" ON "DispatchAssignment"("driverProfileId");
+CREATE INDEX IF NOT EXISTS "DispatchAssignment_createdAt_idx" ON "DispatchAssignment"("createdAt");
+
+-- DriverProfile availableSince
+ALTER TABLE "DriverProfile" ADD COLUMN IF NOT EXISTS "availableSince" TIMESTAMP(3);
+CREATE INDEX IF NOT EXISTS "DriverProfile_fifo_idx" ON "DriverProfile"("isOnline", "kycStatus", "availableSince");
+
+-- DeviceToken Table
+CREATE TABLE IF NOT EXISTS "DeviceToken" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "role" "Role" NOT NULL,
+    "platform" TEXT NOT NULL,
+    "token" TEXT NOT NULL,
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "lastSeenAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "DeviceToken_pkey" PRIMARY KEY ("id")
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "DeviceToken_token_key" ON "DeviceToken"("token");
+CREATE INDEX IF NOT EXISTS "DeviceToken_userId_role_idx" ON "DeviceToken"("userId", "role");
+CREATE INDEX IF NOT EXISTS "DeviceToken_token_idx" ON "DeviceToken"("token");
+
+-- OutboxEvent Table
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'OutboxStatus') THEN
+        CREATE TYPE "OutboxStatus" AS ENUM ('PENDING', 'PUBLISHED', 'FAILED');
+    END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS "OutboxEvent" (
+    "id" TEXT NOT NULL,
+    "aggregateType" TEXT NOT NULL,
+    "aggregateId" TEXT NOT NULL,
+    "eventType" TEXT NOT NULL,
+    "payload" JSONB NOT NULL,
+    "status" "OutboxStatus" NOT NULL DEFAULT 'PENDING',
+    "attempts" INTEGER NOT NULL DEFAULT 0,
+    "lastError" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "publishedAt" TIMESTAMP(3),
+
+    CONSTRAINT "OutboxEvent_pkey" PRIMARY KEY ("id")
+);
+
+CREATE INDEX IF NOT EXISTS "OutboxEvent_status_createdAt_idx" ON "OutboxEvent"("status", "createdAt");
+CREATE INDEX IF NOT EXISTS "OutboxEvent_aggregateType_aggregateId_idx" ON "OutboxEvent"("aggregateType", "aggregateId");
+
+

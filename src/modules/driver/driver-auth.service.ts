@@ -3,10 +3,13 @@ import {
   BadRequestException,
   UnauthorizedException,
   Logger,
+  Optional,
 } from '@nestjs/common';
 import { randomInt } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Role } from '../../common/enums/role.enum';
+import { createJwtToken } from '../../common/utils/crypto.util';
+import { FirebaseAdminService } from '../auth/firebase-admin.service';
 
 interface StoredOtp {
   code: string;
@@ -21,7 +24,10 @@ export class DriverAuthService {
   // a distributed cache (e.g., Redis) is required to share state across nodes.
   private otpStore = new Map<string, StoredOtp>();
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    @Optional() private firebaseAdmin?: FirebaseAdminService,
+  ) {}
 
   cleanAndValidatePhone(phoneNumber: string): string {
     const errorMsg = 'Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.';
@@ -213,7 +219,135 @@ export class DriverAuthService {
       driverId: driver.id,
       kycStatus: driver.kycStatus,
     };
-    const token = `header.${Buffer.from(JSON.stringify(payload)).toString('base64')}.sig`;
+    const token = createJwtToken(payload);
+
+    return {
+      success: true,
+      token,
+      role: Role.DRIVER,
+      kycStatus: driver.kycStatus,
+      user: {
+        id: driver.userId,
+        driverId: driver.id,
+        name: driver.name,
+        fullName: driver.fullName,
+        phone: driver.phone,
+        email: driver.email,
+        kycStatus: driver.kycStatus,
+        isOnline: driver.isOnline,
+        workPreference: driver.workPreference,
+      },
+    };
+  }
+
+  async loginFirebase(idToken: string) {
+    if (!idToken) {
+      throw new BadRequestException('Firebase ID token is required');
+    }
+
+    if (!this.firebaseAdmin) {
+      throw new UnauthorizedException('Firebase authentication is not configured on this server');
+    }
+
+    const decoded = await this.firebaseAdmin.verifyIdToken(idToken);
+    const store = this.prisma.getStore();
+
+    const cleanPhone = decoded.phoneNumber
+      ? decoded.phoneNumber.replace(/[^0-9]/g, '').slice(-10)
+      : '';
+
+    let driver = store.drivers.find(
+      (d) =>
+        (d.userId && d.userId === decoded.uid) ||
+        (cleanPhone && d.phone && d.phone.replace(/[^0-9]/g, '').endsWith(cleanPhone)),
+    );
+
+    let driverUser = store.users.find(
+      (u) =>
+        u.firebaseUid === decoded.uid ||
+        (cleanPhone && u.phone && u.phone.replace(/[^0-9]/g, '').endsWith(cleanPhone)),
+    );
+
+    if (!driverUser) {
+      const newUserId = `usr-drv-${Date.now()}`;
+      driverUser = {
+        id: newUserId,
+        firebaseUid: decoded.uid,
+        phone: decoded.phoneNumber || '+91 98765 43210',
+        email: decoded.email || `driver.${decoded.uid.substring(0, 8)}@kudicart.in`,
+        name: decoded.name || 'New Delivery Partner',
+        avatar: null,
+        role: 'DRIVER',
+        status: 'ACTIVE',
+        createdAt: new Date().toISOString(),
+      };
+      store.users.push(driverUser);
+    }
+
+    if (!driver) {
+      const newDriverId = `KC-DRV-${randomInt(1000, 10000)}`;
+      driver = {
+        id: newDriverId,
+        userId: driverUser.id,
+        fullName: driverUser.name,
+        name: driverUser.name,
+        role: 'Delivery Partner',
+        status: 'Pending Verification',
+        phone: driverUser.phone,
+        email: driverUser.email,
+        tier: 'Bronze Tier',
+        avatarInitial: 'DP',
+        aadhaarNumber: '',
+        panNumber: '',
+        dob: '',
+        licenseNumber: '',
+        workPreference: 'PART_TIME',
+        rating: 5.0,
+        completedDeliveries: 0,
+        isOnline: false,
+        kycStatus: 'NOT_SUBMITTED',
+        vehicle: {
+          registrationNumber: '',
+          vehicleType: 'Bike',
+          make: '',
+          model: '',
+          rcStatus: 'Under review',
+        },
+        documents: {
+          aadhaar: { front: null, back: null, status: 'PENDING' },
+          pan: { front: null, back: null, status: 'PENDING' },
+          drivingLicence: { front: null, back: null, status: 'PENDING' },
+          vehicleRc: { front: null, back: null, status: 'PENDING' },
+          selfie: null,
+        },
+        workSummary: {
+          totalEarnings: 0,
+          loginHours: '0h',
+          ordersDone: 0,
+          totalSlot: '09:00 AM — 06:00 PM',
+          workingDays: '0 / 6 days',
+        },
+        currentLocation: {
+          latitude: 12.9716,
+          longitude: 77.5946,
+          heading: 0,
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      store.drivers.push(driver);
+    }
+
+    const payload = {
+      uid: driver.userId,
+      sub: driver.userId,
+      phone_number: driver.phone,
+      email: driver.email,
+      name: driver.fullName,
+      role: Role.DRIVER,
+      driverId: driver.id,
+      kycStatus: driver.kycStatus,
+    };
+    const token = createJwtToken(payload);
 
     return {
       success: true,

@@ -63,6 +63,7 @@ export const INITIAL_DRIVERS = [
     rating: 4.9,
     completedDeliveries: 428,
     isOnline: true,
+    availableSince: '2026-01-01T08:00:00.000Z',
     kycStatus: 'APPROVED',
     rejectionReason: null,
     vehicle: 'KA 03 EV 4821 (Electric Scooter)',

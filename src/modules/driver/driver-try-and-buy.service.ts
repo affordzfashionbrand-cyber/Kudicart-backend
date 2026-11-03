@@ -18,11 +18,13 @@ export class DriverTryAndBuyService {
   constructor(private prisma: PrismaService) {}
 
   private resolveOrderAndDriver(driverId: string | undefined, orderId: string) {
+    if (!driverId) {
+      throw new BadRequestException('Driver identifier is required');
+    }
     const store = this.prisma.getStore();
-    const id = driverId || 'drv-1';
-    const driver = store.drivers.find((d) => d.id === id || d.userId === id);
+    const driver = store.drivers.find((d) => d.id === driverId || d.userId === driverId);
     if (!driver) {
-      throw new NotFoundException(`Driver ${id} not found`);
+      throw new NotFoundException(`Driver profile not found for identifier: ${driverId}`);
     }
 
     const order = store.orders.find((o) => o.id === orderId || o.orderNumber === orderId);
@@ -47,7 +49,7 @@ export class DriverTryAndBuyService {
     }
 
     const now = new Date();
-    const duration = (order as any).trialDurationMinutes || 20;
+    const duration = (order as any).trialDurationMinutes || 10;
     const endsAt = new Date(now.getTime() + duration * 60 * 1000);
 
     (order as any).handoverConfirmedAt = now.toISOString();
@@ -59,13 +61,39 @@ export class DriverTryAndBuyService {
     order.history.push({
       status: order.status,
       time: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      note: `Customer verified OTP ${dto.otp}. 20-minute Try & Buy trial session started.`,
+      note: `Customer verified OTP ${dto.otp}. 10-minute Try & Buy trial session started.`,
       actor: 'DRIVER',
     });
 
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.tryAndBuySession.upsert({
+          where: { orderId: order.id },
+          create: {
+            orderId: order.id,
+            driverProfileId: driver.id,
+            trialStartedAt: now,
+            trialEndsAt: endsAt,
+            trialDurationMinutes: duration,
+            stage: 'TRIAL_IN_PROGRESS',
+            handoverConfirmedAt: now,
+          },
+          update: {
+            trialStartedAt: now,
+            trialEndsAt: endsAt,
+            trialDurationMinutes: duration,
+            stage: 'TRIAL_IN_PROGRESS',
+            handoverConfirmedAt: now,
+          },
+        });
+      } catch (dbErr) {
+        console.warn('Prisma TryAndBuySession sync error on handover:', dbErr);
+      }
+    }
+
     return {
       success: true,
-      message: 'Handover confirmed. 20-minute trial session started.',
+      message: 'Handover confirmed. 10-minute trial session started.',
       order,
     };
   }
@@ -105,6 +133,21 @@ export class DriverTryAndBuyService {
     (order as any).refundAmount = refundAmount;
     (order as any).amountDue = amountDue;
     (order as any).tryAndBuyStage = 'SELECTION_CONFIRMED';
+
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.tryAndBuySession.updateMany({
+          where: { orderId: order.id },
+          data: {
+            keptItemIds: retainedItems.map((i: any) => i.id),
+            returnedItemIds: returnedItems.map((i: any) => i.id),
+            stage: 'SELECTION_CONFIRMED',
+          },
+        });
+      } catch (dbErr) {
+        console.warn('Prisma TryAndBuySession sync error on selections:', dbErr);
+      }
+    }
 
     return {
       success: true,
@@ -160,12 +203,55 @@ export class DriverTryAndBuyService {
       (order as any).tryAndBuyStage = undefined;
       driver.completedDeliveries += 1;
 
+    // FIFO Re-Entry: Driver re-enters at the tail of the queue
+    if (driver.isOnline) {
+      const completionTime = new Date();
+      driver.availableSince = completionTime.toISOString();
+      if (this.prisma.isConnectedToDb) {
+        try {
+          await this.prisma.driverProfile.updateMany({
+            where: { OR: [{ id: driver.id }, { userId: driver.id }] },
+            data: { availableSince: completionTime },
+          });
+        } catch (dbErr: any) {
+          console.warn('Prisma driver FIFO re-entry update error:', dbErr?.message);
+        }
+      }
+    }
+
+      // FIFO Re-Entry: Driver re-enters at the tail of the queue
+      if (driver.isOnline) {
+        const completionTime = new Date();
+        driver.availableSince = completionTime.toISOString();
+        if (this.prisma.isConnectedToDb) {
+          try {
+            await this.prisma.driverProfile.updateMany({
+              where: { OR: [{ id: driver.id }, { userId: driver.id }] },
+              data: { availableSince: completionTime },
+            });
+          } catch (dbErr: any) {
+            console.warn('Prisma driver FIFO re-entry update error:', dbErr?.message);
+          }
+        }
+      }
+
       order.history.push({
         status: 'DELIVERED',
         time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
         note: `All items kept by customer. Payment settled. Order marked DELIVERED.`,
         actor: 'DRIVER',
       });
+
+      if (this.prisma.isConnectedToDb) {
+        try {
+          await this.prisma.order.update({
+            where: { id: order.id },
+            data: { status: 'DELIVERED', paymentStatus: 'COMPLETED' },
+          });
+        } catch (dbErr) {
+          console.warn('Prisma order DELIVERED update error:', dbErr);
+        }
+      }
 
       return {
         success: true,
@@ -189,6 +275,17 @@ export class DriverTryAndBuyService {
       note: `Payment settled. Return manifest ${manifestId} generated. Heading back to darkstore.`,
       actor: 'DRIVER',
     });
+
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: { status: 'RETURNING', paymentStatus: 'COMPLETED' },
+        });
+      } catch (dbErr) {
+        console.warn('Prisma order RETURNING update error:', dbErr);
+      }
+    }
 
     return {
       success: true,
@@ -228,12 +325,47 @@ export class DriverTryAndBuyService {
     (order as any).tryAndBuyStage = undefined;
     driver.completedDeliveries += 1;
 
+    // FIFO Re-Entry: Driver re-enters at the tail of the queue
+    if (driver.isOnline) {
+      const completionTime = new Date();
+      driver.availableSince = completionTime.toISOString();
+      if (this.prisma.isConnectedToDb) {
+        try {
+          await this.prisma.driverProfile.updateMany({
+            where: { OR: [{ id: driver.id }, { userId: driver.id }] },
+            data: { availableSince: completionTime },
+          });
+        } catch (dbErr: any) {
+          console.warn('Prisma driver FIFO re-entry update error:', dbErr?.message);
+        }
+      }
+    }
+
     order.history.push({
       status: 'DELIVERED',
       time: now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
       note: `Hub supervisor verified returned packages. Order officially reconciled and closed.`,
       actor: 'DRIVER',
     });
+
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.order.update({
+          where: { id: order.id },
+          data: { status: 'DELIVERED' },
+        });
+        await this.prisma.tryAndBuySession.updateMany({
+          where: { orderId: order.id },
+          data: {
+            storeReconciliationStatus: 'RECONCILED',
+            storeReconciledAt: now,
+            stage: 'RECONCILED',
+          },
+        });
+      } catch (dbErr) {
+        console.warn('Prisma order reconciliation error:', dbErr);
+      }
+    }
 
     return {
       success: true,

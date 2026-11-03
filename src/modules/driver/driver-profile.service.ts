@@ -3,6 +3,7 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { UpdateDriverProfileDto } from './dto/update-driver-profile.dto';
@@ -12,14 +13,18 @@ import { UpdateLocationDto } from './dto/update-location.dto';
 
 @Injectable()
 export class DriverProfileService {
+  private readonly logger = new Logger(DriverProfileService.name);
+
   constructor(private prisma: PrismaService) {}
 
   public resolveDriver(driverId?: string) {
+    if (!driverId) {
+      throw new BadRequestException('Driver identifier is required');
+    }
     const store = this.prisma.getStore();
-    const id = driverId || 'drv-1';
-    const driver = store.drivers.find((d) => d.id === id || d.userId === id);
+    const driver = store.drivers.find((d) => d.id === driverId || d.userId === driverId);
     if (!driver) {
-      throw new NotFoundException(`Driver with identifier ${id} not found`);
+      throw new NotFoundException(`Driver profile not found for identifier: ${driverId}`);
     }
     return driver;
   }
@@ -249,10 +254,30 @@ export class DriverProfileService {
     }
 
     driver.isOnline = isOnline;
+    driver.availableSince = isOnline ? (driver.availableSince || new Date().toISOString()) : null;
+
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.driverProfile.updateMany({
+          where: {
+            OR: [{ id: driver.id }, { userId: driver.userId || driver.id }],
+          },
+          data: {
+            isOnline,
+            availableSince: isOnline ? (driver.availableSince ? new Date(driver.availableSince) : new Date()) : null,
+            updatedAt: new Date(),
+          },
+        });
+      } catch (err: any) {
+        this.logger.warn(`Failed to update driver availability in database: ${err.message}`);
+      }
+    }
+
     return {
       success: true,
       driverId: driver.id,
       isOnline: driver.isOnline,
+      availableSince: driver.availableSince,
       message: `Driver status set to ${isOnline ? 'Online (Ready for assignments)' : 'Offline'}`,
     };
   }

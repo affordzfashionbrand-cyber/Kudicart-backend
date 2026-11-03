@@ -65,25 +65,24 @@ export class SupabaseStorageService {
 
       if (!response.ok) {
         const errorText = await response.text();
-        this.logger.warn(
-          `Supabase Storage upload warning (status ${response.status}): ${errorText}. Using deterministic public CDN endpoint.`,
+        this.logger.error(
+          `Supabase Storage upload failed (status ${response.status}): ${errorText}`,
         );
-      } else {
-        this.logger.log(`Successfully uploaded product image to Supabase Storage: ${filePath}`);
+        throw new BadRequestException(
+          `Image upload to storage provider failed: ${errorText || response.statusText}`,
+        );
       }
+
+      this.logger.log(`Successfully uploaded product image to Supabase Storage: ${filePath}`);
 
       return {
         url: publicUrl,
         path: filePath,
       };
     } catch (err: any) {
-      this.logger.warn(
-        `Supabase Storage network error (${err.message}). Using public URL scheme for image reference.`,
-      );
-      return {
-        url: publicUrl,
-        path: filePath,
-      };
+      if (err instanceof BadRequestException) throw err;
+      this.logger.error(`Supabase Storage network error: ${err.message}`);
+      throw new BadRequestException(`Media storage service unavailable: ${err.message}`);
     }
   }
 }

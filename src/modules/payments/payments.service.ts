@@ -125,29 +125,7 @@ export class PaymentsService {
     }
 
     const store: any = this.prisma.getStore();
-    let order: any = store.orders.find((o) => o.id === orderId || o.orderNumber === orderId);
-
-    if (!order && String(orderId).startsWith('ord-')) {
-      order = {
-        id: orderId,
-        orderNumber: `AF-${orderId.slice(-5)}`,
-        customerId: 'usr-1',
-        status: 'PLACED',
-        paymentMethod: 'RAZORPAY',
-        paymentStatus: 'PENDING',
-        razorpayOrderId: razorpayOrderId || `rzp_${orderId}`,
-        itemTotal: 1299,
-        deliveryFee: 40,
-        taxes: 65,
-        grandTotal: 1404,
-        etaMinutes: 18,
-        createdAt: new Date().toISOString(),
-        addressId: 'addr-1',
-        items: [],
-        history: [],
-      };
-      store.orders.unshift(order);
-    }
+    const order: any = store.orders.find((o) => o.id === orderId || o.orderNumber === orderId);
 
     if (!order) {
       throw new NotFoundException(`Order with ID ${orderId} not found`);
@@ -216,6 +194,36 @@ export class PaymentsService {
         method: 'RAZORPAY',
         createdAt: new Date().toISOString(),
       });
+    }
+
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.paymentTransaction.upsert({
+          where: { paymentId },
+          create: {
+            paymentId,
+            orderId: order.id,
+            razorpayOrderId: effectiveRazorpayOrderId,
+            amount: order.grandTotal,
+            currency: 'INR',
+            status: 'CAPTURED',
+            method: 'RAZORPAY',
+          },
+          update: {
+            status: 'CAPTURED',
+          },
+        });
+        await this.prisma.order.updateMany({
+          where: { OR: [{ id: order.id }, { orderNumber: order.id }] },
+          data: {
+            paymentStatus: 'COMPLETED',
+            razorpayOrderId: effectiveRazorpayOrderId,
+            razorpayPaymentId: paymentId,
+          },
+        });
+      } catch (err: any) {
+        this.logger.error(`Database paymentTransaction persistence failed: ${err.message}`);
+      }
     }
 
     return {

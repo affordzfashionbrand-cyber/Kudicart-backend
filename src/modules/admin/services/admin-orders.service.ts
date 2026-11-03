@@ -215,6 +215,17 @@ export class AdminOrdersService {
     order.driverId = driver.id;
     order.updatedAt = new Date().toISOString();
 
+    // Consume / clear driver's FIFO timestamp while occupied
+    driver.availableSince = null;
+    if (this.prisma.isConnectedToDb) {
+      this.prisma.driverProfile
+        .updateMany({
+          where: { OR: [{ id: driver.id }, { userId: driver.id }] },
+          data: { availableSince: null },
+        })
+        .catch(() => {});
+    }
+
     const now = new Date();
     const timeStr = `${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}`;
 

@@ -12,7 +12,7 @@ export class DriverNotificationsService {
   async getNotifications(driverId: string, category?: string) {
     const store = this.prisma.getStore();
     let notifs = store.notifications.filter(
-      (n) => n.driverId === driverId || n.driverId === 'drv-1',
+      (n) => n.driverId === driverId,
     );
 
     if (category) {
@@ -35,7 +35,7 @@ export class DriverNotificationsService {
       throw new NotFoundException(`Notification ${notificationId} not found`);
     }
 
-    if (notif.driverId !== driverId && notif.driverId !== 'drv-1') {
+    if (notif.driverId !== driverId) {
       throw new ForbiddenException('Cannot modify another driver’s notification');
     }
 
@@ -50,7 +50,7 @@ export class DriverNotificationsService {
   async markAllAsRead(driverId: string) {
     const store = this.prisma.getStore();
     store.notifications
-      .filter((n) => n.driverId === driverId || n.driverId === 'drv-1')
+      .filter((n) => n.driverId === driverId)
       .forEach((n) => {
         n.read = true;
       });
@@ -70,7 +70,7 @@ export class DriverNotificationsService {
     }
 
     const notif = store.notifications[index];
-    if (notif.driverId !== driverId && notif.driverId !== 'drv-1') {
+    if (notif.driverId !== driverId) {
       throw new ForbiddenException('Cannot delete another driver’s notification');
     }
 
@@ -85,7 +85,7 @@ export class DriverNotificationsService {
   async clearAll(driverId: string) {
     const store = this.prisma.getStore();
     store.notifications = store.notifications.filter(
-      (n) => n.driverId !== driverId && n.driverId !== 'drv-1',
+      (n) => n.driverId !== driverId,
     );
 
     return {

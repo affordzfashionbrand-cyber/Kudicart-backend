@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { DriverAuthService } from './driver-auth.service';
 import { DriverSendOtpDto, DriverVerifyOtpDto } from './dto/driver-auth.dto';
+import { FirebaseLoginDto } from '../auth/dto/firebase-login.dto';
 import { RateLimit } from '../../common/decorators/rate-limit.decorator';
 import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
@@ -54,6 +55,20 @@ export class DriverAuthController {
   @RateLimit({ points: 15, duration: 60 })
   async verifyOtpAlias(@Body() dto: DriverVerifyOtpDto) {
     return this.verifyOtp(dto);
+  }
+
+  @Post('login-firebase')
+  @HttpCode(HttpStatus.OK)
+  @RateLimit({ points: 15, duration: 60 })
+  async loginFirebase(@Body() dto: FirebaseLoginDto) {
+    return this.authService.loginFirebase(dto.idToken);
+  }
+
+  @Post('firebase/login')
+  @HttpCode(HttpStatus.OK)
+  @RateLimit({ points: 15, duration: 60 })
+  async firebaseLogin(@Body() dto: FirebaseLoginDto) {
+    return this.authService.loginFirebase(dto.idToken);
   }
 
   @Get('status')

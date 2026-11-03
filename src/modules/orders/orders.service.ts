@@ -3,6 +3,11 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  InternalServerErrorException,
+  Logger,
+  Optional,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StateMachineService, OrderStatus } from './state-machine.service';
@@ -10,14 +15,20 @@ import { CheckoutDto } from './dto/checkout.dto';
 import { Role } from '../../common/enums/role.enum';
 import { PaymentsService } from '../payments/payments.service';
 import { CartService } from '../cart/cart.service';
+import { DispatchService } from './dispatch.service';
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     private prisma: PrismaService,
     private stateMachine: StateMachineService,
     private paymentsService: PaymentsService,
     private cartService: CartService,
+    @Optional()
+    @Inject(forwardRef(() => DispatchService))
+    private dispatchService?: DispatchService,
   ) {}
 
   async checkout(userId: string, dto: CheckoutDto) {
@@ -214,9 +225,100 @@ export class OrdersService {
       ],
     };
 
+    // 5. Persist to PostgreSQL if connected
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          for (const item of items) {
+            await tx.product.updateMany({
+              where: { id: item.productId },
+              data: { stockQuantity: { decrement: item.quantity } },
+            });
+          }
+
+          await tx.order.create({
+            data: {
+              id: newOrder.id,
+              orderNumber: newOrder.orderNumber,
+              customerId: userId,
+              vendorId: detectedVendorId,
+              addressId: dto.addressId || address?.id,
+              deliveryAddress: address as any,
+              status: 'PLACED',
+              paymentMethod: dto.paymentMethod as any,
+              paymentStatus: 'PENDING',
+              razorpayOrderId: newOrder.razorpayOrderId,
+              itemTotal,
+              deliveryFee,
+              taxes,
+              grandTotal,
+              etaMinutes: newOrder.etaMinutes,
+              isTryAndBuy,
+              couponCode: validCouponCode,
+              discountAmount,
+              items: {
+                create: items.map((it) => ({
+                  id: it.id,
+                  productId: it.productId,
+                  title: it.title,
+                  brand: it.brand,
+                  size: it.size,
+                  trialSize: it.trialSize,
+                  price: it.price,
+                  quantity: it.quantity,
+                  image: it.image,
+                })),
+              },
+              history: {
+                create: [
+                  {
+                    status: 'PLACED',
+                    note: 'Order confirmed and placed by customer',
+                  },
+                ],
+              },
+              ...(isTryAndBuy
+                ? {
+                    tryAndBuySession: {
+                      create: {
+                        trialDurationMinutes: 10,
+                        stage: 'HANDOVER_PENDING',
+                      },
+                    },
+                  }
+                : {}),
+            },
+          });
+
+          // Atomically persist transactional outbox event
+          await tx.outboxEvent.create({
+            data: {
+              aggregateType: 'ORDER',
+              aggregateId: newOrder.id,
+              eventType: 'CUSTOMER_ORDER_PLACED',
+              payload: {
+                orderId: newOrder.id,
+                orderNumber: newOrder.orderNumber,
+                customerId: userId,
+                vendorId: detectedVendorId,
+                grandTotal,
+                isTryAndBuy,
+              },
+              status: 'PENDING',
+            },
+          });
+        });
+      } catch (err: any) {
+        this.logger.error(`Database checkout failed: ${err.message}`, err.stack);
+        throw new InternalServerErrorException(
+          `Unable to complete checkout: Database persistence failed (${err.message})`,
+        );
+      }
+    }
+
     store.orders.unshift(newOrder as any);
 
-    // 5. Clear Cart and reset coupon (skipped for standalone Buy Now to preserve user bag)
+    // 6. Clear Cart and reset coupon (skipped for standalone Buy Now to preserve user bag)
     if (!dto.isBuyNow) {
       await this.cartService.clearCart(userId);
     }
@@ -250,6 +352,36 @@ export class OrdersService {
       });
     }
 
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          await tx.order.updateMany({
+            where: { OR: [{ id: orderId }, { orderNumber: orderId }] },
+            data: {
+              status: 'ACCEPTED',
+              paymentStatus: 'COMPLETED',
+              razorpayPaymentId: paymentId,
+              razorpayOrderId: razorpayOrderId || order?.razorpayOrderId,
+            },
+          });
+          const ord = await tx.order.findFirst({
+            where: { OR: [{ id: orderId }, { orderNumber: orderId }] },
+          });
+          if (ord) {
+            await tx.orderStatusHistory.create({
+              data: {
+                orderId: ord.id,
+                status: 'ACCEPTED',
+                note: `Payment verified: order accepted automatically (Payment ID: ${paymentId})`,
+              },
+            });
+          }
+        });
+      } catch (err: any) {
+        this.logger.error(`Database verifyPayment failed: ${err.message}`);
+      }
+    }
+
     return {
       ...verification,
       orderStatus: order?.status || 'ACCEPTED',
@@ -257,6 +389,54 @@ export class OrdersService {
   }
 
   async getOrders(userId: string, role: string = Role.CUSTOMER, driverId?: string) {
+    if (this.prisma.isConnectedToDb) {
+      try {
+        let whereClause: any = {};
+        if (role === Role.ADMIN) {
+          whereClause = {};
+        } else if (role === Role.DRIVER) {
+          const activeDriverId = driverId || 'drv-1';
+          whereClause = {
+            OR: [
+              { driverId: activeDriverId },
+              { driverProfileId: activeDriverId },
+            ],
+          };
+        } else if (role === Role.VENDOR) {
+          whereClause = { vendorId: userId };
+        } else {
+          whereClause = { customerId: userId };
+        }
+
+        const dbOrders = await this.prisma.order.findMany({
+          where: whereClause,
+          include: {
+            items: true,
+            history: { orderBy: { createdAt: 'asc' } },
+            address: true,
+            tryAndBuySession: true,
+          },
+          orderBy: { createdAt: 'desc' },
+        });
+
+        if (dbOrders && dbOrders.length > 0) {
+          return dbOrders.map((o) => ({
+            ...o,
+            createdAt: o.createdAt.toISOString(),
+            updatedAt: o.updatedAt.toISOString(),
+            history: o.history.map((h) => ({
+              status: h.status,
+              time: h.createdAt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+              note: h.note || '',
+              actor: 'SYSTEM',
+            })),
+          }));
+        }
+      } catch (err: any) {
+        this.logger.error(`Database getOrders failed: ${err.message}`);
+      }
+    }
+
     const store = this.prisma.getStore();
     if (role === Role.ADMIN) {
       return store.orders;
@@ -265,52 +445,52 @@ export class OrdersService {
       const activeDriverId = driverId || 'drv-1';
       return store.orders.filter((o) => o.driverId === activeDriverId);
     }
+    if (role === Role.VENDOR) {
+      return store.orders.filter((o) => o.vendorId === userId);
+    }
     // Default to Customer
     return store.orders.filter((o) => o.customerId === userId);
   }
 
   async getOrderById(id: string, userId?: string, role?: string) {
-    const store = this.prisma.getStore();
-    let order: any = store.orders.find((o) => o.id === id || o.orderNumber === id);
-    if (!order && String(id).startsWith('ord-')) {
-      order = {
-        id,
-        orderNumber: `AF-${id.slice(-5)}`,
-        customerId: 'usr-1',
-        status: 'PLACED',
-        paymentMethod: 'COD',
-        paymentStatus: 'PENDING',
-        itemTotal: 1299,
-        deliveryFee: 40,
-        taxes: 65,
-        grandTotal: 1404,
-        etaMinutes: 18,
-        createdAt: new Date().toISOString(),
-        addressId: 'addr-1',
-        items: [
-          {
-            id: 'oi-1',
-            productId: 'prod-1',
-            title: 'Embroidered Anarkali Kurta Set',
-            brand: 'Avanya Ethnic',
-            size: 'M',
-            price: 1299,
-            quantity: 1,
-            image:
-              'https://images.unsplash.com/photo-1539109136881-3be0616acf4b?auto=format&fit=crop&w=800&q=85',
+    if (this.prisma.isConnectedToDb) {
+      try {
+        const dbOrder = await this.prisma.order.findFirst({
+          where: { OR: [{ id }, { orderNumber: id }] },
+          include: {
+            items: true,
+            history: { orderBy: { createdAt: 'asc' } },
+            address: true,
+            tryAndBuySession: true,
+            vendor: true,
+            driver: true,
           },
-        ],
-        history: [
-          {
-            status: 'PLACED',
-            time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-            note: 'Order placed by customer',
-            actor: 'CUSTOMER',
-          },
-        ],
-      };
-      store.orders.unshift(order);
+        });
+        if (dbOrder) {
+          if (role === Role.CUSTOMER && userId && dbOrder.customerId !== userId) {
+            throw new ForbiddenException('You are not authorized to view this order');
+          }
+          return {
+            ...dbOrder,
+            createdAt: dbOrder.createdAt.toISOString(),
+            updatedAt: dbOrder.updatedAt.toISOString(),
+            history: dbOrder.history.map((h) => ({
+              status: h.status,
+              time: h.createdAt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
+              note: h.note || '',
+              actor: 'SYSTEM',
+            })),
+            deliveryAddress: dbOrder.deliveryAddress || dbOrder.address,
+          };
+        }
+      } catch (err: any) {
+        if (err instanceof ForbiddenException) throw err;
+        this.logger.error(`Database getOrderById failed: ${err.message}`);
+      }
     }
+
+    const store = this.prisma.getStore();
+    const order: any = store.orders.find((o) => o.id === id || o.orderNumber === id);
     if (!order) {
       throw new NotFoundException(`Order with identifier ${id} not found`);
     }
@@ -427,45 +607,9 @@ export class OrdersService {
   // Admin Manual Assignment (D-006: Manual delivery assignment only - zero auto dispatch)
   async assignDriver(id: string, driverId: string, actorRole: string = Role.ADMIN) {
     const store = this.prisma.getStore();
-    let order: any = store.orders.find((o) => o.id === id || o.orderNumber === id);
-    if (!order && String(id).startsWith('ord-')) {
-      order = {
-        id,
-        orderNumber: `AF-${id.slice(-5)}`,
-        customerId: 'usr-1',
-        status: 'PLACED',
-        paymentMethod: 'COD',
-        paymentStatus: 'PENDING',
-        itemTotal: 1299,
-        deliveryFee: 40,
-        taxes: 65,
-        grandTotal: 1404,
-        etaMinutes: 18,
-        createdAt: new Date().toISOString(),
-        addressId: 'addr-1',
-        items: [
-          {
-            id: 'oi-1',
-            productId: 'prod-1',
-            title: 'Embroidered Anarkali Kurta Set',
-            brand: 'Avanya Ethnic',
-            size: 'M',
-            price: 1299,
-            quantity: 1,
-            image:
-              'https://images.unsplash.com/photo-1539109136881-3be0616acf4b?auto=format&fit=crop&w=800&q=85',
-          },
-        ],
-        history: [
-          {
-            status: 'PLACED',
-            time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-            note: 'Order placed by customer',
-            actor: 'CUSTOMER',
-          },
-        ],
-      };
-      store.orders.unshift(order);
+    const order: any = store.orders.find((o) => o.id === id || o.orderNumber === id);
+    if (!order) {
+      throw new NotFoundException(`Order with ID ${id} not found`);
     }
     if (!order) {
       throw new NotFoundException(`Order with ID ${id} not found`);
@@ -489,6 +633,35 @@ export class OrdersService {
       actor: actorRole,
     });
 
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          await tx.order.updateMany({
+            where: { OR: [{ id }, { orderNumber: id }] },
+            data: {
+              driverId: driver.id,
+              driverProfileId: driver.id,
+              status: 'ASSIGNED',
+            },
+          });
+          const ord = await tx.order.findFirst({
+            where: { OR: [{ id }, { orderNumber: id }] },
+          });
+          if (ord) {
+            await tx.orderStatusHistory.create({
+              data: {
+                orderId: ord.id,
+                status: 'ASSIGNED',
+                note: `Admin manually assigned rider ${driver.name} (${driver.vehicle})`,
+              },
+            });
+          }
+        });
+      } catch (err: any) {
+        this.logger.error(`Database assignDriver failed: ${err.message}`);
+      }
+    }
+
     return this.getOrderById(order.id);
   }
 
@@ -502,7 +675,15 @@ export class OrdersService {
   }
 
   async vendorReadyForPickup(id: string, actorRole: string = Role.VENDOR) {
-    return this.updateStatus(id, 'READY_FOR_PICKUP', 'Package ready at store pickup counter', actorRole);
+    await this.updateStatus(id, 'READY_FOR_PICKUP', 'Package ready at store pickup counter', actorRole);
+    if (this.dispatchService) {
+      try {
+        await this.dispatchService.dispatchOrderFifo(id);
+      } catch (err: any) {
+        this.logger.warn(`Automated FIFO dispatch: ${err.message}`);
+      }
+    }
+    return this.getOrderById(id);
   }
 
   async updateStatus(
@@ -512,45 +693,9 @@ export class OrdersService {
     actorRole?: string,
   ) {
     const store = this.prisma.getStore();
-    let order: any = store.orders.find((o) => o.id === id || o.orderNumber === id);
-    if (!order && String(id).startsWith('ord-')) {
-      order = {
-        id,
-        orderNumber: `AF-${id.slice(-5)}`,
-        customerId: 'usr-1',
-        status: 'PLACED',
-        paymentMethod: 'COD',
-        paymentStatus: 'PENDING',
-        itemTotal: 1299,
-        deliveryFee: 40,
-        taxes: 65,
-        grandTotal: 1404,
-        etaMinutes: 18,
-        createdAt: new Date().toISOString(),
-        addressId: 'addr-1',
-        items: [
-          {
-            id: 'oi-1',
-            productId: 'prod-1',
-            title: 'Embroidered Anarkali Kurta Set',
-            brand: 'Avanya Ethnic',
-            size: 'M',
-            price: 1299,
-            quantity: 1,
-            image:
-              'https://images.unsplash.com/photo-1539109136881-3be0616acf4b?auto=format&fit=crop&w=800&q=85',
-          },
-        ],
-        history: [
-          {
-            status: 'PLACED',
-            time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-            note: 'Order placed by customer',
-            actor: 'CUSTOMER',
-          },
-        ],
-      };
-      store.orders.unshift(order);
+    const order: any = store.orders.find((o) => o.id === id || o.orderNumber === id);
+    if (!order) {
+      throw new NotFoundException(`Order with ID ${id} not found`);
     }
     if (!order) {
       throw new NotFoundException(`Order with ID ${id} not found`);
@@ -581,6 +726,40 @@ export class OrdersService {
       note: note || `Order transitioned to ${nextStatus}`,
       actor: actorRole || 'SYSTEM',
     });
+
+    if (this.prisma.isConnectedToDb) {
+      try {
+        await this.prisma.$transaction(async (tx) => {
+          await tx.order.updateMany({
+            where: { OR: [{ id }, { orderNumber: id }] },
+            data: { status: nextStatus as any },
+          });
+          const ord = await tx.order.findFirst({
+            where: { OR: [{ id }, { orderNumber: id }] },
+            include: { items: true },
+          });
+          if (ord) {
+            await tx.orderStatusHistory.create({
+              data: {
+                orderId: ord.id,
+                status: nextStatus as any,
+                note: note || `Order transitioned to ${nextStatus}`,
+              },
+            });
+            if (nextStatus === 'CANCELLED' && ord.items) {
+              for (const it of ord.items) {
+                await tx.product.updateMany({
+                  where: { id: it.productId },
+                  data: { stockQuantity: { increment: it.quantity } },
+                });
+              }
+            }
+          }
+        });
+      } catch (err: any) {
+        this.logger.error(`Database updateStatus failed: ${err.message}`);
+      }
+    }
 
     return this.getOrderById(order.id);
   }

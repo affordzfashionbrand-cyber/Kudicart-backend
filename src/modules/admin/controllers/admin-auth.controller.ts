@@ -12,6 +12,7 @@ import {
 import { Request } from 'express';
 import { AdminAuthService } from '../services/admin-auth.service';
 import { AdminLoginDto } from '../dto/admin-login.dto';
+import { FirebaseLoginDto } from '../../auth/dto/firebase-login.dto';
 import { UpdateAdminProfileDto } from '../dto/admin-actions.dto';
 import { FirebaseAuthGuard } from '../../../common/guards/auth.guard';
 import { RolesGuard } from '../../../common/guards/roles.guard';
@@ -35,6 +36,26 @@ export class AdminAuthController {
       req.socket.remoteAddress;
     const userAgent = req.headers['user-agent'];
     return this.authService.login(dto, clientIp, userAgent);
+  }
+
+  @Post('firebase/login')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ points: 10, duration: 60 })
+  async firebaseLogin(@Body() dto: FirebaseLoginDto, @Req() req: Request) {
+    const clientIp =
+      req.headers['x-forwarded-for']?.toString().split(',')[0].trim() ||
+      req.socket.remoteAddress;
+    const userAgent = req.headers['user-agent'];
+    return this.authService.loginFirebase(dto.idToken, clientIp, userAgent);
+  }
+
+  @Post('login-firebase')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(RateLimitGuard)
+  @RateLimit({ points: 10, duration: 60 })
+  async loginFirebaseAlias(@Body() dto: FirebaseLoginDto, @Req() req: Request) {
+    return this.firebaseLogin(dto, req);
   }
 
   @Get('me')

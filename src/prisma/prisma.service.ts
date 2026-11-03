@@ -88,6 +88,9 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     surges: JSON.parse(JSON.stringify(INITIAL_SURGES)),
     notifications: JSON.parse(JSON.stringify(INITIAL_NOTIFICATIONS)),
     tryAndBuySessions: [] as any[],
+    dispatchAssignments: [] as any[],
+    deviceTokens: [] as any[],
+    outboxEvents: [] as any[],
     darkStores: JSON.parse(JSON.stringify(INITIAL_DARK_STORES)),
     vendors: [
       {
@@ -655,17 +658,30 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   };
 
   async onModuleInit() {
+    const isProduction =
+      process.env.APP_ENV === 'production' || process.env.NODE_ENV === 'production';
+
     if (process.env.DATABASE_URL) {
       try {
         await this.$connect();
         this.isConnectedToDb = true;
         this.logger.log('PrismaService: Successfully connected to PostgreSQL database.');
       } catch (err: any) {
+        if (isProduction) {
+          throw new Error(
+            `FATAL: PostgreSQL database connection failed in production mode: ${err.message}`,
+          );
+        }
         this.logger.warn(
-          `PrismaService: PostgreSQL connection failed (${err.message}). Operating with validated fallback store.`,
+          `PrismaService: PostgreSQL connection failed (${err.message}). Operating with validated fallback store in development/test.`,
         );
       }
     } else {
+      if (isProduction) {
+        throw new Error(
+          'FATAL: DATABASE_URL environment variable is strictly required in production mode',
+        );
+      }
       this.logger.log('PrismaService: Running in hybrid mode with authoritative in-memory store.');
     }
   }

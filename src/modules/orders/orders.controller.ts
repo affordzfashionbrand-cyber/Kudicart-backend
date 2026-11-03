@@ -10,6 +10,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { OrdersService } from './orders.service';
+import { DispatchService } from './dispatch.service';
 import { CheckoutDto } from './dto/checkout.dto';
 import { AssignDriverDto } from './dto/assign-driver.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
@@ -21,7 +22,10 @@ import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-
 @Controller('api/v1/orders')
 @UseGuards(FirebaseAuthGuard, RateLimitGuard)
 export class OrdersController {
-  constructor(private readonly ordersService: OrdersService) {}
+  constructor(
+    private readonly ordersService: OrdersService,
+    private readonly dispatchService: DispatchService,
+  ) {}
 
   @Post('checkout')
   @HttpCode(HttpStatus.CREATED)
@@ -84,5 +88,15 @@ export class OrdersController {
     @Body() body: AssignDriverDto,
   ) {
     return this.ordersService.assignDriver(id, body.driverId, user.role);
+  }
+
+  @Post(':id/dispatch-fifo')
+  async dispatchFifo(@Param('id') id: string) {
+    return this.dispatchService.dispatchOrderFifo(id);
+  }
+
+  @Get('dispatch/queue')
+  async getDispatchQueue() {
+    return this.dispatchService.getDispatchQueue();
   }
 }

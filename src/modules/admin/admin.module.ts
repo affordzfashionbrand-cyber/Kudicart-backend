@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../prisma/prisma.module';
 import { PaymentReconciliationService } from '../payments/payment-reconciliation.service';
+import { FirebaseAdminService } from '../auth/firebase-admin.service';
 
 // Controllers
 import { AdminAuthController } from './controllers/admin-auth.controller';
@@ -64,6 +65,7 @@ import { AdminSettingsService } from './services/admin-settings.service';
     AdminSettingsController,
   ],
   providers: [
+    FirebaseAdminService,
     PaymentReconciliationService,
     AdminAuthService,
     AdminDashboardService,

@@ -219,10 +219,26 @@ export class CatalogService {
   }
 
   async getDarkStores() {
+    if (this.prisma.isConnectedToDb) {
+      try {
+        const hubs = await this.prisma.darkStoreHub.findMany({ where: { isActive: true } });
+        if (hubs && hubs.length > 0) return hubs;
+      } catch (err: any) {
+        // Safe fallback
+      }
+    }
     return this.prisma.getStore().darkStores;
   }
 
   async getActiveCoupons() {
+    if (this.prisma.isConnectedToDb) {
+      try {
+        const coupons = await this.prisma.coupon.findMany({ where: { isActive: true } });
+        if (coupons && coupons.length > 0) return coupons;
+      } catch (err: any) {
+        // Safe fallback
+      }
+    }
     return this.prisma.getStore().coupons.filter((c) => c.isActive);
   }
 
@@ -633,6 +649,20 @@ export class CatalogService {
       'prod-10': 'prod-10',
     };
     const cleanId = ID_ALIASES[rawId] || rawId;
+
+    if (this.prisma.isConnectedToDb) {
+      try {
+        const dbProduct = await this.prisma.product.findFirst({
+          where: { OR: [{ id: cleanId }, { id: rawId }] },
+          include: { vendor: true, darkStoreHub: true, category: true },
+        });
+        if (dbProduct) {
+          return this.mapProductWithHub(dbProduct);
+        }
+      } catch (err: any) {
+        // Safe fallback
+      }
+    }
 
     const product: any = this.prisma.getStore().products.find(
       (p) =>

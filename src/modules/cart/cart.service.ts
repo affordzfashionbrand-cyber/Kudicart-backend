@@ -1,14 +1,42 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 
 @Injectable()
 export class CartService {
+  private readonly logger = new Logger(CartService.name);
   private userCoupons: Record<string, string> = {};
 
   constructor(private prisma: PrismaService) {}
 
   async getCart(userId: string) {
     const store = this.prisma.getStore();
+
+    if (this.prisma.isConnectedToDb) {
+      try {
+        const dbCart = await this.prisma.cart.findUnique({
+          where: { userId },
+          include: {
+            items: true,
+          },
+        });
+        if (dbCart && dbCart.items.length > 0) {
+          store.cartItems = store.cartItems.filter((ci) => ci.userId !== userId);
+          for (const it of dbCart.items) {
+            store.cartItems.push({
+              id: it.id,
+              userId,
+              productId: it.productId,
+              size: it.size,
+              trialSize: it.trialSize || undefined,
+              quantity: it.quantity,
+            } as any);
+          }
+        }
+      } catch (err: any) {
+        this.logger.error(`Database getCart sync failed: ${err.message}`);
+      }
+    }
+
     const userCartItems = store.cartItems.filter((ci) => ci.userId === userId);
 
     const items = userCartItems.map((ci) => {
@@ -145,6 +173,42 @@ export class CartService {
       } as any);
     }
 
+    if (this.prisma.isConnectedToDb) {
+      try {
+        const cart = await this.prisma.cart.upsert({
+          where: { userId },
+          create: { userId },
+          update: {},
+        });
+        const existingDbItem = await this.prisma.cartItem.findFirst({
+          where: { cartId: cart.id, productId: product.id, size: itemSize },
+        });
+        if (existingDbItem) {
+          await this.prisma.cartItem.update({
+            where: { id: existingDbItem.id },
+            data: {
+              quantity: existingDbItem.quantity + quantity,
+              trialSize: effectiveTrialSize || existingDbItem.trialSize,
+              color: color || existingDbItem.color,
+            },
+          });
+        } else {
+          await this.prisma.cartItem.create({
+            data: {
+              cartId: cart.id,
+              productId: product.id,
+              size: itemSize,
+              trialSize: effectiveTrialSize,
+              color,
+              quantity,
+            },
+          });
+        }
+      } catch (err: any) {
+        this.logger.error(`Database addItem failed: ${err.message}`);
+      }
+    }
+
     return this.getCart(userId);
   }
 
@@ -178,6 +242,30 @@ export class CartService {
       item.quantity = newQty;
     }
 
+    if (this.prisma.isConnectedToDb) {
+      try {
+        const cart = await this.prisma.cart.findUnique({ where: { userId } });
+        if (cart) {
+          const dbItem = await this.prisma.cartItem.findFirst({
+            where: { cartId: cart.id, OR: [{ id }, { productId: id }] },
+          });
+          if (dbItem) {
+            const nextQty = dbItem.quantity + delta;
+            if (nextQty <= 0) {
+              await this.prisma.cartItem.delete({ where: { id: dbItem.id } });
+            } else {
+              await this.prisma.cartItem.update({
+                where: { id: dbItem.id },
+                data: { quantity: nextQty },
+              });
+            }
+          }
+        }
+      } catch (err: any) {
+        this.logger.error(`Database updateQuantity failed: ${err.message}`);
+      }
+    }
+
     return this.getCart(userId);
   }
 
@@ -194,6 +282,19 @@ export class CartService {
 
     if (itemIndex !== -1) {
       store.cartItems.splice(itemIndex, 1);
+    }
+
+    if (this.prisma.isConnectedToDb) {
+      try {
+        const cart = await this.prisma.cart.findUnique({ where: { userId } });
+        if (cart) {
+          await this.prisma.cartItem.deleteMany({
+            where: { cartId: cart.id, OR: [{ id }, { productId: id }] },
+          });
+        }
+      } catch (err: any) {
+        this.logger.error(`Database removeItem failed: ${err.message}`);
+      }
     }
 
     return this.getCart(userId);
@@ -241,6 +342,18 @@ export class CartService {
     const store = this.prisma.getStore();
     store.cartItems = store.cartItems.filter((ci) => ci.userId !== userId);
     delete this.userCoupons[userId];
+
+    if (this.prisma.isConnectedToDb) {
+      try {
+        const cart = await this.prisma.cart.findUnique({ where: { userId } });
+        if (cart) {
+          await this.prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
+        }
+      } catch (err: any) {
+        this.logger.error(`Database clearCart failed: ${err.message}`);
+      }
+    }
+
     return { success: true, message: 'Cart cleared successfully' };
   }
 

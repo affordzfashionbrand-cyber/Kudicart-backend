@@ -26,36 +26,7 @@ export class ReviewsService {
     }
 
     // 2. Verify Order & Delivery Status (Review eligibility rule: order must be delivered to customer)
-    let order: any = store.orders.find((o) => o.id === dto.orderId || o.orderNumber === dto.orderId);
-    if (!order && String(dto.orderId).startsWith('ord-')) {
-      order = {
-        id: dto.orderId,
-        orderNumber: `AF-${dto.orderId.slice(-5)}`,
-        customerId: userId,
-        status: 'DELIVERED',
-        paymentMethod: 'COD',
-        paymentStatus: 'COMPLETED',
-        itemTotal: 1299,
-        deliveryFee: 40,
-        taxes: 65,
-        grandTotal: 1404,
-        etaMinutes: 0,
-        createdAt: new Date().toISOString(),
-        items: [
-          {
-            id: 'oi-1',
-            productId: product.id,
-            title: product.title,
-            brand: product.brand,
-            size: 'M',
-            price: product.price,
-            quantity: 1,
-            image: (product as any).image || product.galleryImages?.[0] || 'https://images.unsplash.com/photo-1539109136881-3be0616acf4b',
-          },
-        ],
-      };
-      store.orders.unshift(order);
-    }
+    const order: any = store.orders.find((o) => o.id === dto.orderId || o.orderNumber === dto.orderId);
 
     if (!order) {
       throw new NotFoundException(`Order ${dto.orderId} not found`);

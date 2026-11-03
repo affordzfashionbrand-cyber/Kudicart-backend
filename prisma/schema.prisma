@@ -28,6 +28,9 @@ enum OrderStatus {
   PICKED_UP
   OUT_FOR_DELIVERY
   DELIVERED
+  RETURNING
+  RETURNED
+  CANCELLED
 }
 
 enum PaymentMethod {
@@ -78,6 +81,7 @@ model User {
   tickets      SupportTicket[]
   vendor       Vendor?
   driverProfile DriverProfile?
+  deviceTokens DeviceToken[]
 }
 
 model Address {
@@ -132,6 +136,7 @@ model Vendor {
   user      User      @relation(fields: [userId], references: [id])
   storeName String
   products      Product[]
+  orders        Order[]       @relation("VendorOrders")
   ledgerEntries LedgerEntry[]
   payouts       VendorPayout[]
   createdAt     DateTime  @default(now())
@@ -236,8 +241,12 @@ model Order {
   orderNumber       String               @unique
   customerId        String
   customer          User                 @relation("CustomerOrders", fields: [customerId], references: [id])
+  vendorId          String?
+  vendor            Vendor?              @relation("VendorOrders", fields: [vendorId], references: [id], onDelete: SetNull)
   driverId          String?
   driver            User?                @relation("DriverOrders", fields: [driverId], references: [id])
+  driverProfileId   String?
+  driverProfile     DriverProfile?       @relation("DriverProfileOrders", fields: [driverProfileId], references: [id], onDelete: SetNull)
   addressId         String?
   address           Address?             @relation(fields: [addressId], references: [id], onDelete: SetNull)
   deliveryAddress   Json?
@@ -257,13 +266,21 @@ model Order {
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
 
-  items             OrderItem[]
-  history           OrderStatusHistory[]
-  tickets           SupportTicket[]
-  reviews           Review[]
-  tryAndBuySession  TryAndBuySession?
-  transactions      PaymentTransaction[]
-  ledgerEntries     LedgerEntry[]
+  items              OrderItem[]
+  history            OrderStatusHistory[]
+  tickets            SupportTicket[]
+  reviews            Review[]
+  tryAndBuySession   TryAndBuySession?
+  transactions       PaymentTransaction[]
+  ledgerEntries      LedgerEntry[]
+  dispatchAssignment DispatchAssignment?
+
+  @@index([customerId])
+  @@index([vendorId])
+  @@index([driverId])
+  @@index([driverProfileId])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model OrderItem {
@@ -331,6 +348,7 @@ model DriverProfile {
   rating              Float            @default(4.9)
   completedDeliveries Int              @default(0)
   isOnline            Boolean          @default(false)
+  availableSince      DateTime?
   kycStatus           String           @default("PENDING")
   rejectionReason     String?
   vehicleRegistration String?
@@ -344,8 +362,13 @@ model DriverProfile {
   currentLng          Float?
   currentHeading      Float?
   documents           DriverDocument[]
+  orders              Order[]              @relation("DriverProfileOrders")
+  tryAndBuySessions   TryAndBuySession[]   @relation("DriverProfileTryAndBuySessions")
+  dispatchAssignments DispatchAssignment[]
   createdAt           DateTime         @default(now())
   updatedAt           DateTime         @updatedAt
+
+  @@index([isOnline, kycStatus, availableSince])
 }
 
 model DriverDocument {
@@ -401,12 +424,14 @@ model DriverNotification {
 }
 
 model TryAndBuySession {
-  id                         String    @id @default(uuid())
-  orderId                    String    @unique
-  order                      Order     @relation(fields: [orderId], references: [id])
-  driverId                   String
-  stage                      String    @default("HANDOVER_PENDING")
-  trialDurationMinutes       Int       @default(20)
+  id                         String         @id @default(uuid())
+  orderId                    String         @unique
+  order                      Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  driverId                   String?
+  driverProfileId            String?
+  driverProfile              DriverProfile? @relation("DriverProfileTryAndBuySessions", fields: [driverProfileId], references: [id], onDelete: SetNull)
+  stage                      String         @default("HANDOVER_PENDING")
+  trialDurationMinutes       Int            @default(10)
   handoverConfirmedAt        DateTime?
   trialStartedAt             DateTime?
   trialEndsAt                DateTime?
@@ -415,10 +440,34 @@ model TryAndBuySession {
   amountDue                  Float?
   paymentStatus              String?
   returnManifestId           String?
+  keptItemIds                String[]       @default([])
+  returnedItemIds            String[]       @default([])
   storeReconciliationStatus String?
   storeReconciledAt          DateTime?
-  createdAt                  DateTime  @default(now())
-  updatedAt                  DateTime  @updatedAt
+  createdAt                  DateTime       @default(now())
+  updatedAt                  DateTime       @updatedAt
+
+  @@index([driverProfileId])
+  @@index([stage])
+}
+
+model DispatchAssignment {
+  id              String         @id @default(uuid())
+  orderId         String         @unique
+  order           Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  driverProfileId String?
+  driverProfile   DriverProfile? @relation(fields: [driverProfileId], references: [id], onDelete: SetNull)
+  status          String         @default("PENDING") // PENDING, OFFERED, ACCEPTED, REJECTED, EXPIRED, CANCELLED
+  offeredAt       DateTime?
+  expiresAt       DateTime?
+  respondedAt     DateTime?
+  attempts        Int            @default(0)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([status])
+  @@index([driverProfileId])
+  @@index([createdAt])
 }
 
 model AuditLog {
@@ -476,4 +525,42 @@ model VendorPayout {
   notes        String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+}
+
+model DeviceToken {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       Role
+  platform   String   // android | ios | web
+  token      String   @unique
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId, role])
+  @@index([token])
+}
+
+enum OutboxStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
+model OutboxEvent {
+  id            String       @id @default(uuid())
+  aggregateType String       // ORDER | DISPATCH | TRY_AND_BUY | PAYMENT
+  aggregateId   String
+  eventType     String       // e.g. ORDER_STATUS_CHANGED, DRIVER_ASSIGNED
+  payload       Json
+  status        OutboxStatus @default(PENDING)
+  attempts      Int          @default(0)
+  lastError     String?
+  createdAt     DateTime     @default(now())
+  publishedAt   DateTime?
+
+  @@index([status, createdAt])
+  @@index([aggregateType, aggregateId])
 }

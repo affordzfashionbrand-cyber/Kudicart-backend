@@ -53,8 +53,8 @@
 **Jenkins**.
 
 ## D-BE-12 — ORM
-**Status:** `OPEN`
-TypeORM or Prisma — to be decided during architecture.
+**Status:** `LOCKED` (Amended via DCR-003)
+**Prisma 5** with **PostgreSQL**. Complete type-safe database schemas, migrations, and transactional isolation.
 
 ---
 
@@ -72,9 +72,9 @@ The backend is the single authority for business rules, data validation, authori
 **Status:** `LOCKED`
 Backend enforces the canonical order lifecycle with role-gated transitions.
 
-## D-BE-16 — Manual Assignment Only
-**Status:** `LOCKED`
-Delivery partner assignment is manual/admin-driven. No automatic dispatch.
+## D-BE-16 — Automated FIFO Dispatch with Manual Admin Override
+**Status:** `LOCKED` (Amended via DCR-003, Superseding legacy manual-only assignment)
+When an order reaches `READY_FOR_PICKUP`, the backend automatically matches and assigns the earliest available, online, KYC-approved delivery partner via a transactional FIFO queue. Manual Admin assignment/override remains available for operational exceptions.
 
 ## D-BE-17 — Vendor Isolation
 **Status:** `LOCKED`
@@ -91,11 +91,8 @@ All payments verified server-side with Razorpay. Client-side payment success is 
 ## D-BE-19 — Excluded Services
 **Status:** `LOCKED`
 Do NOT implement:
-- Coupon service.
 - Combo/bundle service.
-- Delivery zone / serviceability service.
-- Automatic rider dispatch / matching service.
-- Route optimization service.
+- Complex route optimization engines (turn-by-turn routing uses standard Google Maps / OSRM navigation).
 - AI recommendation service.
 - Loyalty / referral / wallet service.
 - Subscription service.

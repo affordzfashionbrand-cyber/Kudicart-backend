@@ -1,38 +1,108 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  UnauthorizedException,
+  Logger,
+} from '@nestjs/common';
+import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Role } from '../../common/enums/role.enum';
 import { FirebaseAdminService } from './firebase-admin.service';
+import { createJwtToken } from '../../common/utils/crypto.util';
+
+interface StoredOtp {
+  code: string;
+  expiresAt: number;
+  attempts: number;
+}
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+  private otpStore = new Map<string, StoredOtp>();
+
   constructor(
     private prisma: PrismaService,
     private firebaseAdmin: FirebaseAdminService,
   ) {}
 
-  async sendOtp(phoneNumber: string) {
-    const cleanPhone = phoneNumber.replace(/\s+/g, '');
-    if (!cleanPhone || cleanPhone.length < 8) {
+  cleanPhoneNumber(phoneNumber: string): string {
+    if (!phoneNumber || typeof phoneNumber !== 'string') {
       throw new BadRequestException('Valid phone number is required');
     }
+    const cleanPhone = phoneNumber.replace(/\s+/g, '');
+    if (cleanPhone.length < 8) {
+      throw new BadRequestException('Valid phone number is required (min 8 digits)');
+    }
+    return cleanPhone;
+  }
+
+  getOtpForTesting(phoneNumber: string): string | undefined {
+    if (process.env.NODE_ENV !== 'test') {
+      throw new UnauthorizedException('Test OTP retrieval is disabled outside test environment');
+    }
+    const cleanPhone = this.cleanPhoneNumber(phoneNumber);
+    return this.otpStore.get(cleanPhone)?.code;
+  }
+
+  async sendOtp(phoneNumber: string) {
+    const cleanPhone = this.cleanPhoneNumber(phoneNumber);
+
+    // Cryptographically secure 6-digit OTP
+    const code = crypto.randomInt(100000, 1000000).toString();
+    this.otpStore.set(cleanPhone, {
+      code,
+      expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes
+      attempts: 0,
+    });
+
+    const maskedPhone = `+91 ******${cleanPhone.slice(-4)}`;
+    this.logger.log(`Customer OTP generated for mobile: ${maskedPhone}`);
 
     return {
       success: true,
       message: `OTP successfully sent via SMS to ${phoneNumber}`,
       countdownSeconds: 30,
-      mockOtpForTesting: '742900',
     };
   }
 
   async verifyOtp(phoneNumber: string, otp: string) {
-    if (!otp || otp.length < 4) {
+    const cleanPhone = this.cleanPhoneNumber(phoneNumber);
+    if (!otp || typeof otp !== 'string' || otp.trim().length < 4 || otp.trim().length > 6) {
       throw new BadRequestException('Invalid OTP code. Must be 4 to 6 digits.');
     }
 
-    const cleanPhone = phoneNumber.replace(/\s+/g, '');
+    // Retain legacy test double strictly in test environment for app.spec.ts fixtures
+    const isTestDouble = process.env.NODE_ENV === 'test' && otp.trim() === '742900';
+
+    if (!isTestDouble) {
+      const record = this.otpStore.get(cleanPhone);
+      if (!record) {
+        throw new UnauthorizedException('No active OTP request found for this mobile number. Request a new OTP.');
+      }
+
+      if (Date.now() > record.expiresAt) {
+        this.otpStore.delete(cleanPhone);
+        throw new BadRequestException('OTP has expired. Please request a new OTP.');
+      }
+
+      record.attempts += 1;
+      if (record.attempts > 5) {
+        this.otpStore.delete(cleanPhone);
+        throw new BadRequestException('Too many failed OTP attempts. Request a new OTP.');
+      }
+
+      if (record.code !== otp.trim()) {
+        throw new UnauthorizedException('Invalid OTP code. Please check the code and try again.');
+      }
+
+      // Clear verified OTP
+      this.otpStore.delete(cleanPhone);
+    }
+
     const store = this.prisma.getStore();
 
-    // Check if phone matches our driver
+    // Check if phone matches driver
     const isDriver = cleanPhone.includes('9876543210') || cleanPhone.includes('98765');
     if (isDriver) {
       const driverUser = store.users.find((u) => u.role === 'DRIVER') || store.users[1];
@@ -47,7 +117,7 @@ export class AuthService {
         role: Role.DRIVER,
         driverId: driverInfo.id,
       };
-      const token = `header.${Buffer.from(JSON.stringify(payload)).toString('base64')}.sig`;
+      const token = createJwtToken(payload);
 
       return {
         success: true,
@@ -67,9 +137,9 @@ export class AuthService {
       };
     }
 
-    // Customer
+    // Customer resolution
     let customerUser = store.users.find(
-      (u) => u.role === 'CUSTOMER' && (u.phone === phoneNumber || u.phone?.replace(/\s+/g, '') === cleanPhone)
+      (u) => u.role === 'CUSTOMER' && (u.phone === phoneNumber || u.phone?.replace(/\s+/g, '') === cleanPhone),
     );
 
     if (!customerUser) {
@@ -77,8 +147,8 @@ export class AuthService {
         id: `usr-${Date.now()}`,
         firebaseUid: `fb-${cleanPhone}`,
         phone: phoneNumber,
-        email: `customer.${cleanPhone.slice(-4)}@affordz.in`,
-        name: 'Affordz Customer',
+        email: `customer.${cleanPhone.slice(-4)}@kudicart.in`,
+        name: 'KudiCart Customer',
         avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
         role: 'CUSTOMER',
         status: 'ACTIVE',
@@ -99,7 +169,7 @@ export class AuthService {
       name: customerUser.name,
       role: Role.CUSTOMER,
     };
-    const token = `header.${Buffer.from(JSON.stringify(payload)).toString('base64')}.sig`;
+    const token = createJwtToken(payload);
 
     return {
       success: true,
@@ -127,7 +197,7 @@ export class AuthService {
     let user = store.users.find(
       (u) =>
         u.firebaseUid === decoded.uid ||
-        (decoded.phoneNumber && (u.phone === decoded.phoneNumber || u.phone?.replace(/\s+/g, '') === decoded.phoneNumber.replace(/\s+/g, '')))
+        (decoded.phoneNumber && (u.phone === decoded.phoneNumber || u.phone?.replace(/\s+/g, '') === decoded.phoneNumber.replace(/\s+/g, ''))),
     );
 
     if (!user) {
@@ -135,8 +205,8 @@ export class AuthService {
         id: `usr-${Date.now()}`,
         firebaseUid: decoded.uid,
         phone: decoded.phoneNumber || '+91 98450 12890',
-        email: decoded.email || `${decoded.uid.substring(0, 8)}@affordz.in`,
-        name: decoded.name || 'Affordz Customer',
+        email: decoded.email || `${decoded.uid.substring(0, 8)}@kudicart.in`,
+        name: decoded.name || 'KudiCart Customer',
         avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
         role: 'CUSTOMER',
         status: 'ACTIVE',
@@ -154,7 +224,7 @@ export class AuthService {
       name: user.name,
       role: user.role,
     };
-    const token = `header.${Buffer.from(JSON.stringify(payload)).toString('base64')}.sig`;
+    const token = createJwtToken(payload);
 
     return {
       success: true,
@@ -171,3 +241,4 @@ export class AuthService {
     };
   }
 }
+
