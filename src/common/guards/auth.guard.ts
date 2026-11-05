@@ -86,6 +86,7 @@ export class FirebaseAuthGuard implements CanActivate {
   }
 
   private async verifyFirebaseToken(request: any, token: string): Promise<boolean> {
+    try {
     const decoded = await this.firebaseAdmin!.verifyIdToken(token);
     const uid = decoded.uid;
 
@@ -127,6 +128,9 @@ export class FirebaseAuthGuard implements CanActivate {
     });
 
     return true;
+    } catch {
+      throw new UnauthorizedException('Invalid or expired authentication session. Please sign in again.');
+    }
   }
 
   private resolveAndSetUser(

@@ -145,7 +145,7 @@ export class FirebaseAdminService implements OnModuleInit {
       };
     } catch (err: any) {
       this.logger.warn(`Firebase token verification failed: ${err.message}`);
-      throw new UnauthorizedException(`Firebase token verification failed: ${err.message}`);
+      throw new UnauthorizedException('Authentication token verification failed. Please sign in again.');
     }
   }
 

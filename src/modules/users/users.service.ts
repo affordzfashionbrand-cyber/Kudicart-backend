@@ -155,7 +155,7 @@ export class UsersService {
       throw new ForbiddenException('Account is suspended. Profile updates are not permitted.');
     }
 
-    const updateData: { name?: string; email?: string | null; avatar?: string } = {};
+    const updateData: { name?: string; email?: string | null; phone?: string; avatar?: string } = {};
 
     if (dto.name !== undefined) {
       const trimmed = dto.name.trim();
@@ -168,6 +168,11 @@ export class UsersService {
     if (dto.email !== undefined) {
       const trimmed = dto.email.trim();
       updateData.email = trimmed ? trimmed.toLowerCase() : null;
+    }
+
+    if (dto.phone !== undefined) {
+      const trimmed = dto.phone.trim();
+      if (trimmed) updateData.phone = trimmed;
     }
 
     if (dto.avatar !== undefined) {
@@ -208,6 +213,7 @@ export class UsersService {
     if (stored) {
       if (updateData.name !== undefined) stored.name = updateData.name;
       if (updateData.email !== undefined) stored.email = updateData.email;
+      if (updateData.phone !== undefined) stored.phone = updateData.phone;
       if (updateData.avatar !== undefined) stored.avatar = updateData.avatar;
       (stored as any).updatedAt = new Date().toISOString();
       return stored;
