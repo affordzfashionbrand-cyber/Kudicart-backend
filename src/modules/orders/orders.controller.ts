@@ -72,6 +72,14 @@ export class OrdersController {
     return this.ordersService.trackOrder(id, user.id, user.role);
   }
 
+  @Get(':id/route')
+  async getOrderRoute(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.ordersService.getOrderRoute(id, user.id, user.role);
+  }
+
   @Patch(':id/status')
   async updateStatus(
     @CurrentUser() user: AuthenticatedUser,

@@ -16,6 +16,8 @@ import { Role } from '../../common/enums/role.enum';
 import { PaymentsService } from '../payments/payments.service';
 import { CartService } from '../cart/cart.service';
 import { DispatchService } from './dispatch.service';
+import { GoogleRoutesService } from './google-routes.service';
+import { TrackingRealtimeGateway } from './tracking-realtime.gateway';
 
 @Injectable()
 export class OrdersService {
@@ -29,6 +31,10 @@ export class OrdersService {
     @Optional()
     @Inject(forwardRef(() => DispatchService))
     private dispatchService?: DispatchService,
+    @Optional()
+    private googleRoutesService?: GoogleRoutesService,
+    @Optional()
+    private trackingGateway?: TrackingRealtimeGateway,
   ) {}
 
   async checkout(userId: string, dto: CheckoutDto) {
@@ -48,6 +54,8 @@ export class OrdersService {
         locality: 'Indiranagar',
         city: 'Bengaluru',
         pincode: '560038',
+        latitude: 12.9658,
+        longitude: 77.6465,
         isDefault: true,
       };
       store.addresses.push(address);
@@ -533,10 +541,16 @@ export class OrdersService {
     const milestones = this.stateMachine.getMilestones(order.status as OrderStatus);
 
     let driver = null;
+    let isStale = false;
     if (order.driverId) {
       const drv = store.drivers.find((d) => d.id === order.driverId);
       if (drv) {
-        const isLiveDelivering = ['PICKED_UP', 'OUT_FOR_DELIVERY'].includes(order.status);
+        const isLiveDelivering = ['ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(order.status);
+        const loc = drv.currentLocation;
+        if (loc?.updatedAt) {
+          const age = Date.now() - new Date(loc.updatedAt).getTime();
+          isStale = age > 30000;
+        }
         driver = {
           id: drv.id,
           name: drv.name,
@@ -544,41 +558,137 @@ export class OrdersService {
           vehicle: drv.vehicle,
           photo: drv.photo,
           rating: drv.rating,
-          currentLocation: isLiveDelivering ? drv.currentLocation : null,
+          currentLocation: isLiveDelivering && loc ? {
+            latitude: loc.latitude,
+            longitude: loc.longitude,
+            heading: loc.heading || 0,
+            accuracy: loc.accuracy,
+            updatedAt: loc.updatedAt,
+          } : null,
+          isStale,
         };
       }
     }
 
-    // Dynamic express countdown based on 8-stage state machine
+    // Authoritative Delivery Destination Coordinates
+    // Derived strictly from persisted snapshot order.deliveryAddress, falling back to address record only if snapshot lacks coords
+    let deliveryCoordinates: { latitude: number; longitude: number } | null = null;
+    const snapAddr = order.deliveryAddress as any;
+    if (
+      snapAddr &&
+      typeof snapAddr.latitude === 'number' &&
+      Number.isFinite(snapAddr.latitude) &&
+      typeof snapAddr.longitude === 'number' &&
+      Number.isFinite(snapAddr.longitude)
+    ) {
+      deliveryCoordinates = { latitude: snapAddr.latitude, longitude: snapAddr.longitude };
+    } else if (order.addressId) {
+      const persistedAddr = store.addresses.find((a: any) => a.id === order.addressId);
+      if (
+        persistedAddr &&
+        typeof persistedAddr.latitude === 'number' &&
+        Number.isFinite(persistedAddr.latitude) &&
+        typeof persistedAddr.longitude === 'number' &&
+        Number.isFinite(persistedAddr.longitude)
+      ) {
+        deliveryCoordinates = { latitude: persistedAddr.latitude, longitude: persistedAddr.longitude };
+      }
+    }
+
+    // Authoritative Pickup Location Coordinates
+    // Derived strictly from persisted Vendor/Fulfillment entity
+    let pickupCoordinates: { latitude: number; longitude: number } | null = null;
+    const vendor = store.vendors.find((v: any) => v.id === order.vendorId);
+    if (
+      vendor &&
+      typeof (vendor as any).latitude === 'number' &&
+      Number.isFinite((vendor as any).latitude) &&
+      typeof (vendor as any).longitude === 'number' &&
+      Number.isFinite((vendor as any).longitude)
+    ) {
+      pickupCoordinates = { latitude: (vendor as any).latitude, longitude: (vendor as any).longitude };
+    } else if (store.darkStores && store.darkStores.length > 0) {
+      const darkStore = store.darkStores[0];
+      if (
+        typeof darkStore.lat === 'number' &&
+        Number.isFinite(darkStore.lat) &&
+        typeof darkStore.lng === 'number' &&
+        Number.isFinite(darkStore.lng)
+      ) {
+        pickupCoordinates = { latitude: darkStore.lat, longitude: darkStore.lng };
+      }
+    }
+
+    // Compute route via Google Routes Service if driver is assigned and coordinates are valid
+    let route = null;
     let dynamicEta = order.etaMinutes || 18;
-    if (order.etaMinutes <= 35) {
-      switch (order.status) {
-        case 'PLACED':
-          dynamicEta = 18;
-          break;
-        case 'ACCEPTED':
-          dynamicEta = 16;
-          break;
-        case 'PREPARING':
-          dynamicEta = 13;
-          break;
-        case 'READY_FOR_PICKUP':
-          dynamicEta = 10;
-          break;
-        case 'ASSIGNED':
-          dynamicEta = 8;
-          break;
-        case 'PICKED_UP':
-          dynamicEta = 6;
-          break;
-        case 'OUT_FOR_DELIVERY':
-          dynamicEta = 3;
-          break;
-        case 'DELIVERED':
-          dynamicEta = 0;
-          break;
-        default:
-          dynamicEta = 18;
+
+    if (
+      this.googleRoutesService &&
+      ['ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(order.status) &&
+      deliveryCoordinates &&
+      pickupCoordinates
+    ) {
+      try {
+        const origin = order.status === 'ASSIGNED' && driver?.currentLocation
+          ? driver.currentLocation
+          : (driver?.currentLocation || pickupCoordinates);
+        const destination = order.status === 'ASSIGNED' ? pickupCoordinates : deliveryCoordinates;
+
+        route = await this.googleRoutesService.computeRoute(origin, destination, 'TWO_WHEELER');
+        if (route?.durationMinutes) {
+          dynamicEta = route.durationMinutes;
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed to compute route for order ${order.id}: ${err.message}`);
+      }
+    } else if (!deliveryCoordinates || !pickupCoordinates) {
+      // Explicit route-unavailable state when coordinates are missing or invalid
+      route = {
+        routeUnavailable: true,
+        isRealRoute: false,
+        encodedPolyline: '',
+        coordinates: [],
+        distanceMeters: 0,
+        distanceKm: '0 km',
+        durationSeconds: 0,
+        durationMinutes: order.etaMinutes || 18,
+        travelMode: 'NONE',
+        computedAt: new Date().toISOString(),
+      };
+    }
+
+    if (!route) {
+      // Dynamic express countdown based on 8-stage state machine
+      if (order.etaMinutes <= 35) {
+        switch (order.status) {
+          case 'PLACED':
+            dynamicEta = 18;
+            break;
+          case 'ACCEPTED':
+            dynamicEta = 16;
+            break;
+          case 'PREPARING':
+            dynamicEta = 13;
+            break;
+          case 'READY_FOR_PICKUP':
+            dynamicEta = 10;
+            break;
+          case 'ASSIGNED':
+            dynamicEta = 8;
+            break;
+          case 'PICKED_UP':
+            dynamicEta = 6;
+            break;
+          case 'OUT_FOR_DELIVERY':
+            dynamicEta = 3;
+            break;
+          case 'DELIVERED':
+            dynamicEta = 0;
+            break;
+          default:
+            dynamicEta = 18;
+        }
       }
     }
 
@@ -598,9 +708,25 @@ export class OrdersService {
       paymentStatus: order.paymentStatus,
       driver: driver || null,
       deliveryAddress: order.deliveryAddress,
+      deliveryCoordinates,
+      pickupCoordinates,
+      route,
       items: order.items,
       milestones,
       history: order.history,
+    };
+  }
+
+  async getOrderRoute(id: string, userId?: string, role?: string) {
+    const tracking = await this.trackOrder(id, userId, role);
+    return {
+      orderId: tracking.orderId,
+      status: tracking.status,
+      pickupCoordinates: tracking.pickupCoordinates,
+      deliveryCoordinates: tracking.deliveryCoordinates,
+      driverCoordinates: tracking.driver?.currentLocation || null,
+      route: tracking.route,
+      etaMinutes: tracking.etaMinutes,
     };
   }
 

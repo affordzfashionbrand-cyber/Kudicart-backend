@@ -108,6 +108,8 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         address: 'Shop 14, 100ft Road, Indiranagar, Bengaluru, Karnataka 560038',
         phone: '+91 80 4123 9988',
         contactPerson: 'Meera Deshmukh',
+        latitude: 12.9718,
+        longitude: 77.6410,
       },
       {
         id: 'vend-2',
@@ -116,6 +118,8 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         address: '42 Commercial Street, Tasker Town, Bengaluru, Karnataka 560001',
         phone: '+91 80 2558 7711',
         contactPerson: 'Rohan Verma',
+        latitude: 12.9800,
+        longitude: 77.6080,
       },
     ],
     coupons: [
@@ -530,6 +534,8 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         locality: 'Indiranagar',
         city: 'Bengaluru',
         pincode: '560038',
+        latitude: 12.9658,
+        longitude: 77.6465,
         isDefault: true,
       },
       {
@@ -540,9 +546,11 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         locality: 'Domlur',
         city: 'Bengaluru',
         pincode: '560071',
+        latitude: 12.9600,
+        longitude: 77.6480,
         isDefault: false,
       },
-    ],
+    ] as any[],
     cartItems: [
       {
         id: 'cart-1',

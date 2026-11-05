@@ -4,18 +4,23 @@ import {
   ForbiddenException,
   BadRequestException,
   Logger,
+  Optional,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { UpdateDriverProfileDto } from './dto/update-driver-profile.dto';
 import { UpdateVehicleDto } from './dto/update-vehicle.dto';
 import { DocumentUploadDto } from './dto/document-upload.dto';
 import { UpdateLocationDto } from './dto/update-location.dto';
+import { TrackingRealtimeGateway } from '../orders/tracking-realtime.gateway';
 
 @Injectable()
 export class DriverProfileService {
   private readonly logger = new Logger(DriverProfileService.name);
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    @Optional() private trackingGateway?: TrackingRealtimeGateway,
+  ) {}
 
   public resolveDriver(driverId?: string) {
     if (!driverId) {
@@ -284,12 +289,104 @@ export class DriverProfileService {
 
   async updateLocation(driverId: string | undefined, dto: UpdateLocationDto) {
     const driver = this.resolveDriver(driverId);
+
+    // Validate GPS coordinate bounds
+    if (
+      typeof dto.latitude !== 'number' ||
+      isNaN(dto.latitude) ||
+      dto.latitude < -90 ||
+      dto.latitude > 90 ||
+      typeof dto.longitude !== 'number' ||
+      isNaN(dto.longitude) ||
+      dto.longitude < -180 ||
+      dto.longitude > 180
+    ) {
+      throw new BadRequestException('Invalid GPS coordinates supplied');
+    }
+
+    // Validate heading (0 to 360 degrees) and speed (0 to 150)
+    if (dto.heading !== undefined) {
+      if (typeof dto.heading !== 'number' || isNaN(dto.heading) || dto.heading < 0 || dto.heading > 360) {
+        throw new BadRequestException('Invalid heading: must be between 0 and 360 degrees');
+      }
+    }
+    if (dto.speed !== undefined) {
+      if (typeof dto.speed !== 'number' || isNaN(dto.speed) || dto.speed < 0 || dto.speed > 150) {
+        throw new BadRequestException('Invalid speed value');
+      }
+    }
+
+    // Timestamp validation and out-of-order rejection
+    const now = Date.now();
+    let updateTime = now;
+    if (dto.timestamp) {
+      const parsed = typeof dto.timestamp === 'number' ? dto.timestamp : new Date(dto.timestamp).getTime();
+      if (isNaN(parsed)) {
+        throw new BadRequestException('Invalid timestamp format');
+      }
+      if (parsed > now + 300000) {
+        throw new BadRequestException('Timestamp cannot be in the future');
+      }
+      if (parsed < now - 86400000) {
+        throw new BadRequestException('Timestamp is too old');
+      }
+      updateTime = parsed;
+    }
+
+    // Protect newer persisted locations from being overwritten by older buffered locations
+    if (driver.currentLocation?.updatedAt) {
+      const lastUpdate = new Date(driver.currentLocation.updatedAt).getTime();
+      if (updateTime <= lastUpdate) {
+        this.logger.warn(
+          `[DriverLocation] Ignored stale/out-of-order update for driver ${driver.id}: updateTime=${new Date(updateTime).toISOString()} <= lastUpdate=${driver.currentLocation.updatedAt}`,
+        );
+        return {
+          success: true,
+          driverId: driver.id,
+          location: driver.currentLocation,
+          ignoredStaleUpdate: true,
+        };
+      }
+    }
+
+    // Ownership check on active assignment if orderId provided
+    const store = this.prisma.getStore();
+    let targetOrderId = dto.orderId;
+
+    if (targetOrderId) {
+      const order: any = store.orders.find((o) => o.id === targetOrderId || o.orderNumber === targetOrderId);
+      if (order) {
+        if (order.driverId !== driver.id && order.driverProfileId !== driver.id) {
+          throw new ForbiddenException('Driver is not assigned to this order');
+        }
+        if (['DELIVERED', 'CANCELLED', 'RETURNED'].includes(order.status)) {
+          throw new BadRequestException('Cannot update location for completed or cancelled order');
+        }
+      }
+    } else {
+      // Find current active order for this driver
+      const activeOrder: any = store.orders.find(
+        (o: any) =>
+          (o.driverId === driver.id || o.driverProfileId === driver.id) &&
+          ['ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(o.status),
+      );
+      if (activeOrder) {
+        targetOrderId = activeOrder.id;
+      }
+    }
+
     driver.currentLocation = {
       latitude: dto.latitude,
       longitude: dto.longitude,
       heading: dto.heading || 0,
-      updatedAt: new Date().toISOString(),
+      accuracy: dto.accuracy,
+      speed: dto.speed,
+      updatedAt: new Date(updateTime).toISOString(),
     };
+
+    this.logger.log(
+      `[DriverLocation] Location persisted for driver ${driver.id} (order: ${targetOrderId || 'none'}): lat=${dto.latitude.toFixed(5)}, lng=${dto.longitude.toFixed(5)}, timestamp=${driver.currentLocation.updatedAt}`,
+    );
 
     if (this.prisma.isConnectedToDb) {
       try {
@@ -299,11 +396,25 @@ export class DriverProfileService {
             currentLat: dto.latitude,
             currentLng: dto.longitude,
             currentHeading: dto.heading || 0,
+            // CRITICAL: availableSince is strictly NOT touched
           },
         });
       } catch {
         // Fall back gracefully to memory store
       }
+    }
+
+    // Broadcast live location update to subscribed customer clients
+    if (targetOrderId && this.trackingGateway) {
+      this.trackingGateway.broadcastLocationUpdate(targetOrderId, {
+        latitude: dto.latitude,
+        longitude: dto.longitude,
+        heading: dto.heading || 0,
+        accuracy: dto.accuracy,
+        speed: dto.speed,
+        updatedAt: driver.currentLocation.updatedAt,
+        isStale: false,
+      });
     }
 
     return {

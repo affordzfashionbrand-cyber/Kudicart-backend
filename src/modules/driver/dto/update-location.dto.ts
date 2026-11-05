@@ -1,4 +1,4 @@
-import { IsNotEmpty, IsNumber, IsOptional, Min, Max } from 'class-validator';
+import { IsNotEmpty, IsNumber, IsOptional, IsString, Min, Max } from 'class-validator';
 
 export class UpdateLocationDto {
   @IsNotEmpty({ message: 'latitude is required' })
@@ -18,4 +18,22 @@ export class UpdateLocationDto {
   @Min(0)
   @Max(360)
   heading?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  accuracy?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  speed?: number;
+
+  @IsOptional()
+  @IsNumber()
+  timestamp?: number;
+
+  @IsOptional()
+  @IsString()
+  orderId?: string;
 }

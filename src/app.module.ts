@@ -30,9 +30,10 @@ import { MediaModule } from './modules/media/media.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { VendorController } from './modules/vendor/vendor.controller';
 import { VendorService } from './modules/vendor/vendor.service';
+import { TrackingModule } from './modules/orders/tracking.module';
 
 @Module({
-  imports: [PrismaModule, DriverModule, AdminModule, HealthModule, QueueModule, MediaModule, NotificationsModule],
+  imports: [PrismaModule, DriverModule, AdminModule, HealthModule, QueueModule, MediaModule, NotificationsModule, TrackingModule],
   controllers: [
     AuthController,
     UsersController,
@@ -61,6 +62,6 @@ import { VendorService } from './modules/vendor/vendor.service';
     VendorService,
     DispatchService,
   ],
-  exports: [PrismaModule, StateMachineService, DispatchService, DriverModule, AdminModule, QueueModule, MediaModule],
+  exports: [PrismaModule, StateMachineService, DispatchService, DriverModule, AdminModule, QueueModule, MediaModule, TrackingModule],
 })
 export class AppModule {}

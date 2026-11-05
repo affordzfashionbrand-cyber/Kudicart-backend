@@ -29,6 +29,23 @@ export function formatOrderPacket(order: any, store: any, isTryAndBuy: boolean) 
     toteId: '#T-08',
     distance: '2.4 km',
     eta: `${order.etaMinutes || 15} mins`,
+    pickupCoordinates: (() => {
+      const pLat = (vendor as any)?.latitude ?? store.darkStores?.[0]?.lat;
+      const pLng = (vendor as any)?.longitude ?? store.darkStores?.[0]?.lng;
+      if (typeof pLat === 'number' && Number.isFinite(pLat) && typeof pLng === 'number' && Number.isFinite(pLng)) {
+        return { latitude: pLat, longitude: pLng };
+      }
+      return null;
+    })(),
+    deliveryCoordinates: (() => {
+      const snap = order.deliveryAddress as any;
+      const dLat = snap?.latitude ?? address?.latitude;
+      const dLng = snap?.longitude ?? address?.longitude;
+      if (typeof dLat === 'number' && Number.isFinite(dLat) && typeof dLng === 'number' && Number.isFinite(dLng)) {
+        return { latitude: dLat, longitude: dLng };
+      }
+      return null;
+    })(),
     grandTotal: order.grandTotal,
     itemTotal: order.itemTotal || order.grandTotal,
     paymentMethod: order.paymentMethod,
