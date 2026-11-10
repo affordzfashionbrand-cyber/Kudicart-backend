@@ -75,15 +75,15 @@ export class AuthService {
     }
 
     const trimmedOtp = otp.trim();
-    const isDev = process.env.APP_ENV !== 'production';
+    const isTest = process.env.NODE_ENV === 'test';
+    const isDev = !isTest && process.env.APP_ENV !== 'production' && process.env.NODE_ENV !== 'production';
     const isStandardDevCode =
       trimmedOtp === '123456' ||
       trimmedOtp === '742900' ||
-      trimmedOtp === '000000' ||
       trimmedOtp === '111111';
 
     const isTestDouble =
-      (process.env.NODE_ENV === 'test' && trimmedOtp === '742900') ||
+      (isTest && trimmedOtp === '742900') ||
       (isDev && isStandardDevCode);
 
     if (!isTestDouble) {
