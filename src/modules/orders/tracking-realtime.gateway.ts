@@ -36,10 +36,14 @@ export class TrackingRealtimeGateway implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
-    const port = Number(process.env.TRACKING_WS_PORT) || 8081;
+    const port = Number(process.env.TRACKING_WS_PORT) || 8082;
     try {
       this.wss = new WebSocketServer({ port, path: '/ws/tracking' }, () => {
         this.logger.log(`Authenticated Tracking WebSocket Server listening on port ${port} at /ws/tracking`);
+      });
+
+      this.wss.on('error', (err: any) => {
+        this.logger.error(`WebSocketServer error on port ${port}: ${err.message}`);
       });
 
       this.wss.on('connection', (ws: WebSocket, req: any) => {
