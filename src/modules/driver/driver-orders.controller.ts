@@ -5,6 +5,8 @@ import {
   Body,
   Param,
   Query,
+  Headers,
+  Optional,
   UseGuards,
   HttpCode,
   HttpStatus,
@@ -19,14 +21,45 @@ import {
   TryAndBuyReconciliationDto,
 } from './dto/try-and-buy.dto';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { Role } from '../../common/enums/role.enum';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 import { RateLimit } from '../../common/decorators/rate-limit.decorator';
 import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
+import { PrismaService } from '../../prisma/prisma.service';
+import { runWithIdempotency } from '../../common/utils/idempotency.util';
 
 @Controller('api/v1/driver')
-@UseGuards(FirebaseAuthGuard, RateLimitGuard)
+@UseGuards(FirebaseAuthGuard, RolesGuard, RateLimitGuard)
+@Roles(Role.DRIVER)
 export class DriverOrdersController {
-  constructor(private readonly ordersService: DriverOrdersService) {}
+  constructor(
+    private readonly ordersService: DriverOrdersService,
+    @Optional() private readonly prisma?: PrismaService,
+  ) {}
+
+  private withIdempotency<T>(
+    user: AuthenticatedUser,
+    scope: string,
+    idempotencyKey: string | undefined,
+    payload: unknown,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (!this.prisma || !idempotencyKey?.trim()) {
+      return fn();
+    }
+    return runWithIdempotency(
+      this.prisma,
+      {
+        userId: user.id,
+        scope,
+        key: idempotencyKey,
+        payload,
+      },
+      fn,
+    );
+  }
 
   @Get('dashboard')
   async getDashboard(@CurrentUser() user: AuthenticatedUser) {
@@ -55,8 +88,11 @@ export class DriverOrdersController {
   async acceptOrder(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.acceptOrder(user.driverId || user.id, id);
+    return this.withIdempotency(user, `driver:accept:${id}`, idempotencyKey, { id }, () =>
+      this.ordersService.acceptOrder(user.driverId || user.id, id),
+    );
   }
 
   @Post('orders/:id/pickup')
@@ -66,8 +102,11 @@ export class DriverOrdersController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() dto?: OrderPickupDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.pickupOrder(user.driverId || user.id, id, dto);
+    return this.withIdempotency(user, `driver:pickup:${id}`, idempotencyKey, { id, dto }, () =>
+      this.ordersService.pickupOrder(user.driverId || user.id, id, dto),
+    );
   }
 
   @Post('orders/:id/out-for-delivery')
@@ -76,8 +115,15 @@ export class DriverOrdersController {
   async outForDelivery(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.outForDelivery(user.driverId || user.id, id);
+    return this.withIdempotency(
+      user,
+      `driver:out-for-delivery:${id}`,
+      idempotencyKey,
+      { id },
+      () => this.ordersService.outForDelivery(user.driverId || user.id, id),
+    );
   }
 
   @Post('orders/:id/arrived')
@@ -86,8 +132,11 @@ export class DriverOrdersController {
   async markArrived(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.markArrived(user.driverId || user.id, id);
+    return this.withIdempotency(user, `driver:arrived:${id}`, idempotencyKey, { id }, () =>
+      this.ordersService.markArrived(user.driverId || user.id, id),
+    );
   }
 
   @Post('orders/:id/deliver')
@@ -97,8 +146,11 @@ export class DriverOrdersController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() dto?: OrderDeliverDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.deliverOrder(user.driverId || user.id, id, dto);
+    return this.withIdempotency(user, `driver:deliver:${id}`, idempotencyKey, { id, dto }, () =>
+      this.ordersService.deliverOrder(user.driverId || user.id, id, dto),
+    );
   }
 
   // --------------------------------------------------------------------------
@@ -112,8 +164,15 @@ export class DriverOrdersController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() dto: TryAndBuyHandoverDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.tryAndBuyHandover(user.driverId || user.id, id, dto);
+    return this.withIdempotency(
+      user,
+      `driver:tnb-handover:${id}`,
+      idempotencyKey,
+      { id, dto },
+      () => this.ordersService.tryAndBuyHandover(user.driverId || user.id, id, dto),
+    );
   }
 
   @Post('orders/:id/try-and-buy/selections')
@@ -123,8 +182,15 @@ export class DriverOrdersController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() dto: TryAndBuySelectionsDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.tryAndBuySelections(user.driverId || user.id, id, dto);
+    return this.withIdempotency(
+      user,
+      `driver:tnb-selections:${id}`,
+      idempotencyKey,
+      { id, dto },
+      () => this.ordersService.tryAndBuySelections(user.driverId || user.id, id, dto),
+    );
   }
 
   @Post('orders/:id/try-and-buy/return-collection')
@@ -134,8 +200,15 @@ export class DriverOrdersController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() dto: TryAndBuyReturnCollectionDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.tryAndBuyReturnCollection(user.driverId || user.id, id, dto);
+    return this.withIdempotency(
+      user,
+      `driver:tnb-return-collection:${id}`,
+      idempotencyKey,
+      { id, dto },
+      () => this.ordersService.tryAndBuyReturnCollection(user.driverId || user.id, id, dto),
+    );
   }
 
   @Post('orders/:id/try-and-buy/settle-payment')
@@ -145,8 +218,15 @@ export class DriverOrdersController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() dto: TryAndBuySettlePaymentDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.tryAndBuySettlePayment(user.driverId || user.id, id, dto);
+    return this.withIdempotency(
+      user,
+      `driver:tnb-settle:${id}`,
+      idempotencyKey,
+      { id, dto },
+      () => this.ordersService.tryAndBuySettlePayment(user.driverId || user.id, id, dto),
+    );
   }
 
   @Post('orders/:id/try-and-buy/arrive-store')
@@ -155,8 +235,15 @@ export class DriverOrdersController {
   async tryAndBuyArriveStore(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.tryAndBuyArriveStore(user.driverId || user.id, id);
+    return this.withIdempotency(
+      user,
+      `driver:tnb-arrive:${id}`,
+      idempotencyKey,
+      { id },
+      () => this.ordersService.tryAndBuyArriveStore(user.driverId || user.id, id),
+    );
   }
 
   @Post('orders/:id/try-and-buy/reconcile-store')
@@ -166,7 +253,14 @@ export class DriverOrdersController {
     @CurrentUser() user: AuthenticatedUser,
     @Param('id') id: string,
     @Body() dto: TryAndBuyReconciliationDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.tryAndBuyReconcileStore(user.driverId || user.id, id, dto);
+    return this.withIdempotency(
+      user,
+      `driver:tnb-reconcile:${id}`,
+      idempotencyKey,
+      { id, dto },
+      () => this.ordersService.tryAndBuyReconcileStore(user.driverId || user.id, id, dto),
+    );
   }
 }

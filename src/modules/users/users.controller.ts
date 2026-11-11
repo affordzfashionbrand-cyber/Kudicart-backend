@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Patch, Delete, Body, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
@@ -20,5 +20,11 @@ export class UsersController {
     @Body() body: UpdateUserDto,
   ) {
     return this.usersService.updateProfile(user.id, body, user);
+  }
+
+  @Delete('me')
+  @HttpCode(HttpStatus.OK)
+  async deactivateAccount(@CurrentUser() user: AuthenticatedUser) {
+    return this.usersService.deactivateAccount(user.id);
   }
 }

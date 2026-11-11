@@ -1,4 +1,5 @@
-import { Controller, Get, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Get, HttpStatus, Res } from '@nestjs/common';
+import { Response } from 'express';
 import { PrismaService } from '../../prisma/prisma.service';
 import { QueueService } from '../queue/queue.service';
 
@@ -12,18 +13,26 @@ export class HealthController {
   ) {}
 
   @Get('health')
-  @HttpCode(HttpStatus.OK)
-  async getHealthRoot() {
-    return this.checkHealth();
+  async getHealthRoot(@Res({ passthrough: true }) res?: Response) {
+    return this.checkHealth(res);
+  }
+
+  @Get('health/ready')
+  async getHealthReadyRoot(@Res({ passthrough: true }) res?: Response) {
+    return this.checkHealth(res);
   }
 
   @Get('api/v1/health')
-  @HttpCode(HttpStatus.OK)
-  async getHealthApi() {
-    return this.checkHealth();
+  async getHealthApi(@Res({ passthrough: true }) res?: Response) {
+    return this.checkHealth(res);
   }
 
-  private async checkHealth() {
+  @Get('api/v1/health/ready')
+  async getHealthReadyApi(@Res({ passthrough: true }) res?: Response) {
+    return this.checkHealth(res);
+  }
+
+  private async checkHealth(res?: Response) {
     const uptimeSeconds = Math.round((Date.now() - this.startTime) / 1000);
     const mem = process.memoryUsage();
 
@@ -36,17 +45,20 @@ export class HealthController {
         await (this.prisma as any).$queryRaw`SELECT 1`;
         latencyMs = Date.now() - startCheck;
       } else {
-        dbStatus = 'FALLBACK_STORE_ACTIVE';
-        latencyMs = 1;
+        dbStatus = 'DISCONNECTED';
+        latencyMs = Date.now() - startCheck;
       }
     } catch {
       dbStatus = 'DEGRADED';
       latencyMs = Date.now() - startCheck;
     }
 
+    const isHealthy = dbStatus === 'CONNECTED';
+    res?.status(isHealthy ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE);
+
     return {
-      status: 'UP',
-      service: 'affordz-backend',
+      status: isHealthy ? 'UP' : 'DEGRADED',
+      service: 'kudicart-backend',
       version: '1.0.0',
       timestamp: new Date().toISOString(),
       uptimeSeconds,

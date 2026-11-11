@@ -1,8 +1,8 @@
 import { hashPassword } from '../common/utils/crypto.util';
 
-// Default secure hashed password for seed admin accounts ("KudiCart#Admin2026!")
+// Default secure hashed password for seed admin accounts ("Affordz#Admin2026!")
 const DEFAULT_ADMIN_HASH = hashPassword(
-  process.env.ADMIN_DEFAULT_PASSWORD || 'KudiCart#Admin2026!',
+  process.env.ADMIN_DEFAULT_PASSWORD || 'Affordz#Admin2026!',
 );
 
 export const INITIAL_ADMIN_USERS = [
@@ -10,7 +10,7 @@ export const INITIAL_ADMIN_USERS = [
     id: 'ADM-001',
     userId: 'usr-admin-1',
     name: 'Amara Okonkwo',
-    email: 'amara@kudicart.com',
+    email: 'amara@affordz.in',
     passwordHash: DEFAULT_ADMIN_HASH,
     role: 'Super Admin',
     status: 'ACTIVE',
@@ -24,7 +24,7 @@ export const INITIAL_ADMIN_USERS = [
     id: 'ADM-002',
     userId: 'usr-admin-2',
     name: 'Tunde Bakare',
-    email: 'tunde@kudicart.com',
+    email: 'tunde@affordz.in',
     passwordHash: DEFAULT_ADMIN_HASH,
     role: 'Marketplace Operations',
     status: 'ACTIVE',
@@ -38,7 +38,7 @@ export const INITIAL_ADMIN_USERS = [
     id: 'ADM-003',
     userId: 'usr-admin-3',
     name: 'Chioma Eze',
-    email: 'chioma@kudicart.com',
+    email: 'chioma@affordz.in',
     passwordHash: DEFAULT_ADMIN_HASH,
     role: 'Catalog Manager',
     status: 'ACTIVE',
@@ -52,7 +52,7 @@ export const INITIAL_ADMIN_USERS = [
     id: 'ADM-004',
     userId: 'usr-admin-4',
     name: 'Ibrahim Sani',
-    email: 'ibrahim@kudicart.com',
+    email: 'ibrahim@affordz.in',
     passwordHash: DEFAULT_ADMIN_HASH,
     role: 'Finance Reviewer',
     status: 'ACTIVE',
@@ -66,7 +66,7 @@ export const INITIAL_ADMIN_USERS = [
     id: 'ADM-005',
     userId: 'usr-admin-5',
     name: 'Ngozi Adeleke',
-    email: 'ngozi@kudicart.com',
+    email: 'ngozi@affordz.in',
     passwordHash: DEFAULT_ADMIN_HASH,
     role: 'Support Manager',
     status: 'ACTIVE',
@@ -80,7 +80,7 @@ export const INITIAL_ADMIN_USERS = [
     id: 'ADM-006',
     userId: 'usr-admin-6',
     name: 'Operations Admin',
-    email: 'admin@kudicart.in',
+    email: 'admin@affordz.in',
     passwordHash: DEFAULT_ADMIN_HASH,
     role: 'Super Admin',
     status: 'ACTIVE',
@@ -349,7 +349,7 @@ export const INITIAL_ADMIN_DRIVERS = [
     driverCode: '#DRV-118',
     fullName: 'Suraj Verma',
     phone: '+91 98201 55412',
-    email: 'suraj.v@kudicart.in',
+    email: 'suraj.v@affordz.in',
     workPreference: 'FULL_TIME',
     vehicleType: 'EV Scooty',
     vehicleModel: 'Ather 450X',
@@ -437,7 +437,7 @@ export const INITIAL_ADMIN_DRIVERS = [
     driverCode: '#DRV-104',
     fullName: 'Deepak Solanki',
     phone: '+91 98202 99310',
-    email: 'deepak.s@kudicart.in',
+    email: 'deepak.s@affordz.in',
     workPreference: 'FULL_TIME',
     vehicleType: 'Bike',
     vehicleModel: 'Honda Shine',
@@ -468,7 +468,7 @@ export const INITIAL_ADMIN_DRIVERS = [
     driverCode: '#DRV-001',
     fullName: 'Rajesh Kumar',
     phone: '+91 98765 43210',
-    email: 'rajesh.driver@kudicart.in',
+    email: 'rajesh.driver@affordz.in',
     workPreference: 'PART_TIME',
     vehicleType: 'EV Scooty',
     vehicleModel: 'Ather 450X Gen 3',

@@ -1,963 +1,1665 @@
 import {
   Injectable,
-  NotFoundException,
   BadRequestException,
+  NotFoundException,
   ForbiddenException,
-  InternalServerErrorException,
-  Logger,
+  ConflictException,
+  ServiceUnavailableException,
   Optional,
-  Inject,
-  forwardRef,
+  Logger,
 } from '@nestjs/common';
+import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
-import { StateMachineService, OrderStatus } from './state-machine.service';
-import { CheckoutDto } from './dto/checkout.dto';
-import { Role } from '../../common/enums/role.enum';
-import { PaymentsService } from '../payments/payments.service';
+import { StateMachineService } from './state-machine.service';
+import { OrderTransitionService } from './order-transition.service';
+import { RazorpayClientService } from '../payments/razorpay-client.service';
 import { CartService } from '../cart/cart.service';
-import { DispatchService } from './dispatch.service';
 import { GoogleRoutesService } from './google-routes.service';
 import { TrackingRealtimeGateway } from './tracking-realtime.gateway';
+import { QueueService } from '../queue/queue.service';
+import { QueueJobType } from '../queue/queue.constants';
+import { CheckoutDto } from './dto/checkout.dto';
+import { Role } from '../../common/enums/role.enum';
+import {
+  CheckoutResponseContract,
+  LIVE_TRACKING_ACTIVE_STATUSES,
+  OrderContract,
+  OrderStatus,
+  TERMINAL_ORDER_STATUSES,
+  TryAndBuyDecision,
+} from '../../common/contracts/order-contracts';
+import {
+  GIFT_WRAP_FEE,
+  MAX_DARK_STORE_RADIUS_KM,
+  allocateProRata,
+  computeSplitOrderTotals,
+  computeTryAndBuyFinancials,
+  haversineDistanceKm,
+} from './order-pricing.util';
+import { deriveCustomerOrderOtp, hashOrderOtp } from './order-otp.util';
+import { createCheckoutSessionToken } from '../../common/utils/checkout-session.util';
+
+const ORDER_WITH_RELATIONS = {
+  items: true,
+  history: { orderBy: { createdAt: 'asc' as const } },
+  address: true,
+  vendor: true,
+  driver: {
+    select: {
+      id: true,
+      name: true,
+      phone: true,
+      avatar: true,
+      driverProfile: true,
+    },
+  },
+  driverProfile: true,
+  tryAndBuySession: true,
+  checkoutGroup: true,
+};
 
 @Injectable()
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
 
   constructor(
-    private prisma: PrismaService,
-    private stateMachine: StateMachineService,
-    private paymentsService: PaymentsService,
-    private cartService: CartService,
-    @Optional()
-    @Inject(forwardRef(() => DispatchService))
-    private dispatchService?: DispatchService,
-    @Optional()
-    private googleRoutesService?: GoogleRoutesService,
-    @Optional()
-    private trackingGateway?: TrackingRealtimeGateway,
+    private readonly prisma: PrismaService,
+    private readonly stateMachine: StateMachineService,
+    private readonly orderTransition: OrderTransitionService,
+    private readonly razorpayClient: RazorpayClientService,
+    private readonly cartService: CartService,
+    @Optional() private readonly googleRoutesService?: GoogleRoutesService,
+    @Optional() private readonly trackingGateway?: TrackingRealtimeGateway,
+    @Optional() private readonly queueService?: QueueService,
   ) {}
 
-  async checkout(userId: string, dto: CheckoutDto) {
-    const store = this.prisma.getStore();
-
-    // 1. Validate Address
-    let address = store.addresses.find((a) => a.id === dto.addressId && a.userId === userId);
-    if (!address) {
-      address = store.addresses.find((a) => a.userId === userId) || store.addresses[0];
+  private ensureDbConnected() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
     }
-    if (!address) {
-      address = {
-        id: dto.addressId || 'addr-default',
-        userId,
-        label: 'Home',
-        line1: '42 Westend Boulevard, Indiranagar',
-        locality: 'Indiranagar',
-        city: 'Bengaluru',
-        pincode: '560038',
-        latitude: 12.9658,
-        longitude: 77.6465,
-        isDefault: true,
-      };
-      store.addresses.push(address);
-    }
+  }
 
-    // 2. Validate Cart (Supports server-side cart & client-provided items / standalone Buy Now)
-    let userCartItems: any[];
-    if (dto.isBuyNow && dto.items && dto.items.length > 0) {
-      userCartItems = dto.items.map((it: any) => ({
-        id: it.id || `ci-${Date.now()}`,
-        userId,
-        productId: it.productId || it.id,
-        size: it.size || 'M',
-        trialSize: it.trialSize || null,
-        quantity: it.quantity || 1,
-        title: it.title,
-        brand: it.brand,
-        price: it.price,
-        image: it.image,
-      }));
-    } else {
-      userCartItems = store.cartItems.filter((ci) => ci.userId === userId);
-      if (userCartItems.length === 0 && dto.items && dto.items.length > 0) {
-        userCartItems = dto.items.map((it: any) => ({
-          id: it.id || `ci-${Date.now()}`,
-          userId,
-          productId: it.productId || it.id,
-          size: it.size || 'M',
-          trialSize: it.trialSize || null,
-          quantity: it.quantity || 1,
-          title: it.title,
-          brand: it.brand,
-          price: it.price,
-          image: it.image,
-        }));
+  private async resolveVendorIdForUser(userId?: string, explicitVendorId?: string): Promise<string | null> {
+    if (explicitVendorId) return explicitVendorId;
+    if (!userId) return null;
+    const vendor = await this.prisma.vendor.findFirst({ where: { userId } });
+    return vendor?.id || null;
+  }
+
+  private async resolveDriverProfileIdForUser(userId?: string, explicitDriverId?: string): Promise<string | null> {
+    if (explicitDriverId) return explicitDriverId;
+    if (!userId) return null;
+    const profile = await this.prisma.driverProfile.findFirst({ where: { userId } });
+    return profile?.id || null;
+  }
+
+  private async assertOrderAccess(
+    order: any,
+    userId?: string,
+    role?: string,
+    driverId?: string,
+    vendorId?: string,
+  ) {
+    if (!role || role === Role.ADMIN) return;
+
+    if (role === Role.CUSTOMER) {
+      if (!userId || order.customerId !== userId) {
+        throw new ForbiddenException('You do not have permission to access this order');
       }
+      return;
     }
 
-    if (userCartItems.length === 0) {
-      throw new BadRequestException('Cannot checkout with an empty cart');
+    if (role === Role.DRIVER) {
+      const effectiveDriverProfileId = await this.resolveDriverProfileIdForUser(userId, driverId);
+      const matchesDriverUser = userId && order.driverId === userId;
+      const matchesDriverProfile =
+        effectiveDriverProfileId &&
+        (order.driverProfileId === effectiveDriverProfileId || order.driverId === effectiveDriverProfileId);
+      if (!matchesDriverUser && !matchesDriverProfile) {
+        throw new ForbiddenException('Order is not assigned to your driver account');
+      }
+      return;
     }
 
-    // 3. Validate Stock & Prepare Items
-    const items = [];
-    let detectedVendorId = 'vend-1';
+    if (role === Role.VENDOR) {
+      const effectiveVendorId = await this.resolveVendorIdForUser(userId, vendorId);
+      if (!effectiveVendorId || order.vendorId !== effectiveVendorId) {
+        throw new ForbiddenException('Order does not belong to your vendor store');
+      }
+      return;
+    }
 
-    for (const ci of userCartItems) {
-      const prod = store.products.find(
-        (p) =>
-          p.id === ci.productId ||
-          p.id === `prod-${ci.productId}` ||
-          p.id.replace('prod-', '') === ci.productId,
-      );
+    throw new ForbiddenException('Unsupported role for order access');
+  }
 
-      if (prod) {
-        if (prod.stockQuantity < ci.quantity) {
-          throw new BadRequestException(
-            `Insufficient stock for '${prod.title}'. Available: ${prod.stockQuantity}, Requested: ${ci.quantity}`,
+  public formatOrderResponse(order: any, viewerRole?: string, viewerUserId?: string): OrderContract & {
+    driverName?: string | null;
+    driverPhone?: string | null;
+    handoverOtp?: string;
+    history?: any[];
+    vendor?: any;
+  } {
+    const isTerminal = TERMINAL_ORDER_STATUSES.includes(order.status as OrderStatus);
+    const shouldExposeOtp =
+      viewerRole === Role.CUSTOMER &&
+      viewerUserId &&
+      order.customerId === viewerUserId &&
+      !isTerminal &&
+      Boolean(order.deliveryOtpHash);
+
+    const formatted: any = {
+      id: order.id,
+      orderNumber: order.orderNumber,
+      version: order.version ?? 1,
+      checkoutGroupId: order.checkoutGroupId ?? null,
+      customerId: order.customerId,
+      customerName: order.customer?.name || order.deliveryAddress?.recipientName || undefined,
+      vendorId: order.vendorId ?? null,
+      vendorName: order.vendor?.storeName || undefined,
+      driverId: order.driverId ?? null,
+      driverProfileId: order.driverProfileId ?? null,
+      driverName: order.driverProfile?.fullName || order.driver?.name || null,
+      driverPhone: order.driverProfile?.phone || order.driver?.phone || null,
+      fulfillmentType: order.fulfillmentType || 'DARK_STORE',
+      status: order.status,
+      paymentMethod: order.paymentMethod,
+      paymentStatus: order.paymentStatus,
+      razorpayOrderId: order.razorpayOrderId ?? null,
+      razorpayPaymentId: order.razorpayPaymentId ?? null,
+      itemTotal: Math.round(order.itemTotal || 0),
+      deliveryFee: Math.round(order.deliveryFee || 0),
+      taxes: Math.round(order.taxes || 0),
+      giftWrapFee: Math.round(order.giftWrapFee || 0),
+      donationAmount: Math.round(order.donationAmount || 0),
+      discountAmount: Math.round(order.discountAmount || 0),
+      couponCode: order.couponCode ?? null,
+      grandTotal: Math.round(order.grandTotal || 0),
+      etaMinutes: order.etaMinutes ?? 0,
+      isTryAndBuy: Boolean(order.isTryAndBuy),
+      deliveryInstructions: order.deliveryInstructions ?? null,
+      verificationPhotos: Array.isArray(order.verificationPhotos) ? order.verificationPhotos : [],
+      deliveryAddress: order.deliveryAddress ?? null,
+      arrivedAt: order.arrivedAt ? new Date(order.arrivedAt).toISOString() : null,
+      deliveredAt: order.deliveredAt ? new Date(order.deliveredAt).toISOString() : null,
+      cancelledAt: order.cancelledAt ? new Date(order.cancelledAt).toISOString() : null,
+      cancellationReason: order.cancellationReason ?? null,
+      rejectedByVendor: Boolean(order.rejectedByVendor),
+      expiresAt: order.expiresAt ? new Date(order.expiresAt).toISOString() : null,
+      createdAt: order.createdAt ? new Date(order.createdAt).toISOString() : new Date().toISOString(),
+      updatedAt: order.updatedAt ? new Date(order.updatedAt).toISOString() : new Date().toISOString(),
+      items: (order.items || []).map((item: any) => ({
+        id: item.id,
+        productId: item.productId,
+        title: item.title,
+        brand: item.brand,
+        size: item.size,
+        trialSize: item.trialSize ?? null,
+        price: Math.round(item.price || 0),
+        quantity: item.quantity || 1,
+        image: item.image,
+        tryAndBuyDecision: (item.tryAndBuyDecision as TryAndBuyDecision) ?? null,
+        returnCondition: item.returnCondition ?? null,
+        collectedAt: item.collectedAt ? new Date(item.collectedAt).toISOString() : null,
+      })),
+      tryAndBuySession: order.tryAndBuySession
+        ? {
+            id: order.tryAndBuySession.id,
+            orderId: order.tryAndBuySession.orderId,
+            stage: order.tryAndBuySession.stage,
+            trialDurationMinutes: order.tryAndBuySession.trialDurationMinutes,
+            handoverConfirmedAt: order.tryAndBuySession.handoverConfirmedAt?.toISOString?.() ?? null,
+            trialStartedAt: order.tryAndBuySession.trialStartedAt?.toISOString?.() ?? null,
+            trialEndsAt: order.tryAndBuySession.trialEndsAt?.toISOString?.() ?? null,
+            customerSelectionAt: order.tryAndBuySession.customerSelectionAt?.toISOString?.() ?? null,
+            finalPayableTotal: order.tryAndBuySession.finalPayableTotal ?? null,
+            refundAmount: order.tryAndBuySession.refundAmount ?? null,
+            amountDue: order.tryAndBuySession.amountDue ?? null,
+            paymentStatus: order.tryAndBuySession.paymentStatus ?? null,
+            returnManifestId: order.tryAndBuySession.returnManifestId ?? null,
+            keptItemIds: order.tryAndBuySession.keptItemIds || [],
+            returnedItemIds: order.tryAndBuySession.returnedItemIds || [],
+            handoverImages: order.tryAndBuySession.handoverImages || [],
+            returnImages: order.tryAndBuySession.returnImages || [],
+            storeReconciliationStatus: order.tryAndBuySession.storeReconciliationStatus ?? null,
+            storeReconciledAt: order.tryAndBuySession.storeReconciledAt?.toISOString?.() ?? null,
+          }
+        : null,
+      history: (order.history || []).map((h: any) => ({
+        id: h.id,
+        status: h.status,
+        note: h.note,
+        actorId: h.actorId ?? null,
+        actorRole: h.actorRole ?? null,
+        createdAt: h.createdAt ? new Date(h.createdAt).toISOString() : null,
+      })),
+    };
+
+    if (shouldExposeOtp) {
+      formatted.handoverOtp = deriveCustomerOrderOtp(order.id);
+    }
+
+    return formatted;
+  }
+
+  async checkout(
+    userId: string,
+    dto: CheckoutDto,
+    idempotencyKey?: string,
+  ): Promise<CheckoutResponseContract> {
+    this.ensureDbConnected();
+
+    const cleanIdempotencyKey = idempotencyKey?.trim();
+    const requestHash = cleanIdempotencyKey
+      ? crypto
+          .createHash('sha256')
+          .update(
+            JSON.stringify({
+              addressId: dto.addressId,
+              paymentMethod: dto.paymentMethod,
+              couponCode: dto.couponCode?.trim().toUpperCase() || null,
+              isTryAndBuy: Boolean(dto.isTryAndBuy),
+              isBuyNow: Boolean(dto.isBuyNow),
+              giftWrap: dto.giftWrap ?? null,
+              donationAmount: dto.donationAmount ?? null,
+              deliveryInstructions: dto.deliveryInstructions?.trim() || null,
+              buyNowItem: dto.buyNowItem || null,
+              items: dto.items || null,
+            }),
+          )
+          .digest('hex')
+      : null;
+
+    if (cleanIdempotencyKey && requestHash) {
+      const cached = await this.prisma.idempotencyKey.findUnique({
+        where: {
+          userId_scope_key: {
+            userId,
+            scope: 'CHECKOUT',
+            key: cleanIdempotencyKey,
+          },
+        },
+      });
+      if (cached && cached.expiresAt > new Date()) {
+        if (cached.requestHash !== requestHash) {
+          throw new ConflictException(
+            'Idempotency-Key was already used with a different checkout payload',
           );
         }
-        prod.stockQuantity -= ci.quantity;
-        if (prod.vendorId) {
-          detectedVendorId = prod.vendorId;
-        }
+        return cached.responseBody as unknown as CheckoutResponseContract;
+      }
+    }
 
-        items.push({
-          id: `oi-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-          productId: prod.id,
-          title: prod.title,
-          brand: prod.brand,
-          size: ci.size,
-          trialSize: ci.trialSize || null,
-          price: prod.price,
-          quantity: ci.quantity,
-          image: prod.image,
+    const address = await this.prisma.address.findFirst({
+      where: { id: dto.addressId, userId },
+    });
+    if (!address) {
+      throw new NotFoundException('Delivery address not found for your account');
+    }
+
+    // Resolve authoritative line items strictly from server Catalog DB (never trust client price/totals)
+    const rawRequestedItems: Array<{
+      productId: string;
+      size?: string;
+      trialSize?: string | null;
+      quantity: number;
+    }> = [];
+
+    let loadedCart: any = null;
+
+    if (dto.isBuyNow) {
+      const sourceItems =
+        Array.isArray(dto.items) && dto.items.length > 0
+          ? dto.items
+          : dto.buyNowItem
+            ? [dto.buyNowItem]
+            : [];
+      if (sourceItems.length === 0) {
+        throw new BadRequestException('Buy Now requires at least one product item');
+      }
+      for (const item of sourceItems) {
+        rawRequestedItems.push({
+          productId: item.productId,
+          size: item.size,
+          trialSize: item.trialSize ?? null,
+          quantity: Math.max(1, Math.floor(Number(item.quantity) || 1)),
         });
-      } else {
-        // Fallback for custom/deal items
-        items.push({
-          id: `oi-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-          productId: ci.productId,
-          title: (ci as any).title || 'Affordz Artisan Garment',
-          brand: (ci as any).brand || 'Affordz',
-          size: ci.size || 'M',
-          trialSize: ci.trialSize || null,
-          price: (ci as any).price || 1299,
-          quantity: ci.quantity || 1,
-          image: (ci as any).image || '',
+      }
+    } else {
+      loadedCart = await this.prisma.cart.findFirst({
+        where: { userId },
+        include: { items: true },
+      });
+      if (!loadedCart || loadedCart.items.length === 0) {
+        throw new BadRequestException('Your shopping bag is empty');
+      }
+      for (const item of loadedCart.items) {
+        rawRequestedItems.push({
+          productId: item.productId,
+          size: item.size,
+          trialSize: item.trialSize ?? null,
+          quantity: Math.max(1, item.quantity),
         });
       }
     }
 
-    // 4. Authoritative Pricing & Coupon Resolution
-    const itemTotal = items.reduce((acc, item) => acc + item.price * item.quantity, 0);
+    const productIds = Array.from(new Set(rawRequestedItems.map((i) => i.productId)));
+    const products = await this.prisma.product.findMany({
+      where: { id: { in: productIds } },
+      include: { vendor: true, darkStoreHub: true },
+    });
+    const productMap = new Map(products.map((p) => [p.id, p]));
 
-    const appliedCode = dto.couponCode || this.cartService.getAppliedCoupon(userId);
-    let discountAmount = 0;
-    let validCouponCode: string | null = null;
+    const resolvedItems = rawRequestedItems.map((reqItem) => {
+      const product = productMap.get(reqItem.productId);
+      if (!product) {
+        throw new NotFoundException(`Product '${reqItem.productId}' not found`);
+      }
 
-    if (appliedCode) {
-      const coupon = store.coupons.find(
-        (c) => c.code.toUpperCase() === appliedCode.trim().toUpperCase(),
-      );
-      if (coupon && coupon.isActive && itemTotal >= coupon.minOrderValue) {
-        validCouponCode = coupon.code;
-        if (coupon.discountType === 'PERCENTAGE') {
-          discountAmount = Math.round((itemTotal * coupon.discountValue) / 100);
-          if (coupon.maxDiscount) {
-            discountAmount = Math.min(discountAmount, coupon.maxDiscount);
+      if (product.fulfillmentType === 'DARK_STORE') {
+        if (address.latitude == null || address.longitude == null) {
+          throw new BadRequestException(
+            'Delivery address coordinates (latitude and longitude) are required for Dark Store express checkout.',
+          );
+        }
+        if (product.darkStoreHub?.lat != null && product.darkStoreHub?.lng != null) {
+          const distKm = haversineDistanceKm(
+            product.darkStoreHub.lat,
+            product.darkStoreHub.lng,
+            address.latitude,
+            address.longitude,
+          );
+          if (distKm > MAX_DARK_STORE_RADIUS_KM) {
+            throw new BadRequestException(
+              `Dark store hub '${product.darkStoreHub.name}' is ${distKm} km away (maximum ${MAX_DARK_STORE_RADIUS_KM} km for express delivery).`,
+            );
           }
-        } else {
-          discountAmount = Math.min(itemTotal, coupon.discountValue);
         }
       }
-    }
 
-    const deliveryFee = itemTotal >= 1499 ? 0 : 40;
-    const taxes = Math.round(itemTotal * 0.05); // 5% GST
-    const grandTotal = Math.max(0, itemTotal - discountAmount) + deliveryFee + taxes;
+      const normalizedSize = reqItem.size?.trim() || product.sizes?.[0] || 'Free Size';
+      const itemTryAndBuyEligible =
+        (product.fulfillmentType || 'DARK_STORE') === 'DARK_STORE' &&
+        Boolean(product.tryAndBuyEligible);
 
-    const hasDarkStoreProduct = userCartItems.some((ci) => {
-      const prod = store.products.find((p) => p.id === ci.productId);
-      return prod?.fulfillmentType === 'DARK_STORE';
+      return {
+        product,
+        productId: product.id,
+        title: product.title,
+        brand: product.brand,
+        size: normalizedSize,
+        trialSize: dto.isTryAndBuy && itemTryAndBuyEligible ? reqItem.trialSize ?? null : null,
+        price: Math.round(product.price),
+        quantity: reqItem.quantity,
+        image: product.image,
+        vendorId: product.vendorId || 'vend-affordz-official',
+        fulfillmentType: (product.fulfillmentType || 'DARK_STORE') as 'DARK_STORE' | 'VENDOR',
+        etaMinutes: product.darkStoreHub?.deliveryMinutes ?? 28,
+        itemTryAndBuyEligible,
+      };
     });
 
-    const isTryAndBuy = Boolean(
-      hasDarkStoreProduct && (dto.isTryAndBuy || userCartItems.some((ci) => Boolean(ci.trialSize))),
-    );
+    // Enforce stock availability per unique product
+    const qtyByProduct = new Map<string, number>();
+    for (const item of resolvedItems) {
+      qtyByProduct.set(item.productId, (qtyByProduct.get(item.productId) || 0) + item.quantity);
+    }
 
-    // Authoritative serviceability validation for Dark Store items & Try & Buy (DCR-001)
-    if (hasDarkStoreProduct || isTryAndBuy) {
-      const serviceability = this.checkServiceability(address);
-      if (!serviceability.isServiceable) {
-        throw new BadRequestException(
-          serviceability.reason ||
-            'Delivery address is outside the 8.0 km instant drop radius for Indiranagar Express Hub. Instant delivery and Try & Buy are not available for this location.',
+    for (const [productId, requestedQty] of qtyByProduct.entries()) {
+      const product = productMap.get(productId)!;
+      if (product.stockQuantity < requestedQty) {
+        throw new ConflictException(
+          `Insufficient stock for '${product.title}'. Requested ${requestedQty}, available ${product.stockQuantity}.`,
         );
       }
     }
 
-    const orderNumber = `AF-${Math.floor(10000 + Math.random() * 90000)}`;
-    const razorpayOrderId =
-      dto.paymentMethod === 'RAZORPAY' ? `rzp_order_${Date.now()}` : undefined;
+    // Group items into split orders by (vendorId, fulfillmentType) per DCR-007
+    const groupMap = new Map<
+      string,
+      {
+        key: string;
+        vendorId: string;
+        fulfillmentType: 'DARK_STORE' | 'VENDOR';
+        etaMinutes: number;
+        items: typeof resolvedItems;
+        itemTotal: number;
+        isTryAndBuy: boolean;
+      }
+    >();
 
-    const newOrder = {
-      id: `ord-${Date.now()}`,
-      orderNumber,
-      customerId: userId,
-      driverId: null as string | null,
-      addressId: dto.addressId,
-      vendorId: detectedVendorId,
-      status: 'PLACED' as OrderStatus,
-      paymentMethod: dto.paymentMethod,
-      paymentStatus: 'PENDING',
-      razorpayOrderId,
-      razorpayPaymentId: null as string | null,
-      itemTotal,
-      deliveryFee,
-      taxes,
-      discountAmount,
-      couponCode: validCouponCode,
-      isTryAndBuy,
-      grandTotal,
-      etaMinutes: hasDarkStoreProduct ? 18 : 2880,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      items,
-      history: [
-        {
-          status: 'PLACED' as OrderStatus,
-          time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-          note: 'Order confirmed and placed by customer',
-          actor: 'CUSTOMER',
-        },
-      ],
+    for (const item of resolvedItems) {
+      const key = `${item.vendorId}::${item.fulfillmentType}`;
+      let bucket = groupMap.get(key);
+      if (!bucket) {
+        bucket = {
+          key,
+          vendorId: item.vendorId,
+          fulfillmentType: item.fulfillmentType,
+          etaMinutes: item.etaMinutes,
+          items: [],
+          itemTotal: 0,
+          isTryAndBuy: false,
+        };
+        groupMap.set(key, bucket);
+      }
+      bucket.items.push(item);
+      bucket.itemTotal += item.price * item.quantity;
+    }
+
+    const splitBuckets = Array.from(groupMap.values()).sort((a, b) => a.key.localeCompare(b.key));
+    for (const bucket of splitBuckets) {
+      bucket.isTryAndBuy =
+        Boolean(dto.isTryAndBuy) &&
+        bucket.fulfillmentType === 'DARK_STORE' &&
+        bucket.items.every((it) => it.itemTryAndBuyEligible);
+    }
+
+    if (dto.isTryAndBuy) {
+      const ineligibleDarkStore = resolvedItems.find(
+        (it) => it.fulfillmentType === 'DARK_STORE' && !it.itemTryAndBuyEligible,
+      );
+      if (ineligibleDarkStore) {
+        throw new BadRequestException(
+          `Product '${ineligibleDarkStore.title}' is not eligible for Try & Buy.`,
+        );
+      }
+      const tryAndBuyBuckets = splitBuckets.filter((b) => b.isTryAndBuy);
+      if (tryAndBuyBuckets.length === 0) {
+        throw new BadRequestException(
+          'No eligible Dark Store items were found for Try & Buy in this checkout.',
+        );
+      }
+      const tryAndBuyPieces = tryAndBuyBuckets.reduce(
+        (acc, b) => acc + b.items.reduce((s, it) => s + it.quantity, 0),
+        0,
+      );
+      if (tryAndBuyPieces > 5) {
+        throw new BadRequestException('Try & Buy orders support a maximum of 5 items per checkout.');
+      }
+    }
+
+    const combinedItemTotal = splitBuckets.reduce((acc, b) => acc + b.itemTotal, 0);
+
+    // Server-side coupon validation (DCR-006)
+    let appliedCoupon: any = null;
+    let totalDiscountAmount = 0;
+    const rawCouponCode = (dto.couponCode ?? (!dto.isBuyNow ? loadedCart?.couponCode : undefined))
+      ?.trim()
+      .toUpperCase();
+
+    if (rawCouponCode) {
+      appliedCoupon = await this.prisma.coupon.findUnique({ where: { code: rawCouponCode } });
+      if (!appliedCoupon || !appliedCoupon.isActive) {
+        throw new BadRequestException(`Coupon code '${rawCouponCode}' is invalid or inactive`);
+      }
+      const now = new Date();
+      if (now < appliedCoupon.startDate || now > appliedCoupon.endDate) {
+        throw new BadRequestException(`Coupon code '${rawCouponCode}' has expired`);
+      }
+      if (
+        appliedCoupon.usageLimit != null &&
+        appliedCoupon.usedCount >= appliedCoupon.usageLimit
+      ) {
+        throw new BadRequestException(`Coupon code '${rawCouponCode}' usage limit has been reached`);
+      }
+      if (combinedItemTotal < appliedCoupon.minOrderValue) {
+        throw new BadRequestException(
+          `Coupon '${rawCouponCode}' requires minimum order value of ₹${appliedCoupon.minOrderValue}`,
+        );
+      }
+
+      if (appliedCoupon.discountType === 'PERCENTAGE') {
+        totalDiscountAmount = Math.round((combinedItemTotal * appliedCoupon.discountValue) / 100);
+        if (appliedCoupon.maxDiscount != null) {
+          totalDiscountAmount = Math.min(totalDiscountAmount, Math.round(appliedCoupon.maxDiscount));
+        }
+      } else {
+        totalDiscountAmount = Math.round(appliedCoupon.discountValue);
+        if (appliedCoupon.maxDiscount != null) {
+          totalDiscountAmount = Math.min(totalDiscountAmount, Math.round(appliedCoupon.maxDiscount));
+        }
+      }
+      totalDiscountAmount = Math.min(combinedItemTotal, Math.max(0, totalDiscountAmount));
+    }
+
+    const proRataDiscounts = allocateProRata(
+      totalDiscountAmount,
+      splitBuckets.map((b) => b.itemTotal),
+    );
+    const effectiveGiftWrap = dto.giftWrap ?? Boolean(loadedCart?.giftWrap);
+    const effectiveDonation = dto.donationAmount ?? loadedCart?.donationAmount ?? 0;
+    const totalGiftWrapFee = effectiveGiftWrap ? GIFT_WRAP_FEE : 0;
+    const totalDonationAmount = Math.max(0, Math.round(effectiveDonation || 0));
+
+    const splitOrderPlans = splitBuckets.map((bucket, idx) => {
+      const orderId = crypto.randomUUID();
+      const otpPlain = deriveCustomerOrderOtp(orderId);
+      const otpHash = hashOrderOtp(orderId, otpPlain);
+      const giftWrapFee = idx === 0 ? totalGiftWrapFee : 0;
+      const donationAmount = idx === 0 ? totalDonationAmount : 0;
+      const totals = computeSplitOrderTotals({
+        items: bucket.items.map((it) => ({ price: it.price, quantity: it.quantity })),
+        discountAmount: proRataDiscounts[idx],
+        giftWrapFee,
+        donationAmount,
+      });
+
+      return {
+        orderId,
+        orderNumber: `KC-${crypto.randomInt(10000, 99999)}-${(Date.now() + idx)
+          .toString()
+          .slice(-4)}`,
+        otpHash,
+        bucket,
+        totals,
+      };
+    });
+
+    const groupItemTotal = splitOrderPlans.reduce((a, p) => a + p.totals.itemTotal, 0);
+    const groupDiscountTotal = splitOrderPlans.reduce((a, p) => a + p.totals.discountAmount, 0);
+    const groupDeliveryFeeTotal = splitOrderPlans.reduce((a, p) => a + p.totals.deliveryFee, 0);
+    const groupTaxesTotal = splitOrderPlans.reduce((a, p) => a + p.totals.taxes, 0);
+    const groupGrandTotal = splitOrderPlans.reduce((a, p) => a + p.totals.grandTotal, 0);
+
+    const addressSnapshot = {
+      id: address.id,
+      label: address.label,
+      recipientName: address.recipientName,
+      recipientPhone: address.recipientPhone,
+      line1: address.line1,
+      line2: address.line2,
+      locality: address.locality,
+      city: address.city,
+      state: address.state,
+      pincode: address.pincode,
+      latitude: address.latitude,
+      longitude: address.longitude,
     };
 
-    // 5. Persist to PostgreSQL if connected
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.$transaction(async (tx) => {
-          for (const item of items) {
-            await tx.product.updateMany({
-              where: { id: item.productId },
-              data: { stockQuantity: { decrement: item.quantity } },
-            });
-          }
+    const expiresAt =
+      dto.paymentMethod === 'RAZORPAY'
+        ? new Date(Date.now() + 15 * 60 * 1000)
+        : null;
 
-          await tx.order.create({
-            data: {
-              id: newOrder.id,
-              orderNumber: newOrder.orderNumber,
-              customerId: userId,
-              vendorId: detectedVendorId,
-              addressId: dto.addressId || address?.id,
-              deliveryAddress: address as any,
-              status: 'PLACED',
-              paymentMethod: dto.paymentMethod as any,
-              paymentStatus: 'PENDING',
-              razorpayOrderId: newOrder.razorpayOrderId,
-              itemTotal,
-              deliveryFee,
-              taxes,
-              grandTotal,
-              etaMinutes: newOrder.etaMinutes,
-              isTryAndBuy,
-              couponCode: validCouponCode,
-              discountAmount,
-              items: {
-                create: items.map((it) => ({
-                  id: it.id,
-                  productId: it.productId,
-                  title: it.title,
-                  brand: it.brand,
-                  size: it.size,
-                  trialSize: it.trialSize,
-                  price: it.price,
-                  quantity: it.quantity,
-                  image: it.image,
-                })),
-              },
-              history: {
-                create: [
-                  {
-                    status: 'PLACED',
-                    note: 'Order confirmed and placed by customer',
-                  },
-                ],
-              },
-              ...(isTryAndBuy
-                ? {
-                    tryAndBuySession: {
-                      create: {
-                        trialDurationMinutes: 10,
-                        stage: 'HANDOVER_PENDING',
-                      },
-                    },
-                  }
-                : {}),
+    const groupNumber = `GRP-${Date.now().toString(36).toUpperCase()}-${crypto.randomInt(100, 999)}`;
+
+    // Step 1: Atomic DB reservation (group, split orders, stock decrement, coupon increment, cart clear, outbox)
+    const { createdGroup, createdOrders } = await this.prisma.$transaction(async (tx) => {
+      if (appliedCoupon) {
+        const couponRes = await tx.coupon.updateMany({
+          where: {
+            id: appliedCoupon.id,
+            isActive: true,
+            ...(appliedCoupon.usageLimit != null
+              ? { usedCount: { lt: appliedCoupon.usageLimit } }
+              : {}),
+          },
+          data: { usedCount: { increment: 1 } },
+        });
+        if (couponRes.count === 0) {
+          throw new ConflictException(
+            `Coupon '${appliedCoupon.code}' could not be applied (usage limit reached).`,
+          );
+        }
+      }
+
+      for (const [productId, requestedQty] of qtyByProduct.entries()) {
+        const product = productMap.get(productId)!;
+        const stockUpdate = await tx.product.updateMany({
+          where: {
+            id: productId,
+            stockQuantity: { gte: requestedQty },
+          },
+          data: {
+            stockQuantity: { decrement: requestedQty },
+          },
+        });
+        if (stockUpdate.count === 0) {
+          throw new ConflictException(
+            `Insufficient stock for '${product.title}' during checkout reservation.`,
+          );
+        }
+      }
+
+      const grp = await tx.checkoutGroup.create({
+        data: {
+          groupNumber,
+          customerId: userId,
+          addressId: address.id,
+          deliveryAddress: addressSnapshot,
+          paymentMethod: dto.paymentMethod,
+          paymentStatus: 'PENDING',
+          couponCode: appliedCoupon ? appliedCoupon.code : null,
+          itemTotal: groupItemTotal,
+          discountTotal: groupDiscountTotal,
+          giftWrapFee: totalGiftWrapFee,
+          donationAmount: totalDonationAmount,
+          deliveryFeeTotal: groupDeliveryFeeTotal,
+          taxesTotal: groupTaxesTotal,
+          grandTotal: groupGrandTotal,
+          expiresAt,
+        },
+      });
+
+      const created: any[] = [];
+      for (const plan of splitOrderPlans) {
+        const vendorUserId = plan.bucket.items[0]?.product?.vendor?.userId || null;
+        const order = await tx.order.create({
+          data: {
+            id: plan.orderId,
+            orderNumber: plan.orderNumber,
+            version: 1,
+            checkoutGroupId: grp.id,
+            customerId: userId,
+            vendorId: plan.bucket.vendorId,
+            addressId: address.id,
+            deliveryAddress: addressSnapshot,
+            fulfillmentType: plan.bucket.fulfillmentType,
+            status: 'PLACED',
+            paymentMethod: dto.paymentMethod,
+            paymentStatus: 'PENDING',
+            itemTotal: plan.totals.itemTotal,
+            deliveryFee: plan.totals.deliveryFee,
+            taxes: plan.totals.taxes,
+            giftWrapFee: plan.totals.giftWrapFee,
+            donationAmount: plan.totals.donationAmount,
+            discountAmount: plan.totals.discountAmount,
+            couponCode: appliedCoupon ? appliedCoupon.code : null,
+            grandTotal: plan.totals.grandTotal,
+            etaMinutes: plan.bucket.etaMinutes,
+            isTryAndBuy: plan.bucket.isTryAndBuy,
+            deliveryInstructions: dto.deliveryInstructions?.trim() || null,
+            deliveryOtpHash: plan.otpHash,
+            expiresAt,
+            items: {
+              create: plan.bucket.items.map((it) => ({
+                productId: it.productId,
+                title: it.title,
+                brand: it.brand,
+                size: it.size,
+                trialSize: it.trialSize,
+                price: it.price,
+                quantity: it.quantity,
+                image: it.image,
+              })),
             },
-          });
+            history: {
+              create: {
+                status: 'PLACED',
+                note: `Order placed (${dto.paymentMethod})`,
+                actorId: userId,
+                actorRole: Role.CUSTOMER,
+              },
+            },
+          },
+          include: ORDER_WITH_RELATIONS,
+        });
 
-          // Atomically persist transactional outbox event
+        await tx.auditLog.create({
+          data: {
+            userId,
+            userRole: Role.CUSTOMER,
+            action: 'ORDER_CREATED',
+            entityType: 'Order',
+            entityId: order.id,
+            details: JSON.stringify({
+              orderNumber: order.orderNumber,
+              checkoutGroupId: grp.id,
+              paymentMethod: order.paymentMethod,
+              grandTotal: order.grandTotal,
+              fulfillmentType: order.fulfillmentType,
+            }),
+          },
+        });
+
+        await tx.outboxEvent.create({
+          data: {
+            aggregateType: 'ORDER',
+            aggregateId: order.id,
+            eventType: QueueJobType.ORDER_STATUS_NOTIFICATION,
+            payload: {
+              orderId: order.id,
+              orderNumber: order.orderNumber,
+              userId,
+              customerId: userId,
+              status: 'PLACED',
+              title: `Order #${order.orderNumber} Placed`,
+              message:
+                dto.paymentMethod === 'RAZORPAY'
+                  ? 'Complete payment within 15 minutes to confirm your order.'
+                  : 'Your COD order has been sent to the store.',
+            },
+          },
+        });
+
+        if (vendorUserId) {
           await tx.outboxEvent.create({
             data: {
               aggregateType: 'ORDER',
-              aggregateId: newOrder.id,
-              eventType: 'CUSTOMER_ORDER_PLACED',
+              aggregateId: order.id,
+              eventType: QueueJobType.VENDOR_ORDER_NOTIFICATION,
               payload: {
-                orderId: newOrder.id,
-                orderNumber: newOrder.orderNumber,
-                customerId: userId,
-                vendorId: detectedVendorId,
-                grandTotal,
-                isTryAndBuy,
+                orderId: order.id,
+                orderNumber: order.orderNumber,
+                userId: vendorUserId,
+                vendorId: plan.bucket.vendorId,
+                status: 'PLACED',
+                title: `New Order #${order.orderNumber}`,
+                message: `New ${plan.bucket.fulfillmentType} order worth ₹${order.grandTotal}.`,
               },
-              status: 'PENDING',
             },
           });
+        }
+
+        created.push(order);
+      }
+
+      if (!dto.isBuyNow) {
+        const userCart = await tx.cart.findFirst({ where: { userId } });
+        if (userCart) {
+          await tx.cartItem.deleteMany({ where: { cartId: userCart.id } });
+          await tx.cart.update({
+            where: { id: userCart.id },
+            data: { couponCode: null, giftWrap: false, donationAmount: 0 },
+          });
+        }
+      }
+
+      return { createdGroup: grp, createdOrders: created };
+    });
+
+    // Step 2: External Razorpay gateway creation outside DB lock with compensating rollback on failure
+    let razorpayOrderId: string | null = null;
+    if (dto.paymentMethod === 'RAZORPAY' && groupGrandTotal > 0) {
+      try {
+        const rzp = await this.razorpayClient.createOrder({
+          amountInPaisa: Math.round(groupGrandTotal * 100),
+          receipt: createdGroup.groupNumber,
+          notes: {
+            checkoutGroupId: createdGroup.id,
+            customerId: userId,
+            splitCount: String(createdOrders.length),
+          },
         });
-      } catch (err: any) {
-        this.logger.error(`Database checkout failed: ${err.message}`, err.stack);
-        throw new InternalServerErrorException(
-          `Unable to complete checkout: Database persistence failed (${err.message})`,
+        razorpayOrderId = rzp.razorpayOrderId;
+
+        await this.prisma.$transaction(async (tx) => {
+          await tx.checkoutGroup.update({
+            where: { id: createdGroup.id },
+            data: { razorpayOrderId },
+          });
+          await tx.order.updateMany({
+            where: { checkoutGroupId: createdGroup.id },
+            data: { razorpayOrderId },
+          });
+        });
+
+        if (typeof (this.queueService as any)?.enqueueOrderExpiryCheck === 'function') {
+          await (this.queueService as any).enqueueOrderExpiryCheck(
+            createdGroup.id,
+            15 * 60 * 1000,
+          );
+        }
+      } catch (err) {
+        this.logger.error(
+          `Razorpay creation failed for group ${createdGroup.id}; running compensating rollback`,
         );
+        if (appliedCoupon) {
+          await this.prisma.coupon
+            .updateMany({
+              where: { id: appliedCoupon.id, usedCount: { gt: 0 } },
+              data: { usedCount: { decrement: 1 } },
+            })
+            .catch(() => {});
+        }
+        await this.prisma.checkoutGroup
+          .update({
+            where: { id: createdGroup.id },
+            data: { paymentStatus: 'FAILED' },
+          })
+          .catch(() => {});
+
+        for (const ord of createdOrders) {
+          await this.orderTransition
+            .executeTransition({
+              orderId: ord.id,
+              nextStatus: 'FAILED',
+              actorRole: 'SYSTEM',
+              note: 'Razorpay payment initialization failed',
+              auditAction: 'CHECKOUT_RAZORPAY_INIT_FAILED',
+            })
+            .catch((rbErr) =>
+              this.logger.error(`Compensating rollback failed for order ${ord.id}: ${rbErr?.message}`),
+            );
+        }
+        throw err;
       }
     }
 
-    store.orders.unshift(newOrder as any);
+    const freshOrders = await this.prisma.order.findMany({
+      where: { checkoutGroupId: createdGroup.id },
+      include: ORDER_WITH_RELATIONS,
+      orderBy: { createdAt: 'asc' },
+    });
 
-    // 6. Clear Cart and reset coupon (skipped for standalone Buy Now to preserve user bag)
-    if (!dto.isBuyNow) {
-      await this.cartService.clearCart(userId);
+    const formattedOrders = freshOrders.map((o) =>
+      this.formatOrderResponse(o, Role.CUSTOMER, userId),
+    );
+
+    const checkoutSessionToken =
+      dto.paymentMethod === 'RAZORPAY' && groupGrandTotal > 0
+        ? createCheckoutSessionToken(createdGroup.id, userId)
+        : null;
+    const checkoutSessionUrl = checkoutSessionToken
+      ? `/api/v1/payments/razorpay/checkout-session/${encodeURIComponent(createdGroup.id)}?st=${encodeURIComponent(checkoutSessionToken)}`
+      : null;
+
+    const response: CheckoutResponseContract = {
+      checkoutGroupId: createdGroup.id,
+      groupNumber: createdGroup.groupNumber,
+      paymentMethod: createdGroup.paymentMethod as any,
+      paymentStatus: createdGroup.paymentStatus as any,
+      razorpayOrderId,
+      razorpayKeyId:
+        dto.paymentMethod === 'RAZORPAY' ? this.razorpayClient.keyId || null : null,
+      checkoutSessionToken,
+      checkoutSessionUrl,
+      itemTotal: groupItemTotal,
+      discountTotal: groupDiscountTotal,
+      giftWrapFee: totalGiftWrapFee,
+      donationAmount: totalDonationAmount,
+      deliveryFeeTotal: groupDeliveryFeeTotal,
+      taxesTotal: groupTaxesTotal,
+      grandTotal: groupGrandTotal,
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
+      orders: formattedOrders,
+      primaryOrderId: formattedOrders[0].id,
+      orderNumber: formattedOrders[0].orderNumber,
+    };
+
+    if (cleanIdempotencyKey && requestHash) {
+      await this.prisma.idempotencyKey
+        .upsert({
+          where: {
+            userId_scope_key: {
+              userId,
+              scope: 'CHECKOUT',
+              key: cleanIdempotencyKey,
+            },
+          },
+          update: {
+            requestHash,
+            statusCode: 201,
+            responseBody: response as any,
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          },
+          create: {
+            userId,
+            scope: 'CHECKOUT',
+            key: cleanIdempotencyKey,
+            requestHash,
+            statusCode: 201,
+            responseBody: response as any,
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          },
+        })
+        .catch((err) => this.logger.warn(`Failed saving IdempotencyKey: ${err?.message}`));
     }
 
-    return newOrder;
+    return response;
   }
 
   async verifyPayment(
-    orderId: string,
+    targetId: string,
     paymentId: string,
     signature: string,
     razorpayOrderId?: string,
+    actorId?: string,
+    actorRole?: string,
   ) {
-    const verification = await this.paymentsService.verifyRazorpaySignature(
-      orderId,
-      paymentId,
-      signature,
-      razorpayOrderId,
+    this.ensureDbConnected();
+
+    if (!targetId && !razorpayOrderId) {
+      throw new BadRequestException('orderId, checkoutGroupId, or razorpayOrderId is required');
+    }
+
+    const searchTokens = [targetId, razorpayOrderId].filter(
+      (v): v is string => typeof v === 'string' && v.trim().length > 0,
     );
 
-    const store = this.prisma.getStore();
-    const order = store.orders.find((o) => o.id === orderId || o.orderNumber === orderId);
+    let group: any = await this.prisma.checkoutGroup.findFirst({
+      where: {
+        OR: [
+          ...searchTokens.map((t) => ({ id: t })),
+          ...searchTokens.map((t) => ({ razorpayOrderId: t })),
+        ],
+      },
+      include: {
+        orders: { include: ORDER_WITH_RELATIONS },
+      },
+    });
 
-    if (order && order.status === 'PLACED') {
-      order.status = 'ACCEPTED' as OrderStatus;
-      order.history.push({
-        status: 'ACCEPTED' as OrderStatus,
-        time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-        note: 'Payment verified: order accepted automatically',
-        actor: 'SYSTEM',
+    let targetOrders: any[] = [];
+    let ownerCustomerId: string;
+    let effectiveRzpOrderId: string | null = null;
+    let effectiveAmount = 0;
+
+    if (group) {
+      targetOrders = group.orders;
+      ownerCustomerId = group.customerId;
+      effectiveRzpOrderId = group.razorpayOrderId || razorpayOrderId || null;
+      effectiveAmount = group.grandTotal;
+    } else {
+      const order = await this.prisma.order.findFirst({
+        where: {
+          OR: [
+            ...searchTokens.map((t) => ({ id: t })),
+            ...searchTokens.map((t) => ({ orderNumber: t })),
+            ...searchTokens.map((t) => ({ razorpayOrderId: t })),
+          ],
+        },
+        include: { checkoutGroup: { include: { orders: { include: ORDER_WITH_RELATIONS } } }, ...ORDER_WITH_RELATIONS },
       });
-    }
 
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.$transaction(async (tx) => {
-          await tx.order.updateMany({
-            where: { OR: [{ id: orderId }, { orderNumber: orderId }] },
-            data: {
-              status: 'ACCEPTED',
-              paymentStatus: 'COMPLETED',
-              razorpayPaymentId: paymentId,
-              razorpayOrderId: razorpayOrderId || order?.razorpayOrderId,
-            },
-          });
-          const ord = await tx.order.findFirst({
-            where: { OR: [{ id: orderId }, { orderNumber: orderId }] },
-          });
-          if (ord) {
-            await tx.orderStatusHistory.create({
-              data: {
-                orderId: ord.id,
-                status: 'ACCEPTED',
-                note: `Payment verified: order accepted automatically (Payment ID: ${paymentId})`,
-              },
-            });
-          }
-        });
-      } catch (err: any) {
-        this.logger.error(`Database verifyPayment failed: ${err.message}`);
+      if (!order) {
+        throw new NotFoundException('Order or Checkout Group not found for payment verification');
+      }
+
+      if (order.checkoutGroup) {
+        group = order.checkoutGroup;
+        targetOrders = group.orders;
+        ownerCustomerId = group.customerId;
+        effectiveRzpOrderId = group.razorpayOrderId || order.razorpayOrderId || razorpayOrderId || null;
+        effectiveAmount = group.grandTotal;
+      } else {
+        targetOrders = [order];
+        ownerCustomerId = order.customerId;
+        effectiveRzpOrderId = order.razorpayOrderId || razorpayOrderId || null;
+        effectiveAmount = order.grandTotal;
       }
     }
 
+    if (actorRole === Role.CUSTOMER && actorId && ownerCustomerId !== actorId) {
+      throw new ForbiddenException('You do not have permission to verify payment for this order');
+    }
+
+    if (!effectiveRzpOrderId) {
+      throw new BadRequestException('No Razorpay order reference is attached to this checkout');
+    }
+
+    const isValid = this.razorpayClient.verifyPaymentSignature({
+      razorpayOrderId: effectiveRzpOrderId,
+      paymentId,
+      signature,
+    });
+
+    if (!isValid) {
+      throw new BadRequestException('Invalid Razorpay payment signature');
+    }
+
+    if (targetOrders.some((o) => o.status === 'FAILED' || o.status === 'CANCELLED')) {
+      throw new ConflictException(
+        'Cannot complete payment: order has already expired or been cancelled',
+      );
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      if (group) {
+        await tx.checkoutGroup.update({
+          where: { id: group.id },
+          data: {
+            paymentStatus: 'COMPLETED',
+            razorpayPaymentId: paymentId,
+          },
+        });
+      }
+
+      await tx.order.updateMany({
+        where: { id: { in: targetOrders.map((o) => o.id) } },
+        data: {
+          paymentStatus: 'COMPLETED',
+          razorpayPaymentId: paymentId,
+        },
+      });
+
+      const existingCapture = await tx.paymentTransaction.findFirst({
+        where: { paymentId, transactionType: 'CAPTURE' },
+      });
+
+      if (!existingCapture) {
+        await tx.paymentTransaction.create({
+          data: {
+            checkoutGroupId: group?.id || null,
+            orderId: targetOrders.length === 1 ? targetOrders[0].id : null,
+            paymentId,
+            razorpayOrderId: effectiveRzpOrderId!,
+            signature,
+            amount: effectiveAmount,
+            currency: 'INR',
+            status: 'COMPLETED',
+            transactionType: 'CAPTURE',
+          },
+        });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          userId: actorId || ownerCustomerId,
+          userRole: actorRole || Role.CUSTOMER,
+          action: 'PAYMENT_VERIFIED',
+          entityType: group ? 'CheckoutGroup' : 'Order',
+          entityId: group ? group.id : targetOrders[0].id,
+          details: JSON.stringify({
+            paymentId,
+            razorpayOrderId: effectiveRzpOrderId,
+            amount: effectiveAmount,
+            orderIds: targetOrders.map((o) => o.id),
+          }),
+        },
+      });
+    });
+
+    const refreshedOrders = await this.prisma.order.findMany({
+      where: { id: { in: targetOrders.map((o) => o.id) } },
+      include: ORDER_WITH_RELATIONS,
+      orderBy: { createdAt: 'asc' },
+    });
+
     return {
-      ...verification,
-      orderStatus: order?.status || 'ACCEPTED',
+      verified: true,
+      checkoutGroupId: group?.id || null,
+      orderId: refreshedOrders[0]?.id || null,
+      paymentStatus: 'COMPLETED',
+      razorpayOrderId: effectiveRzpOrderId,
+      razorpayPaymentId: paymentId,
+      orders: refreshedOrders.map((o) => this.formatOrderResponse(o, actorRole, actorId)),
     };
   }
 
-  async getOrders(userId: string, role: string = Role.CUSTOMER, driverId?: string) {
-    if (this.prisma.isConnectedToDb) {
-      try {
-        let whereClause: any = {};
-        if (role === Role.ADMIN) {
-          whereClause = {};
-        } else if (role === Role.DRIVER) {
-          const activeDriverId = driverId || 'drv-1';
-          whereClause = {
-            OR: [
-              { driverId: activeDriverId },
-              { driverProfileId: activeDriverId },
-            ],
-          };
-        } else if (role === Role.VENDOR) {
-          whereClause = { vendorId: userId };
-        } else {
-          whereClause = { customerId: userId };
-        }
+  async getOrders(
+    userId: string,
+    role: string = Role.CUSTOMER,
+    driverId?: string,
+    vendorId?: string,
+  ) {
+    this.ensureDbConnected();
 
-        const dbOrders = await this.prisma.order.findMany({
-          where: whereClause,
-          include: {
-            items: true,
-            history: { orderBy: { createdAt: 'asc' } },
-            address: true,
-            tryAndBuySession: true,
-          },
-          orderBy: { createdAt: 'desc' },
-        });
-
-        if (dbOrders && dbOrders.length > 0) {
-          return dbOrders.map((o) => ({
-            ...o,
-            createdAt: o.createdAt.toISOString(),
-            updatedAt: o.updatedAt.toISOString(),
-            history: o.history.map((h) => ({
-              status: h.status,
-              time: h.createdAt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-              note: h.note || '',
-              actor: 'SYSTEM',
-            })),
-          }));
-        }
-      } catch (err: any) {
-        this.logger.error(`Database getOrders failed: ${err.message}`);
-      }
-    }
-
-    const store = this.prisma.getStore();
-    if (role === Role.ADMIN) {
-      return store.orders;
-    }
-    if (role === Role.DRIVER) {
-      const activeDriverId = driverId || 'drv-1';
-      return store.orders.filter((o) => o.driverId === activeDriverId);
-    }
-    if (role === Role.VENDOR) {
-      return store.orders.filter((o) => o.vendorId === userId);
-    }
-    // Default to Customer
-    return store.orders.filter((o) => o.customerId === userId);
-  }
-
-  async getOrderById(id: string, userId?: string, role?: string) {
-    if (this.prisma.isConnectedToDb) {
-      try {
-        const dbOrder = await this.prisma.order.findFirst({
-          where: { OR: [{ id }, { orderNumber: id }] },
-          include: {
-            items: true,
-            history: { orderBy: { createdAt: 'asc' } },
-            address: true,
-            tryAndBuySession: true,
-            vendor: true,
-            driver: true,
-          },
-        });
-        if (dbOrder) {
-          if (role === Role.CUSTOMER && userId && dbOrder.customerId !== userId) {
-            throw new ForbiddenException('You are not authorized to view this order');
-          }
-          return {
-            ...dbOrder,
-            createdAt: dbOrder.createdAt.toISOString(),
-            updatedAt: dbOrder.updatedAt.toISOString(),
-            history: dbOrder.history.map((h) => ({
-              status: h.status,
-              time: h.createdAt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-              note: h.note || '',
-              actor: 'SYSTEM',
-            })),
-            deliveryAddress: dbOrder.deliveryAddress || dbOrder.address,
-          };
-        }
-      } catch (err: any) {
-        if (err instanceof ForbiddenException) throw err;
-        this.logger.error(`Database getOrderById failed: ${err.message}`);
-      }
-    }
-
-    const store = this.prisma.getStore();
-    const order: any = store.orders.find((o) => o.id === id || o.orderNumber === id);
-    if (!order) {
-      throw new NotFoundException(`Order with identifier ${id} not found`);
-    }
-
-    if (role === Role.CUSTOMER && userId && order.customerId !== userId) {
-      throw new ForbiddenException('You are not authorized to view this order');
-    }
-
-    // Attach driver details if assigned
-    let driverInfo = null;
-    if (order.driverId) {
-      const drv = store.drivers.find((d) => d.id === order.driverId);
-      if (drv) {
-        const isLiveDelivering = ['PICKED_UP', 'OUT_FOR_DELIVERY'].includes(order.status);
-        driverInfo = {
-          id: drv.id,
-          name: drv.name,
-          phone: drv.phone,
-          vehicle: drv.vehicle,
-          photo: drv.photo,
-          rating: drv.rating,
-          currentLocation: isLiveDelivering ? drv.currentLocation : null,
-        };
-      }
-    }
-
-    // Attach delivery address
-    const address = store.addresses.find((a) => a.id === order.addressId);
-
-    return {
-      ...order,
-      driver: driverInfo,
-      deliveryAddress: address,
-    };
-  }
-
-  async trackOrder(id: string, userId?: string, role?: string) {
-    const order = await this.getOrderById(id, userId, role);
-    const store = this.prisma.getStore();
-    const milestones = this.stateMachine.getMilestones(order.status as OrderStatus);
-
-    let driver = null;
-    let isStale = false;
-    if (order.driverId) {
-      const drv = store.drivers.find((d) => d.id === order.driverId);
-      if (drv) {
-        const isLiveDelivering = ['ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(order.status);
-        const loc = drv.currentLocation;
-        if (loc?.updatedAt) {
-          const age = Date.now() - new Date(loc.updatedAt).getTime();
-          isStale = age > 30000;
-        }
-        driver = {
-          id: drv.id,
-          name: drv.name,
-          phone: drv.phone,
-          vehicle: drv.vehicle,
-          photo: drv.photo,
-          rating: drv.rating,
-          currentLocation: isLiveDelivering && loc ? {
-            latitude: loc.latitude,
-            longitude: loc.longitude,
-            heading: loc.heading || 0,
-            accuracy: loc.accuracy,
-            updatedAt: loc.updatedAt,
-          } : null,
-          isStale,
-        };
-      }
-    }
-
-    // Authoritative Delivery Destination Coordinates
-    // Derived strictly from persisted snapshot order.deliveryAddress, falling back to address record only if snapshot lacks coords
-    let deliveryCoordinates: { latitude: number; longitude: number } | null = null;
-    const snapAddr = order.deliveryAddress as any;
-    if (
-      snapAddr &&
-      typeof snapAddr.latitude === 'number' &&
-      Number.isFinite(snapAddr.latitude) &&
-      typeof snapAddr.longitude === 'number' &&
-      Number.isFinite(snapAddr.longitude)
-    ) {
-      deliveryCoordinates = { latitude: snapAddr.latitude, longitude: snapAddr.longitude };
-    } else if (order.addressId) {
-      const persistedAddr = store.addresses.find((a: any) => a.id === order.addressId);
-      if (
-        persistedAddr &&
-        typeof persistedAddr.latitude === 'number' &&
-        Number.isFinite(persistedAddr.latitude) &&
-        typeof persistedAddr.longitude === 'number' &&
-        Number.isFinite(persistedAddr.longitude)
-      ) {
-        deliveryCoordinates = { latitude: persistedAddr.latitude, longitude: persistedAddr.longitude };
-      }
-    }
-
-    // Authoritative Pickup Location Coordinates
-    // Derived strictly from persisted Vendor/Fulfillment entity
-    let pickupCoordinates: { latitude: number; longitude: number } | null = null;
-    const vendor = store.vendors.find((v: any) => v.id === order.vendorId);
-    if (
-      vendor &&
-      typeof (vendor as any).latitude === 'number' &&
-      Number.isFinite((vendor as any).latitude) &&
-      typeof (vendor as any).longitude === 'number' &&
-      Number.isFinite((vendor as any).longitude)
-    ) {
-      pickupCoordinates = { latitude: (vendor as any).latitude, longitude: (vendor as any).longitude };
-    } else if (store.darkStores && store.darkStores.length > 0) {
-      const darkStore = store.darkStores[0];
-      if (
-        typeof darkStore.lat === 'number' &&
-        Number.isFinite(darkStore.lat) &&
-        typeof darkStore.lng === 'number' &&
-        Number.isFinite(darkStore.lng)
-      ) {
-        pickupCoordinates = { latitude: darkStore.lat, longitude: darkStore.lng };
-      }
-    }
-
-    // Compute route via Google Routes Service if driver is assigned and coordinates are valid
-    let route = null;
-    let dynamicEta = order.etaMinutes || 18;
-
-    if (
-      this.googleRoutesService &&
-      ['ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(order.status) &&
-      deliveryCoordinates &&
-      pickupCoordinates
-    ) {
-      try {
-        const origin = order.status === 'ASSIGNED' && driver?.currentLocation
-          ? driver.currentLocation
-          : (driver?.currentLocation || pickupCoordinates);
-        const destination = order.status === 'ASSIGNED' ? pickupCoordinates : deliveryCoordinates;
-
-        route = await this.googleRoutesService.computeRoute(origin, destination, 'TWO_WHEELER');
-        if (route?.durationMinutes) {
-          dynamicEta = route.durationMinutes;
-        }
-      } catch (err: any) {
-        this.logger.warn(`Failed to compute route for order ${order.id}: ${err.message}`);
-      }
-    } else if (!deliveryCoordinates || !pickupCoordinates) {
-      // Explicit route-unavailable state when coordinates are missing or invalid
-      route = {
-        routeUnavailable: true,
-        isRealRoute: false,
-        encodedPolyline: '',
-        coordinates: [],
-        distanceMeters: 0,
-        distanceKm: '0 km',
-        durationSeconds: 0,
-        durationMinutes: order.etaMinutes || 18,
-        travelMode: 'NONE',
-        computedAt: new Date().toISOString(),
+    let where: any = {};
+    if (role === Role.CUSTOMER) {
+      where = { customerId: userId };
+    } else if (role === Role.VENDOR) {
+      const resolvedVendorId = await this.resolveVendorIdForUser(userId, vendorId);
+      if (!resolvedVendorId) return [];
+      where = { vendorId: resolvedVendorId };
+    } else if (role === Role.DRIVER) {
+      const resolvedDriverProfileId = await this.resolveDriverProfileIdForUser(userId, driverId);
+      where = {
+        OR: [
+          { driverId: userId },
+          ...(resolvedDriverProfileId
+            ? [{ driverProfileId: resolvedDriverProfileId }, { driverId: resolvedDriverProfileId }]
+            : []),
+        ],
       };
     }
 
-    if (!route) {
-      // Dynamic express countdown based on 8-stage state machine
-      if (order.etaMinutes <= 35) {
-        switch (order.status) {
-          case 'PLACED':
-            dynamicEta = 18;
-            break;
-          case 'ACCEPTED':
-            dynamicEta = 16;
-            break;
-          case 'PREPARING':
-            dynamicEta = 13;
-            break;
-          case 'READY_FOR_PICKUP':
-            dynamicEta = 10;
-            break;
-          case 'ASSIGNED':
-            dynamicEta = 8;
-            break;
-          case 'PICKED_UP':
-            dynamicEta = 6;
-            break;
-          case 'OUT_FOR_DELIVERY':
-            dynamicEta = 3;
-            break;
-          case 'DELIVERED':
-            dynamicEta = 0;
-            break;
-          default:
-            dynamicEta = 18;
-        }
+    const orders = await this.prisma.order.findMany({
+      where,
+      include: ORDER_WITH_RELATIONS,
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return orders.map((o) => this.formatOrderResponse(o, role, userId));
+  }
+
+  async getCheckoutGroup(groupId: string, userId: string, role: string) {
+    this.ensureDbConnected();
+
+    const group = await this.prisma.checkoutGroup.findFirst({
+      where: { OR: [{ id: groupId }, { groupNumber: groupId }] },
+      include: {
+        orders: {
+          include: ORDER_WITH_RELATIONS,
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+    });
+
+    if (!group) {
+      throw new NotFoundException(`CheckoutGroup '${groupId}' not found`);
+    }
+
+    if (role !== Role.ADMIN && group.customerId !== userId) {
+      throw new ForbiddenException('You do not have permission to view this checkout group');
+    }
+
+    return {
+      id: group.id,
+      groupNumber: group.groupNumber,
+      customerId: group.customerId,
+      paymentMethod: group.paymentMethod,
+      paymentStatus: group.paymentStatus,
+      razorpayOrderId: group.razorpayOrderId,
+      razorpayPaymentId: group.razorpayPaymentId,
+      couponCode: group.couponCode,
+      itemTotal: group.itemTotal,
+      discountTotal: group.discountTotal,
+      giftWrapFee: group.giftWrapFee,
+      donationAmount: group.donationAmount,
+      deliveryFeeTotal: group.deliveryFeeTotal,
+      taxesTotal: group.taxesTotal,
+      grandTotal: group.grandTotal,
+      expiresAt: group.expiresAt ? group.expiresAt.toISOString() : null,
+      createdAt: group.createdAt.toISOString(),
+      orders: group.orders.map((o) => this.formatOrderResponse(o, role, userId)),
+    };
+  }
+
+  async getOrderById(
+    id: string,
+    userId?: string,
+    role?: string,
+    driverId?: string,
+    vendorId?: string,
+  ) {
+    this.ensureDbConnected();
+    const cleanId = id.trim().replace(/^#/, '');
+
+    const order = await this.prisma.order.findFirst({
+      where: { OR: [{ id }, { id: cleanId }, { orderNumber: cleanId }] },
+      include: ORDER_WITH_RELATIONS,
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order '${id}' not found`);
+    }
+
+    await this.assertOrderAccess(order, userId, role, driverId, vendorId);
+    return this.formatOrderResponse(order, role, userId);
+  }
+
+  async trackOrder(
+    id: string,
+    userId?: string,
+    role?: string,
+    driverId?: string,
+    vendorId?: string,
+  ) {
+    this.ensureDbConnected();
+    const cleanId = id.trim().replace(/^#/, '');
+
+    const order = await this.prisma.order.findFirst({
+      where: { OR: [{ id }, { id: cleanId }, { orderNumber: cleanId }] },
+      include: {
+        ...ORDER_WITH_RELATIONS,
+        address: true,
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order '${id}' not found`);
+    }
+
+    await this.assertOrderAccess(order, userId, role, driverId, vendorId);
+
+    const isLive = LIVE_TRACKING_ACTIVE_STATUSES.includes(order.status as OrderStatus);
+    const driverLat = isLive ? order.driverProfile?.currentLat ?? null : null;
+    const driverLng = isLive ? order.driverProfile?.currentLng ?? null : null;
+    const customerLat =
+      (order.deliveryAddress as any)?.latitude ?? order.address?.latitude ?? null;
+    const customerLng =
+      (order.deliveryAddress as any)?.longitude ?? order.address?.longitude ?? null;
+
+    let routeData: any = null;
+    let computedEtaMinutes = order.etaMinutes ?? 0;
+
+    if (
+      isLive &&
+      driverLat != null &&
+      driverLng != null &&
+      customerLat != null &&
+      customerLng != null &&
+      this.googleRoutesService
+    ) {
+      routeData = await this.googleRoutesService.computeRoute(
+        { latitude: driverLat, longitude: driverLng },
+        { latitude: customerLat, longitude: customerLng },
+        'TWO_WHEELER',
+      );
+      if (routeData?.durationMinutes != null) {
+        computedEtaMinutes = routeData.durationMinutes;
       }
     }
+
+    const formatted = this.formatOrderResponse(order, role, userId);
+    const driverVisibleStatuses: OrderStatus[] = [
+      'ASSIGNED',
+      'PICKED_UP',
+      'OUT_FOR_DELIVERY',
+      'DELIVERED',
+      'RETURNING',
+      'RETURNED',
+    ];
+    const canShowDriver =
+      driverVisibleStatuses.includes(order.status as OrderStatus) &&
+      Boolean(order.driverProfile);
 
     return {
       orderId: order.id,
       orderNumber: order.orderNumber,
+      version: order.version,
       status: order.status,
-      etaMinutes: dynamicEta,
-      itemTotal: order.itemTotal,
-      deliveryFee: order.deliveryFee,
-      taxes: order.taxes,
-      discountAmount: (order as any).discountAmount || 0,
-      couponCode: (order as any).couponCode || null,
-      isTryAndBuy: (order as any).isTryAndBuy || false,
-      grandTotal: order.grandTotal,
-      paymentMethod: order.paymentMethod,
-      paymentStatus: order.paymentStatus,
-      driver: driver || null,
-      deliveryAddress: order.deliveryAddress,
-      deliveryCoordinates,
-      pickupCoordinates,
-      route,
-      items: order.items,
-      milestones,
-      history: order.history,
-    };
-  }
-
-  async getOrderRoute(id: string, userId?: string, role?: string) {
-    const tracking = await this.trackOrder(id, userId, role);
-    return {
-      orderId: tracking.orderId,
-      status: tracking.status,
-      pickupCoordinates: tracking.pickupCoordinates,
-      deliveryCoordinates: tracking.deliveryCoordinates,
-      driverCoordinates: tracking.driver?.currentLocation || null,
-      route: tracking.route,
-      etaMinutes: tracking.etaMinutes,
-    };
-  }
-
-  // Admin Manual Assignment (D-006: Manual delivery assignment only - zero auto dispatch)
-  async assignDriver(id: string, driverId: string, actorRole: string = Role.ADMIN) {
-    const store = this.prisma.getStore();
-    const order: any = store.orders.find((o) => o.id === id || o.orderNumber === id);
-    if (!order) {
-      throw new NotFoundException(`Order with ID ${id} not found`);
-    }
-    if (!order) {
-      throw new NotFoundException(`Order with ID ${id} not found`);
-    }
-
-    const driver = store.drivers.find((d) => d.id === driverId);
-    if (!driver) {
-      throw new NotFoundException(`Driver with ID ${driverId} not found`);
-    }
-
-    // Validate state transition to ASSIGNED
-    this.stateMachine.validateTransition(order.status as OrderStatus, 'ASSIGNED', actorRole);
-
-    order.driverId = driver.id;
-    order.status = 'ASSIGNED';
-    order.updatedAt = new Date().toISOString();
-    order.history.push({
-      status: 'ASSIGNED',
-      time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      note: `Admin manually assigned rider ${driver.name} (${driver.vehicle})`,
-      actor: actorRole,
-    });
-
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.$transaction(async (tx) => {
-          await tx.order.updateMany({
-            where: { OR: [{ id }, { orderNumber: id }] },
-            data: {
-              driverId: driver.id,
-              driverProfileId: driver.id,
-              status: 'ASSIGNED',
-            },
-          });
-          const ord = await tx.order.findFirst({
-            where: { OR: [{ id }, { orderNumber: id }] },
-          });
-          if (ord) {
-            await tx.orderStatusHistory.create({
-              data: {
-                orderId: ord.id,
-                status: 'ASSIGNED',
-                note: `Admin manually assigned rider ${driver.name} (${driver.vehicle})`,
-              },
-            });
+      trackingActive: isLive,
+      isArrived: Boolean(order.arrivedAt),
+      arrivedAt: order.arrivedAt ? order.arrivedAt.toISOString() : null,
+      etaMinutes: computedEtaMinutes,
+      driverLocation:
+        isLive && driverLat != null && driverLng != null
+          ? {
+              latitude: driverLat,
+              longitude: driverLng,
+              heading: order.driverProfile?.currentHeading ?? 0,
+            }
+          : null,
+      driverCoords:
+        isLive && driverLat != null && driverLng != null
+          ? { latitude: driverLat, longitude: driverLng }
+          : null,
+      customerCoords:
+        customerLat != null && customerLng != null
+          ? { latitude: customerLat, longitude: customerLng }
+          : null,
+      driver: canShowDriver
+        ? {
+            id: order.driverProfile!.id,
+            name: order.driverProfile!.fullName,
+            phone: order.driverProfile!.phone,
+            vehicleType: order.driverProfile!.vehicleType,
+            vehicleRegistration: order.driverProfile!.vehicleRegistration,
+            rating: order.driverProfile!.rating ?? 5,
           }
-        });
-      } catch (err: any) {
-        this.logger.error(`Database assignDriver failed: ${err.message}`);
-      }
+        : null,
+      route: routeData,
+      milestones: this.stateMachine.getMilestones(order.status as OrderStatus),
+      handoverOtp: formatted.handoverOtp,
+      isTryAndBuy: formatted.isTryAndBuy,
+      tryAndBuySession: formatted.tryAndBuySession,
+      itemTotal: formatted.itemTotal,
+      deliveryFee: formatted.deliveryFee,
+      taxes: formatted.taxes,
+      giftWrapFee: formatted.giftWrapFee,
+      donationAmount: formatted.donationAmount,
+      discountAmount: formatted.discountAmount,
+      couponCode: formatted.couponCode,
+      grandTotal: formatted.grandTotal,
+      deliveryAddress: formatted.deliveryAddress,
+      deliveryInstructions: formatted.deliveryInstructions ?? null,
+      items: formatted.items,
+    };
+  }
+
+  async getOrderRoute(
+    id: string,
+    userId?: string,
+    role?: string,
+    driverId?: string,
+    vendorId?: string,
+  ) {
+    const tracking = await this.trackOrder(id, userId, role, driverId, vendorId);
+    if (!tracking.trackingActive || !tracking.driverCoords || !tracking.customerCoords) {
+      return {
+        orderId: tracking.orderId,
+        trackingActive: tracking.trackingActive,
+        routeUnavailable: true,
+        coordinates: [],
+        distanceKm: '0',
+        durationMinutes: tracking.etaMinutes,
+      };
     }
 
-    return this.getOrderById(order.id);
-  }
-
-  // Vendor State Transitions
-  async vendorAccept(id: string, actorRole: string = Role.VENDOR) {
-    return this.updateStatus(id, 'ACCEPTED', 'Vendor accepted and confirmed order items', actorRole);
-  }
-
-  async vendorPrepare(id: string, actorRole: string = Role.VENDOR) {
-    return this.updateStatus(id, 'PREPARING', 'Quality inspection & boutique gift packaging started', actorRole);
-  }
-
-  async vendorReadyForPickup(id: string, actorRole: string = Role.VENDOR) {
-    await this.updateStatus(id, 'READY_FOR_PICKUP', 'Package ready at store pickup counter', actorRole);
-    if (this.dispatchService) {
-      try {
-        await this.dispatchService.dispatchOrderFifo(id);
-      } catch (err: any) {
-        this.logger.warn(`Automated FIFO dispatch: ${err.message}`);
+    return (
+      tracking.route || {
+        orderId: tracking.orderId,
+        trackingActive: true,
+        routeUnavailable: true,
+        coordinates: [],
+        distanceKm: '0',
+        durationMinutes: tracking.etaMinutes,
       }
-    }
-    return this.getOrderById(id);
+    );
   }
 
   async updateStatus(
     id: string,
-    nextStatus: OrderStatus,
+    nextStatus: string,
+    actorRole: string,
     note?: string,
-    actorRole?: string,
+    actorId?: string,
+    expectedVersion?: number,
+    vendorId?: string,
+    driverId?: string,
   ) {
-    const store = this.prisma.getStore();
-    const order: any = store.orders.find((o) => o.id === id || o.orderNumber === id);
-    if (!order) {
-      throw new NotFoundException(`Order with ID ${id} not found`);
-    }
-    if (!order) {
-      throw new NotFoundException(`Order with ID ${id} not found`);
-    }
+    this.ensureDbConnected();
 
-    this.stateMachine.validateTransition(order.status as OrderStatus, nextStatus, actorRole);
-
-    // If order cancelled, restore reserved inventory stock atomically
-    if (nextStatus === 'CANCELLED' && order.items && order.items.length > 0) {
-      for (const item of order.items) {
-        const prod = store.products.find(
-          (p) =>
-            p.id === item.productId ||
-            p.id === `prod-${item.productId}` ||
-            p.id.replace('prod-', '') === item.productId,
-        );
-        if (prod) {
-          prod.stockQuantity += item.quantity || 1;
-        }
-      }
-    }
-
-    order.status = nextStatus;
-    order.updatedAt = new Date().toISOString();
-    order.history.push({
-      status: nextStatus,
-      time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      note: note || `Order transitioned to ${nextStatus}`,
-      actor: actorRole || 'SYSTEM',
+    const cleanId = id.trim().replace(/^#/, '');
+    const order = await this.prisma.order.findFirst({
+      where: { OR: [{ id }, { id: cleanId }, { orderNumber: cleanId }] },
     });
 
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.$transaction(async (tx) => {
-          await tx.order.updateMany({
-            where: { OR: [{ id }, { orderNumber: id }] },
-            data: { status: nextStatus as any },
-          });
-          const ord = await tx.order.findFirst({
-            where: { OR: [{ id }, { orderNumber: id }] },
-            include: { items: true },
-          });
-          if (ord) {
-            await tx.orderStatusHistory.create({
-              data: {
-                orderId: ord.id,
-                status: nextStatus as any,
-                note: note || `Order transitioned to ${nextStatus}`,
-              },
-            });
-            if (nextStatus === 'CANCELLED' && ord.items) {
-              for (const it of ord.items) {
-                await tx.product.updateMany({
-                  where: { id: it.productId },
-                  data: { stockQuantity: { increment: it.quantity } },
-                });
-              }
-            }
-          }
-        });
-      } catch (err: any) {
-        this.logger.error(`Database updateStatus failed: ${err.message}`);
+    if (!order) {
+      throw new NotFoundException(`Order '${id}' not found`);
+    }
+
+    await this.assertOrderAccess(order, actorId, actorRole, driverId, vendorId);
+
+    const updated = await this.orderTransition.executeTransition({
+      orderId: order.id,
+      nextStatus: nextStatus as OrderStatus,
+      actorRole,
+      actorId,
+      note,
+      expectedVersion,
+    });
+
+    return this.formatOrderResponse(updated, actorRole, actorId);
+  }
+
+  async cancelOrder(
+    id: string,
+    actor: { id: string; role: string; email?: string; name?: string },
+    reason?: string,
+    expectedVersion?: number,
+  ) {
+    this.ensureDbConnected();
+
+    const cleanId = id.trim().replace(/^#/, '');
+    const order = await this.prisma.order.findFirst({
+      where: { OR: [{ id }, { id: cleanId }, { orderNumber: cleanId }] },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order '${id}' not found`);
+    }
+
+    await this.assertOrderAccess(order, actor.id, actor.role);
+
+    const isVendorRejection = actor.role === Role.VENDOR;
+    const updated = await this.orderTransition.executeTransition({
+      orderId: order.id,
+      nextStatus: 'CANCELLED',
+      actorRole: actor.role,
+      actorId: actor.id,
+      actorEmail: actor.email || null,
+      actorName: actor.name || null,
+      note:
+        reason?.trim() ||
+        (isVendorRejection
+          ? 'Order rejected by vendor'
+          : `Order cancelled by ${actor.role}`),
+      expectedVersion,
+      auditAction: isVendorRejection ? 'VENDOR_ORDER_REJECTED' : 'ORDER_CANCELLED',
+      extraOrderUpdate: {
+        cancellationReason: reason?.trim() || null,
+        ...(isVendorRejection ? { rejectedByVendor: true } : {}),
+      },
+    });
+
+    return this.formatOrderResponse(updated, actor.role, actor.id);
+  }
+
+  async submitCustomerTryAndBuySelections(
+    orderId: string,
+    userId: string,
+    role: string,
+    selections: Record<string, 'KEEP' | 'RETURN'>,
+  ) {
+    this.ensureDbConnected();
+
+    const cleanId = orderId.trim().replace(/^#/, '');
+    const order = await this.prisma.order.findFirst({
+      where: { OR: [{ id: orderId }, { id: cleanId }, { orderNumber: cleanId }] },
+      include: ORDER_WITH_RELATIONS,
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order '${orderId}' not found`);
+    }
+
+    await this.assertOrderAccess(order, userId, role);
+
+    if (!order.isTryAndBuy) {
+      throw new BadRequestException('This order is not enabled for Try & Buy');
+    }
+
+    if (order.status !== 'OUT_FOR_DELIVERY') {
+      throw new BadRequestException(
+        `Try & Buy selections can only be submitted while order is OUT_FOR_DELIVERY (current: ${order.status})`,
+      );
+    }
+
+    if (!order.arrivedAt && !order.tryAndBuySession) {
+      throw new BadRequestException(
+        'Driver has not marked doorstep arrival yet. Please submit Try & Buy choices after doorstep handover begins.',
+      );
+    }
+
+    if (!selections || typeof selections !== 'object') {
+      throw new BadRequestException('A valid selections map is required');
+    }
+
+    const orderItemIds = new Set((order.items || []).map((it: any) => it.id));
+    for (const [itemId, decision] of Object.entries(selections)) {
+      if (!orderItemIds.has(itemId)) {
+        throw new BadRequestException(`Item '${itemId}' does not belong to order '${order.orderNumber}'`);
+      }
+      if (decision !== 'KEEP' && decision !== 'RETURN') {
+        throw new BadRequestException(`Invalid selection '${decision}' for item '${itemId}'. Must be KEEP or RETURN.`);
       }
     }
 
-    return this.getOrderById(order.id);
+    const completeSelections: Record<string, 'KEEP' | 'RETURN'> = {};
+    for (const it of order.items || []) {
+      const chosen = selections[it.id];
+      if (!chosen) {
+        throw new BadRequestException(`Selection missing for item '${it.title}' (${it.id})`);
+      }
+      completeSelections[it.id] = chosen;
+    }
+
+    const financials = computeTryAndBuyFinancials({
+      order: {
+        itemTotal: order.itemTotal,
+        deliveryFee: order.deliveryFee,
+        taxes: order.taxes,
+        discountAmount: order.discountAmount,
+        giftWrapFee: order.giftWrapFee,
+        donationAmount: order.donationAmount,
+        grandTotal: order.grandTotal,
+        paymentMethod: order.paymentMethod,
+      },
+      items: (order.items || []).map((i: any) => ({
+        id: i.id,
+        price: i.price,
+        quantity: i.quantity,
+      })),
+      selections: completeSelections,
+    });
+
+    const keptIds = financials.keptItems.map((i) => i.id);
+    const returnedIds = financials.returnedItems.map((i) => i.id);
+    const now = new Date();
+    const sessionPaymentStatus =
+      financials.refundAmount > 0
+        ? 'REFUND_PENDING'
+        : order.paymentMethod === 'COD' && financials.amountDue > 0
+          ? 'PAYMENT_PENDING'
+          : 'COMPLETED';
+
+    await this.prisma.$transaction(async (tx) => {
+      for (const it of order.items || []) {
+        await tx.orderItem.update({
+          where: { id: it.id },
+          data: { tryAndBuyDecision: completeSelections[it.id] },
+        });
+      }
+
+      await tx.tryAndBuySession.upsert({
+        where: { orderId: order.id },
+        update: {
+          stage: 'SELECTION_CONFIRMED',
+          customerSelectionAt: now,
+          keptItemIds: keptIds,
+          returnedItemIds: returnedIds,
+          finalPayableTotal: financials.finalPayableTotal,
+          refundAmount: financials.refundAmount,
+          amountDue: financials.amountDue,
+          paymentStatus: sessionPaymentStatus,
+        },
+        create: {
+          orderId: order.id,
+          driverId: order.driverId || null,
+          driverProfileId: order.driverProfileId || null,
+          stage: 'SELECTION_CONFIRMED',
+          handoverConfirmedAt: order.arrivedAt || now,
+          customerSelectionAt: now,
+          keptItemIds: keptIds,
+          returnedItemIds: returnedIds,
+          finalPayableTotal: financials.finalPayableTotal,
+          refundAmount: financials.refundAmount,
+          amountDue: financials.amountDue,
+          paymentStatus: sessionPaymentStatus,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          userId,
+          userRole: role,
+          action: 'TRY_AND_BUY_CUSTOMER_SELECTIONS',
+          entityType: 'Order',
+          entityId: order.id,
+          details: JSON.stringify({
+            keptIds,
+            returnedIds,
+            finalPayableTotal: financials.finalPayableTotal,
+            refundAmount: financials.refundAmount,
+            amountDue: financials.amountDue,
+          }),
+        },
+      });
+
+      if (order.driverId) {
+        await tx.outboxEvent.create({
+          data: {
+            aggregateType: 'ORDER',
+            aggregateId: order.id,
+            eventType: QueueJobType.TRY_AND_BUY_SELECTION_NOTIFICATION,
+            payload: {
+              orderId: order.id,
+              orderNumber: order.orderNumber,
+              userId: order.driverId,
+              driverId: order.driverId,
+              title: `Customer Selection Confirmed #${order.orderNumber}`,
+              message: `Keep: ${keptIds.length} item(s), Return: ${returnedIds.length} item(s).`,
+            },
+          },
+        });
+      }
+    });
+
+    const refreshed = await this.prisma.order.findUnique({
+      where: { id: order.id },
+      include: ORDER_WITH_RELATIONS,
+    });
+    const formattedOrder = this.formatOrderResponse(refreshed, role, userId);
+
+    this.trackingGateway?.broadcastStatusUpdate(order.id, order.status, {
+      eventType: 'TRY_AND_BUY_UPDATED',
+      stage: 'SELECTION_CONFIRMED',
+      keptItemIds: keptIds,
+      returnedItemIds: returnedIds,
+      finalPayableTotal: financials.finalPayableTotal,
+      refundAmount: financials.refundAmount,
+      amountDue: financials.amountDue,
+      items: formattedOrder.items,
+      tryAndBuySession: formattedOrder.tryAndBuySession,
+      order: formattedOrder,
+    });
+
+    return {
+      order: formattedOrder,
+      financials,
+    };
   }
 
-  checkServiceability(address: any): { isServiceable: boolean; distanceKm?: number; reason?: string } {
-    const hubLat = 12.9784;
-    const hubLng = 77.6408;
-    const maxRadiusKm = 8.0;
+  async assignDriver(
+    id: string,
+    driverIdOrProfileId: string,
+    actorRole: string = Role.ADMIN,
+    actorId?: string,
+    actorName?: string,
+  ) {
+    this.ensureDbConnected();
 
-    if (address?.latitude && address?.longitude) {
-      const R = 6371;
-      const dLat = ((hubLat - address.latitude) * Math.PI) / 180;
-      const dLon = ((hubLng - address.longitude) * Math.PI) / 180;
-      const a =
-        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos((address.latitude * Math.PI) / 180) *
-          Math.cos((hubLat * Math.PI) / 180) *
-          Math.sin(dLon / 2) *
-          Math.sin(dLon / 2);
-      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-      const distance = Number((R * c).toFixed(1));
-      return {
-        isServiceable: distance <= maxRadiusKm,
-        distanceKm: distance,
-        reason:
-          distance > maxRadiusKm
-            ? `Delivery location is ${distance} km from Indiranagar Express Hub (exceeds our ${maxRadiusKm} km instant drop radius).`
-            : undefined,
-      };
+    if (actorRole !== Role.ADMIN) {
+      throw new ForbiddenException('Only ADMIN can manually assign a delivery driver (D-006).');
     }
 
-    const pin = (address?.pincode || '').replace(/\D/g, '');
-    const city = (address?.city || '').toLowerCase();
-    const isBengaluru =
-      city.includes('bengaluru') || city.includes('bangalore') || pin.startsWith('560');
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: {
+        OR: [{ id: driverIdOrProfileId }, { userId: driverIdOrProfileId }],
+      },
+      include: { user: true },
+    });
 
-    if (!isBengaluru) {
-      return {
-        isServiceable: false,
-        reason:
-          'Instant 18-minute delivery is currently operational only within Bengaluru dark store hubs.',
-      };
+    if (!driver) {
+      throw new NotFoundException(`Driver '${driverIdOrProfileId}' not found`);
     }
 
-    // Supported PIN codes in Bangalore quick-commerce radius per DCR-001
-    const serviceablePins = [
-      '560038', '560008', '560071', '560017', '560095', '560034',
-      '560001', '560025', '560047', '560042', '560052', '560027',
-      '560020', '560002',
-    ];
-    if (serviceablePins.includes(pin)) {
-      return { isServiceable: true };
+    if (driver.kycStatus !== 'APPROVED') {
+      throw new BadRequestException(
+        `Driver '${driver.fullName}' cannot be assigned because KYC status is '${driver.kycStatus}'.`,
+      );
     }
 
-    // Explicit non-serviceable Bangalore outer pincodes (> 8 km)
-    const nonServiceablePins = [
-      '560103', '560066', '560100', '560064', '560068', '560078', '560076',
-    ];
-    if (nonServiceablePins.includes(pin)) {
-      return {
-        isServiceable: false,
-        reason: `Pincode ${pin} is outside the 8.0 km instant drop radius for Indiranagar Express Hub.`,
-      };
-    }
+    const updated = await this.orderTransition.executeTransition({
+      orderId: id,
+      nextStatus: 'ASSIGNED',
+      actorRole: Role.ADMIN,
+      actorId,
+      actorName,
+      note: `Admin ${actorName || actorId || ''} manually assigned rider ${driver.fullName}`.trim(),
+      auditAction: 'ADMIN_MANUAL_DRIVER_ASSIGNED',
+      extraOrderUpdate: {
+        driverId: driver.userId,
+        driverProfileId: driver.id,
+      },
+    });
 
-    // Default prefix check for inner Bengaluru
-    const isInnerBengaluru = /^(56000|56001|56002|56003|56004|56007)/.test(pin);
-    return {
-      isServiceable: isInnerBengaluru,
-      reason: isInnerBengaluru
-        ? undefined
-        : `Address area (${pin}) is outside the 8.0 km express radius.`,
-    };
+    return this.formatOrderResponse(updated, Role.ADMIN, actorId);
+  }
+
+  async vendorAccept(id: string, actorRole: string = Role.VENDOR, actorId?: string) {
+    return this.updateStatus(id, 'ACCEPTED', actorRole, 'Vendor accepted order', actorId);
+  }
+
+  async vendorPrepare(id: string, actorRole: string = Role.VENDOR, actorId?: string) {
+    return this.updateStatus(
+      id,
+      'PREPARING',
+      actorRole,
+      'Vendor started packing items',
+      actorId,
+    );
+  }
+
+  async vendorReadyForPickup(id: string, actorRole: string = Role.VENDOR, actorId?: string) {
+    return this.updateStatus(
+      id,
+      'READY_FOR_PICKUP',
+      actorRole,
+      'Order packed and ready for manual admin dispatch',
+      actorId,
+    );
   }
 }

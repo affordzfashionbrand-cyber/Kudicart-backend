@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
@@ -9,51 +10,81 @@ import { AdminKycReviewDto } from '../dto/admin-domain.dto';
 
 @Injectable()
 export class AdminDriversService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
+
+  private ensureDbConnected() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
+    }
+  }
+
+  private mapDriver(d: any) {
+    return {
+      id: d.id,
+      userId: d.userId,
+      driverCode: d.id.slice(0, 8).toUpperCase(),
+      fullName: d.fullName,
+      phone: d.phone,
+      email: d.user?.email || null,
+      kycStatus: d.kycStatus,
+      rejectionReason: d.rejectionReason || null,
+      isOnline: Boolean(d.isOnline),
+      statusText: d.isOnline ? 'Standby' : 'Offline',
+      availableSince: d.availableSince ? d.availableSince.toISOString() : null,
+      tier: d.tier,
+      rating: d.rating,
+      completedDeliveries: d.completedDeliveries || 0,
+      vehicleType: d.vehicleType || '2W Scooter',
+      vehicleMake: d.vehicleMake || null,
+      vehicleModel: d.vehicleModel || null,
+      vehicleRegistration: d.vehicleRegistration || null,
+      currentLat: d.currentLat ?? null,
+      currentLng: d.currentLng ?? null,
+      documents: d.documents || [],
+      createdAt: d.createdAt.toISOString(),
+    };
+  }
 
   async listDrivers(query: AdminQueryDto) {
-    const store = this.prisma.getStore();
-    let drivers = store.adminDrivers || [];
+    this.ensureDbConnected();
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 20;
+
+    const where: any = {};
+    if (query.status && query.status !== 'ALL') {
+      where.kycStatus = query.status;
+    }
+
+    const profiles = await this.prisma.driverProfile.findMany({
+      where,
+      include: {
+        user: { select: { id: true, email: true, status: true } },
+        documents: true,
+      },
+      orderBy: [{ isOnline: 'desc' }, { createdAt: 'desc' }],
+    });
+
+    let mapped = profiles.map((d) => this.mapDriver(d));
 
     if (query.search && query.search.trim()) {
       const q = query.search.toLowerCase().trim();
-      drivers = drivers.filter(
-        (d: any) =>
+      mapped = mapped.filter(
+        (d) =>
           d.fullName.toLowerCase().includes(q) ||
-          d.driverCode.toLowerCase().includes(q) ||
-          d.phone.includes(q) ||
-          d.vehicleRegistration.toLowerCase().includes(q) ||
-          d.vehicleModel.toLowerCase().includes(q),
+          d.phone.toLowerCase().includes(q) ||
+          d.id.toLowerCase().includes(q) ||
+          (d.vehicleRegistration || '').toLowerCase().includes(q),
       );
     }
 
-    if (query.status && query.status !== 'ALL') {
-      drivers = drivers.filter((d: any) => d.kycStatus === query.status);
-    }
-
     if (query.vehicleType && query.vehicleType !== 'ALL') {
-      if (query.vehicleType === 'TWO_WHEELER') {
-        drivers = drivers.filter(
-          (d: any) =>
-            d.vehicleType === 'Two-Wheeler' ||
-            d.vehicleType.toLowerCase().includes('bike') ||
-            d.vehicleType.toLowerCase().includes('scooty'),
-        );
-      } else if (query.vehicleType === 'EV') {
-        drivers = drivers.filter(
-          (d: any) =>
-            d.vehicleType === 'EV / Electric' ||
-            d.vehicleType.toLowerCase().includes('ev') ||
-            d.vehicleModel.toLowerCase().includes('ather'),
-        );
-      }
+      mapped = mapped.filter((d) =>
+        (d.vehicleType || '').toLowerCase().includes(query.vehicleType!.toLowerCase()),
+      );
     }
 
-    const total = drivers.length;
-    const page = Number(query.page) || 1;
-    const limit = Number(query.limit) || 10;
-    const startIndex = (page - 1) * limit;
-    const paginated = drivers.slice(startIndex, startIndex + limit);
+    const total = mapped.length;
+    const paginated = mapped.slice((page - 1) * limit, page * limit);
 
     return {
       data: paginated,
@@ -65,21 +96,32 @@ export class AdminDriversService {
   }
 
   async getDriverById(id: string) {
-    const store = this.prisma.getStore();
-    const cleanId = id.trim().replace(/^#/, '');
+    this.ensureDbConnected();
+    const cleanId = id.trim();
+    const profile = await this.prisma.driverProfile.findFirst({
+      where: {
+        OR: [{ id: cleanId }, { userId: cleanId }],
+      },
+      include: {
+        user: { select: { id: true, email: true, status: true } },
+        documents: true,
+      },
+    });
 
-    const driver = (store.adminDrivers || []).find(
-      (d: any) =>
-        d.id === cleanId ||
-        d.driverCode.replace(/^#/, '') === cleanId ||
-        d.id === `drv-${cleanId}`,
-    );
-
-    if (!driver) {
-      throw new NotFoundException(`Delivery partner record '${id}' was not found.`);
+    if (!profile) {
+      throw new NotFoundException(`Delivery partner '${id}' not found.`);
     }
 
-    return driver;
+    const auditTrail = await this.prisma.auditLog.findMany({
+      where: { entityType: 'DriverProfile', entityId: profile.id },
+      orderBy: { createdAt: 'desc' },
+      take: 25,
+    });
+
+    return {
+      ...this.mapDriver(profile),
+      auditTrail,
+    };
   }
 
   async reviewKyc(
@@ -88,87 +130,109 @@ export class AdminDriversService {
     actorId?: string,
     actorName?: string,
   ) {
-    const driver = await this.getDriverById(id);
-    const previousStatus = driver.kycStatus;
-
-    if (dto.status === 'REJECTED' && (!dto.rejectionReason || !dto.rejectionReason.trim())) {
-      throw new BadRequestException('Rejection reason is required when rejecting partner KYC.');
-    }
-
-    driver.kycStatus = dto.status;
-    driver.rejectionReason = dto.status === 'REJECTED' ? dto.rejectionReason : null;
-    driver.assignedReviewer = actorName || 'Operations Admin';
-
-    // Update document statuses
-    if (driver.documents) {
-      Object.keys(driver.documents).forEach((key) => {
-        const doc = driver.documents[key];
-        if (doc) {
-          doc.status = dto.status === 'APPROVED' ? 'VERIFIED' : 'REJECTED';
-          doc.statusLabel = dto.status === 'APPROVED' ? 'Verified' : 'Rejected';
-          if (doc.front) doc.front.status = dto.status === 'APPROVED' ? 'VERIFIED' : 'REJECTED';
-          if (doc.back) doc.back.status = dto.status === 'APPROVED' ? 'VERIFIED' : 'REJECTED';
-        }
-      });
-    }
-
-    // Add to partner audit trail
-    const now = new Date();
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const pad = (n: number) => n.toString().padStart(2, '0');
-    const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    const dateStr = `${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()}, ${timeStr} IST`;
-
-    if (!driver.auditTrail) driver.auditTrail = [];
-    driver.auditTrail.unshift({
-      id: `at-${Date.now()}`,
-      timestamp: dateStr,
-      title: dto.status === 'APPROVED' ? 'KYC Dossier Approved' : 'KYC Dossier Rejected',
-      description:
-        dto.status === 'APPROVED'
-          ? `All identity and vehicle documents verified by ${actorName || 'Operations Admin'}.`
-          : `Application rejected: ${dto.rejectionReason}`,
-      type: dto.status === 'APPROVED' ? 'success' : 'neutral',
+    this.ensureDbConnected();
+    const profile = await this.prisma.driverProfile.findFirst({
+      where: { OR: [{ id }, { userId: id }] },
     });
 
-    // Record central audit event
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: dto.status === 'APPROVED' ? ('DRIVER_KYC_APPROVED' as any) : ('DRIVER_KYC_REJECTED' as any),
-      entityId: driver.id,
-      entityName: driver.fullName,
-      entityType: 'Driver' as any,
-      summary: `${dto.status === 'APPROVED' ? 'Approved' : 'Rejected'} delivery fleet KYC dossier for ${driver.fullName} (${driver.driverCode})`,
-      targetDescription: `Delivery Partner Dossier #${driver.driverCode}`,
-      changePayload: {
-        driverId: driver.id,
-        previousStatus,
-        newStatus: dto.status,
-        rejectionReason: driver.rejectionReason,
-      },
-      entityLink: `/admin/delivery-partners/${driver.id}`,
+    if (!profile) {
+      throw new NotFoundException(`Delivery partner '${id}' not found.`);
+    }
+
+    if (dto.status === 'REJECTED' && !dto.rejectionReason?.trim()) {
+      throw new BadRequestException('A rejection reason must be provided when rejecting KYC.');
+    }
+
+    const previousStatus = profile.kycStatus;
+    const docStatus = dto.status === 'APPROVED' ? 'VERIFIED' : 'REJECTED';
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.driverProfile.update({
+        where: { id: profile.id },
+        data: {
+          kycStatus: dto.status,
+          rejectionReason: dto.status === 'REJECTED' ? dto.rejectionReason!.trim() : null,
+        },
+      });
+
+      await tx.driverDocument.updateMany({
+        where: { driverId: profile.id },
+        data: {
+          status: docStatus,
+          rejectionReason: dto.status === 'REJECTED' ? dto.rejectionReason!.trim() : null,
+          verifiedAt: dto.status === 'APPROVED' ? new Date() : null,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          userId: actorId || null,
+          userRole: 'ADMIN',
+          action: dto.status === 'APPROVED' ? 'DRIVER_KYC_APPROVED' : 'DRIVER_KYC_REJECTED',
+          entityType: 'DriverProfile',
+          entityId: profile.id,
+          details: JSON.stringify({
+            driverId: profile.id,
+            fullName: profile.fullName,
+            previousStatus,
+            newStatus: dto.status,
+            rejectionReason: dto.rejectionReason || null,
+            actorName: actorName || 'Operations Admin',
+          }),
+        },
+      });
     });
 
     return {
       success: true,
       message: `Delivery partner KYC marked as ${dto.status}.`,
-      driverId: driver.id,
-      kycStatus: driver.kycStatus,
-      rejectionReason: driver.rejectionReason,
+      driverId: profile.id,
+      kycStatus: dto.status,
+      rejectionReason: dto.status === 'REJECTED' ? dto.rejectionReason!.trim() : null,
     };
   }
 
   async toggleAvailability(id: string, actorId?: string, actorName?: string) {
-    const driver = await this.getDriverById(id);
-    driver.isOnline = !driver.isOnline;
-    driver.statusText = driver.isOnline ? 'Standby' : 'Offline';
+    this.ensureDbConnected();
+    const profile = await this.prisma.driverProfile.findFirst({
+      where: { OR: [{ id }, { userId: id }] },
+    });
+
+    if (!profile) {
+      throw new NotFoundException(`Delivery partner '${id}' not found.`);
+    }
+
+    const nextOnline = !profile.isOnline;
+    const updated = await this.prisma.driverProfile.update({
+      where: { id: profile.id },
+      data: {
+        isOnline: nextOnline,
+        availableSince: nextOnline ? new Date() : null,
+      },
+      include: {
+        user: { select: { id: true, email: true, status: true } },
+        documents: true,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId: actorId || null,
+        userRole: 'ADMIN',
+        action: 'DRIVER_AVAILABILITY_TOGGLED',
+        entityType: 'DriverProfile',
+        entityId: profile.id,
+        details: JSON.stringify({
+          isOnline: nextOnline,
+          actorName: actorName || 'Operations Admin',
+        }),
+      },
+    });
 
     return {
       success: true,
-      message: `Delivery partner ${driver.fullName} is now ${driver.statusText.toLowerCase()}.`,
-      driver,
+      message: `Delivery partner ${updated.fullName} is now ${nextOnline ? 'standby' : 'offline'}.`,
+      driver: this.mapDriver(updated),
     };
   }
 }
-

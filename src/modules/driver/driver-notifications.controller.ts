@@ -13,10 +13,14 @@ import {
 } from '@nestjs/common';
 import { DriverNotificationsService } from './driver-notifications.service';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { Role } from '../../common/enums/role.enum';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
 @Controller('api/v1/driver/notifications')
-@UseGuards(FirebaseAuthGuard)
+@UseGuards(FirebaseAuthGuard, RolesGuard)
+@Roles(Role.DRIVER)
 export class DriverNotificationsController {
   constructor(private readonly notificationsService: DriverNotificationsService) {}
 

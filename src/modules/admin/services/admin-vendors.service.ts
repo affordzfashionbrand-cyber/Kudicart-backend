@@ -1,21 +1,83 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
 import { VendorReviewActionDto } from '../dto/admin-actions.dto';
 
 @Injectable()
 export class AdminVendorsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
+
+  private ensureDb() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('Database connection unavailable');
+    }
+  }
+
+  private async getVendorDossiers(): Promise<Record<string, any>> {
+    const row = await this.prisma.workspaceSetting.findUnique({
+      where: { key: 'vendorDossiers' },
+    });
+    return row?.value && typeof row.value === 'object'
+      ? { ...(row.value as Record<string, any>) }
+      : {};
+  }
+
+  private async saveVendorDossiers(dossiers: Record<string, any>) {
+    await this.prisma.workspaceSetting.upsert({
+      where: { key: 'vendorDossiers' },
+      update: { value: dossiers },
+      create: { key: 'vendorDossiers', value: dossiers },
+    });
+  }
+
+  private formatVendor(v: any, dossier: any = {}) {
+    return {
+      id: v.id,
+      vendorNumber: dossier?.vendorNumber || `#${v.id.toUpperCase()}`,
+      storeName: v.storeName,
+      ownerName: v.contactPerson || dossier?.ownerName || v.user?.name || '',
+      email: dossier?.email || v.user?.email || '',
+      phone: v.phone || v.user?.phone || '',
+      registeredAddress: v.address || dossier?.registeredAddress || '',
+      operatingHub: v.operatingHub || 'Affordz Official Dark Store',
+      category: v.category || 'Women Ethnic',
+      status: v.status,
+      commissionRate: v.commissionRate,
+      rejectionReason: v.rejectionReason || null,
+      productCount: v.products?.length ?? v._count?.products ?? dossier?.productCount ?? 0,
+      documents: Array.isArray(dossier?.documents) ? dossier.documents : [],
+      bankDetails: dossier?.bankDetails ?? null,
+      assignedReviewer: dossier?.assignedReviewer ?? null,
+      onboardingDate: dossier?.onboardingDate || v.createdAt.toISOString(),
+      createdAt: v.createdAt.toISOString(),
+      updatedAt: v.updatedAt.toISOString(),
+    };
+  }
 
   async listVendors(query: AdminQueryDto) {
-    const store = this.prisma.getStore();
-    let vendors = store.adminVendors || [];
+    this.ensureDb();
 
-    // Filter by search
+    const [dbVendors, dossiers] = await Promise.all([
+      this.prisma.vendor.findMany({
+        include: {
+          user: true,
+          _count: { select: { products: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.getVendorDossiers(),
+    ]);
+
+    let vendors = dbVendors.map((v) => this.formatVendor(v, dossiers[v.id]));
+
     if (query.search && query.search.trim()) {
       const q = query.search.toLowerCase().trim();
       vendors = vendors.filter(
-        (v: any) =>
+        (v) =>
           v.storeName.toLowerCase().includes(q) ||
           v.ownerName.toLowerCase().includes(q) ||
           v.email.toLowerCase().includes(q) ||
@@ -24,28 +86,26 @@ export class AdminVendorsService {
       );
     }
 
-    // Filter by status
     if (query.status && query.status !== 'ALL') {
       if (query.status === 'PENDING') {
         vendors = vendors.filter(
-          (v: any) =>
+          (v) =>
             v.status === 'PENDING_REVIEW' ||
             v.status === 'DOCS_SUBMITTED' ||
             v.status === 'KYC_PENDING',
         );
       } else {
-        vendors = vendors.filter((v: any) => v.status === query.status);
+        vendors = vendors.filter((v) => v.status === query.status);
       }
     }
 
-    // Filter by category
     if (query.category && query.category !== 'ALL') {
-      vendors = vendors.filter((v: any) => v.category === query.category);
+      vendors = vendors.filter((v) => v.category === query.category);
     }
 
     const total = vendors.length;
-    const page = Number(query.page) || 1;
-    const limit = Number(query.limit) || 10;
+    const page = Math.max(Number(query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(query.limit) || 10, 1), 100);
     const startIndex = (page - 1) * limit;
     const paginated = vendors.slice(startIndex, startIndex + limit);
 
@@ -58,117 +118,188 @@ export class AdminVendorsService {
     };
   }
 
-  async getVendorById(id: string) {
-    const store = this.prisma.getStore();
+  private async findVendorOrFail(id: string) {
+    this.ensureDb();
     const cleanId = id.trim().replace(/^#/, '');
+    const dossiers = await this.getVendorDossiers();
 
-    const vendor = (store.adminVendors || []).find(
-      (v: any) =>
-        v.id === cleanId ||
-        v.vendorNumber.replace(/^#/, '') === cleanId ||
-        v.id === `ven_${cleanId}`,
-    );
+    const dossierMatchId = Object.entries(dossiers).find(
+      ([, d]) => d?.vendorNumber?.replace(/^#/, '') === cleanId,
+    )?.[0];
+
+    const vendor = await this.prisma.vendor.findFirst({
+      where: {
+        OR: [
+          { id: id.trim() },
+          { id: cleanId },
+          { id: `ven_${cleanId}` },
+          ...(dossierMatchId ? [{ id: dossierMatchId }] : []),
+        ],
+      },
+      include: {
+        user: true,
+        _count: { select: { products: true } },
+      },
+    });
 
     if (!vendor) {
       throw new NotFoundException(`Vendor boutique record "${id}" was not found.`);
     }
 
-    return vendor;
+    return { vendor, dossiers, dossier: dossiers[vendor.id] || {} };
   }
 
-  async approveVendor(id: string, dto: VendorReviewActionDto, actorId?: string, actorName?: string) {
-    const vendor = await this.getVendorById(id);
+  async getVendorById(id: string) {
+    const { vendor, dossier } = await this.findVendorOrFail(id);
+    return this.formatVendor(vendor, dossier);
+  }
+
+  async approveVendor(
+    id: string,
+    dto: VendorReviewActionDto,
+    actorId?: string,
+    actorName?: string,
+  ) {
+    const { vendor, dossiers, dossier } = await this.findVendorOrFail(id);
     const previousStatus = vendor.status;
-    vendor.status = 'ACTIVE';
-    vendor.assignedReviewer = dto.reviewer || actorName || 'Operations Admin';
+    const assignedReviewer = dto.reviewer || actorName || 'Operations Admin';
 
-    // Verify all submitted documents
-    if (vendor.documents && Array.isArray(vendor.documents)) {
-      vendor.documents.forEach((d: any) => {
-        d.verified = true;
+    const updatedDocs = Array.isArray(dossier.documents)
+      ? dossier.documents.map((d: any) => ({ ...d, verified: true }))
+      : [];
+
+    const updatedDossier = {
+      ...dossier,
+      assignedReviewer,
+      documents: updatedDocs,
+    };
+    dossiers[vendor.id] = updatedDossier;
+
+    const updatedVendor = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.vendor.update({
+        where: { id: vendor.id },
+        data: { status: 'ACTIVE', rejectionReason: null },
+        include: { user: true, _count: { select: { products: true } } },
       });
-    }
 
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'VENDOR_APPROVED' as any,
-      entityId: vendor.id,
-      entityName: vendor.storeName,
-      entityType: 'Vendor' as any,
-      summary: `Approved merchant boutique onboarding application for ${vendor.storeName}`,
-      targetDescription: `Vendor Dossier #${vendor.vendorNumber}`,
-      changePayload: {
-        previousStatus,
-        newStatus: 'ACTIVE',
-        reviewer: vendor.assignedReviewer,
-      },
-      entityLink: `/admin/vendors/${vendor.id}`,
+      await tx.auditLog.create({
+        data: {
+          userId: actorId || 'ADMIN',
+          userEmail: actorName || null,
+          userRole: 'ADMIN',
+          action: 'VENDOR_APPROVED',
+          entityType: 'Vendor',
+          entityId: vendor.id,
+          details: JSON.stringify({
+            storeName: vendor.storeName,
+            previousStatus,
+            newStatus: 'ACTIVE',
+            reviewer: assignedReviewer,
+          }),
+        },
+      });
+
+      return row;
     });
+
+    await this.saveVendorDossiers(dossiers);
+    const formatted = this.formatVendor(updatedVendor, updatedDossier);
 
     return {
       success: true,
-      message: `Vendor boutique ${vendor.storeName} has been approved and activated.`,
-      vendor,
+      message: `Vendor boutique ${formatted.storeName} has been approved and activated.`,
+      vendor: formatted,
     };
   }
 
-  async rejectVendor(id: string, dto: VendorReviewActionDto, actorId?: string, actorName?: string) {
-    const vendor = await this.getVendorById(id);
+  async rejectVendor(
+    id: string,
+    dto: VendorReviewActionDto,
+    actorId?: string,
+    actorName?: string,
+  ) {
+    const { vendor, dossiers, dossier } = await this.findVendorOrFail(id);
     const previousStatus = vendor.status;
-    vendor.status = 'REJECTED';
-    vendor.assignedReviewer = dto.reviewer || actorName || 'Operations Admin';
+    const assignedReviewer = dto.reviewer || actorName || 'Operations Admin';
+    const rejectionReason = dto.reason || 'Compliance criteria unmet';
 
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'VENDOR_REJECTED' as any,
-      entityId: vendor.id,
-      entityName: vendor.storeName,
-      entityType: 'Vendor' as any,
-      summary: `Rejected merchant boutique onboarding application for ${vendor.storeName}: ${dto.reason || 'Compliance criteria unmet'}`,
-      targetDescription: `Vendor Dossier #${vendor.vendorNumber}`,
-      changePayload: {
-        previousStatus,
-        newStatus: 'REJECTED',
-        reason: dto.reason || 'Compliance criteria unmet',
-      },
-      entityLink: `/admin/vendors/${vendor.id}`,
+    const updatedDossier = { ...dossier, assignedReviewer };
+    dossiers[vendor.id] = updatedDossier;
+
+    const updatedVendor = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.vendor.update({
+        where: { id: vendor.id },
+        data: { status: 'REJECTED', rejectionReason },
+        include: { user: true, _count: { select: { products: true } } },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          userId: actorId || 'ADMIN',
+          userEmail: actorName || null,
+          userRole: 'ADMIN',
+          action: 'VENDOR_REJECTED',
+          entityType: 'Vendor',
+          entityId: vendor.id,
+          details: JSON.stringify({
+            storeName: vendor.storeName,
+            previousStatus,
+            newStatus: 'REJECTED',
+            reason: rejectionReason,
+          }),
+        },
+      });
+
+      return row;
     });
+
+    await this.saveVendorDossiers(dossiers);
+    const formatted = this.formatVendor(updatedVendor, updatedDossier);
 
     return {
       success: true,
-      message: `Vendor boutique ${vendor.storeName} application has been rejected.`,
-      vendor,
+      message: `Vendor boutique ${formatted.storeName} application has been rejected.`,
+      vendor: formatted,
     };
   }
 
   async toggleSuspendVendor(id: string, actorId?: string, actorName?: string) {
-    const vendor = await this.getVendorById(id);
+    const { vendor, dossier } = await this.findVendorOrFail(id);
     const previousStatus = vendor.status;
     const newStatus = previousStatus === 'SUSPENDED' ? 'ACTIVE' : 'SUSPENDED';
-    vendor.status = newStatus;
 
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: newStatus === 'SUSPENDED' ? ('VENDOR_SUSPENDED' as any) : ('VENDOR_APPROVED' as any),
-      entityId: vendor.id,
-      entityName: vendor.storeName,
-      entityType: 'Vendor' as any,
-      summary: `Vendor boutique ${vendor.storeName} status toggled: ${previousStatus} -> ${newStatus}`,
-      targetDescription: `Vendor Boutique #${vendor.vendorNumber}`,
-      changePayload: {
-        previousStatus,
-        newStatus,
-      },
-      entityLink: `/admin/vendors/${vendor.id}`,
+    const updatedVendor = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.vendor.update({
+        where: { id: vendor.id },
+        data: { status: newStatus },
+        include: { user: true, _count: { select: { products: true } } },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          userId: actorId || 'ADMIN',
+          userEmail: actorName || null,
+          userRole: 'ADMIN',
+          action: newStatus === 'SUSPENDED' ? 'VENDOR_SUSPENDED' : 'VENDOR_APPROVED',
+          entityType: 'Vendor',
+          entityId: vendor.id,
+          details: JSON.stringify({
+            storeName: vendor.storeName,
+            previousStatus,
+            newStatus,
+          }),
+        },
+      });
+
+      return row;
     });
+
+    const formatted = this.formatVendor(updatedVendor, dossier);
 
     return {
       success: true,
-      message: `Vendor boutique ${vendor.storeName} is now ${newStatus.toLowerCase()}.`,
-      vendor,
+      message: `Vendor boutique ${formatted.storeName} is now ${newStatus.toLowerCase()}.`,
+      vendor: formatted,
     };
   }
 }

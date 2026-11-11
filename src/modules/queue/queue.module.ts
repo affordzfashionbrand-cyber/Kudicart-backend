@@ -1,4 +1,4 @@
-import { Module, Global } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
 import { QueueService } from './queue.service';
 import { OutboxService } from './outbox.service';
 import { NotificationsProcessor } from './processors/notifications.processor';
@@ -12,6 +12,11 @@ import { PaymentsProcessor } from './processors/payments.processor';
     NotificationsProcessor,
     PaymentsProcessor,
   ],
-  exports: [QueueService, OutboxService],
+  exports: [
+    QueueService,
+    OutboxService,
+    NotificationsProcessor,
+    PaymentsProcessor,
+  ],
 })
 export class QueueModule {}

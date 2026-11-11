@@ -11,7 +11,7 @@ export function getJwtSecret(): string {
       throw new Error('FATAL: JWT_SECRET environment variable is required in production mode');
     }
     // Isolated development / test secret (strictly blocked in production)
-    return 'kudicart_dev_testing_only_jwt_secret_not_for_production';
+    return 'affordz_dev_testing_only_jwt_secret_not_for_production';
   }
   return secret;
 }

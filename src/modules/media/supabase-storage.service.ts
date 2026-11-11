@@ -1,17 +1,24 @@
-import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  ServiceUnavailableException,
+  Logger,
+} from '@nestjs/common';
 
 @Injectable()
 export class SupabaseStorageService {
   private readonly logger = new Logger(SupabaseStorageService.name);
   private readonly bucket = 'product-images';
-  private readonly supabaseUrl =
+  private readonly supabaseUrl = (
     process.env.SUPABASE_URL ||
     process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    'https://nxiltlhtesrvrnjpmiba.supabase.co';
-  private readonly supabaseKey =
+    ''
+  ).trim();
+  private readonly supabaseKey = (
     process.env.SUPABASE_KEY ||
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
-    'sb_publishable_dMuvmHX-waY55BMoAg_QLw_fOlhWadk';
+    ''
+  ).trim();
 
   private readonly allowedMimeTypes = [
     'image/jpeg',
@@ -19,6 +26,7 @@ export class SupabaseStorageService {
     'image/png',
     'image/webp',
     'image/avif',
+    'application/pdf',
   ];
 
   async uploadProductImage(file: {
@@ -27,13 +35,19 @@ export class SupabaseStorageService {
     mimetype: string;
     size: number;
   }): Promise<{ url: string; path: string }> {
+    if (!this.supabaseUrl || !this.supabaseKey) {
+      throw new ServiceUnavailableException(
+        'Supabase Storage is not configured (SUPABASE_URL and SUPABASE_KEY are required).',
+      );
+    }
+
     if (!file || !file.buffer) {
       throw new BadRequestException('Image file buffer is required.');
     }
 
     if (!this.allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
       throw new BadRequestException(
-        `Invalid file type '${file.mimetype}'. Allowed formats: JPEG, PNG, WebP, AVIF.`,
+        `Invalid file type '${file.mimetype}'. Allowed formats: JPEG, PNG, WebP, AVIF, PDF.`,
       );
     }
 

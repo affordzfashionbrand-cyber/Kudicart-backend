@@ -2,156 +2,150 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
 import { AdminAssignDriverDto } from '../dto/admin-domain.dto';
+import { OrderTransitionService } from '../../orders/order-transition.service';
+import { Role } from '../../../common/enums/role.enum';
+import { OrderStatus } from '../../../common/contracts/order-contracts';
+
+const ADMIN_ORDER_INCLUDE = {
+  customer: {
+    select: { id: true, name: true, phone: true, email: true },
+  },
+  vendor: true,
+  address: true,
+  driver: {
+    select: { id: true, name: true, phone: true },
+  },
+  driverProfile: true,
+  items: true,
+  history: { orderBy: { createdAt: 'asc' as const } },
+  tryAndBuySession: true,
+  checkoutGroup: true,
+};
 
 @Injectable()
 export class AdminOrdersService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly orderTransition: OrderTransitionService,
+  ) {}
 
-  private mapOrderToAdmin(order: any, store: any) {
-    const customer = (store.users || []).find((u: any) => u.id === order.customerId) || {
-      name: 'Ananya Sharma',
-      phone: '+91 98450 12890',
-    };
-    const address = (store.addresses || []).find((a: any) => a.id === order.addressId) || {
-      line1: 'Apt 4B, Sunrise Heights, 42 Westend Boulevard',
-      locality: 'Indiranagar',
-      city: 'Bengaluru',
-      pincode: '560038',
-      label: 'Home',
-    };
-    const vendor = (store.adminVendors || []).find((v: any) => v.id === order.vendorId) || {
-      storeName: 'Avanya Ethnic Boutique',
-      operatingHub: 'Indiranagar Express Hub, Bengaluru',
-      registeredAddress: '100ft Road, HAL 2nd Stage, Indiranagar',
-    };
-
-    let assignedDriverInfo = null;
-    if (order.driverId) {
-      const driver = (store.adminDrivers || []).find(
-        (d: any) => d.id === order.driverId || d.userId === order.driverId,
-      ) || (store.drivers || []).find((d: any) => d.id === order.driverId);
-
-      if (driver) {
-        assignedDriverInfo = {
-          id: driver.id,
-          fullName: driver.fullName || driver.name || 'Rajesh Kumar',
-          phone: driver.phone || '+91 98765 43210',
-          vehicleType: driver.vehicleType || 'EV Scooty',
-          vehicleModel: driver.vehicleModel || (driver.vehicleDetails ? driver.vehicleDetails.model : 'Ather 450X Gen 3'),
-          vehicleRegistration: driver.vehicleRegistration || (driver.vehicleDetails ? driver.vehicleDetails.registrationNumber : 'KA 03 EV 4821'),
-          completedDeliveries: driver.completedDeliveries || 428,
-          kycStatus: driver.kycStatus || 'APPROVED',
-        };
-      }
+  private ensureDbConnected() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
     }
+  }
 
+  private mapOrderToAdmin(order: any) {
+    const addr = order.deliveryAddress || order.address || {};
     return {
       id: order.id,
       orderNumber: order.orderNumber,
-      customerId: order.customerId,
-      customerName: order.customerName || customer.name,
-      customerPhone: order.customerPhone || customer.phone,
-      customerAddress: {
-        line1: address.line1,
-        locality: address.locality,
-        city: address.city,
-        pincode: address.pincode,
-        label: address.label,
-      },
-      vendorId: order.vendorId || vendor.id,
-      vendorName: order.vendorName || vendor.storeName,
-      pickupHub: order.pickupHub || vendor.operatingHub || 'Indiranagar Express Hub',
-      pickupAddress: order.pickupAddress || vendor.registeredAddress || 'Shop 14, 100ft Road, Indiranagar',
+      version: order.version ?? 1,
+      checkoutGroupId: order.checkoutGroupId ?? null,
+      groupNumber: order.checkoutGroup?.groupNumber ?? null,
       status: order.status,
+      fulfillmentType: order.fulfillmentType || 'DARK_STORE',
+      isTryAndBuy: Boolean(order.isTryAndBuy),
       paymentMethod: order.paymentMethod,
       paymentStatus: order.paymentStatus,
-      fulfillmentType: order.isTryAndBuy ? 'Try & Buy' : 'Express (60m)',
-      itemTotal: order.itemTotal,
-      deliveryFee: order.deliveryFee,
-      taxes: order.taxes,
-      discountAmount: order.discountAmount || 0,
-      grandTotal: order.grandTotal,
-      isTryAndBuy: !!order.isTryAndBuy,
-      tryAndBuyDetails: order.isTryAndBuy
-        ? {
-            stage: 'HANDOVER_PENDING',
-            trialDurationMinutes: 20,
-            handoverConfirmedAt: order.history?.find((h: any) => h.status === 'OUT_FOR_DELIVERY')?.time,
-          }
-        : undefined,
-      assignedDriver: assignedDriverInfo,
-      createdAt: order.createdAt,
-      items: (order.items || []).map((it: any) => ({
-        id: it.id,
-        productId: it.productId,
-        title: it.title,
-        brand: it.brand,
-        size: it.size,
-        trialSize: it.trialSize || null,
-        price: it.price,
-        originalPrice: it.price * 1.5,
-        quantity: it.quantity,
-        image: it.image || 'https://images.unsplash.com/photo-1583391733956-3750e0ff4e8b?auto=format&fit=crop&w=400&q=80',
-      })),
+      razorpayOrderId: order.razorpayOrderId ?? null,
+      razorpayPaymentId: order.razorpayPaymentId ?? null,
+      customerId: order.customerId,
+      customerName: order.customer?.name || addr.recipientName || 'Customer',
+      customerPhone: order.customer?.phone || addr.recipientPhone || null,
+      deliveryAddress: {
+        line1: addr.line1 || null,
+        line2: addr.line2 || null,
+        locality: addr.locality || null,
+        city: addr.city || null,
+        pincode: addr.pincode || null,
+        label: addr.label || null,
+      },
+      vendorId: order.vendorId ?? null,
+      vendorName: order.vendor?.storeName || 'Affordz Official Store',
+      driverId: order.driverId ?? null,
+      driverProfileId: order.driverProfileId ?? null,
+      driverName: order.driverProfile?.fullName || order.driver?.name || null,
+      driverPhone: order.driverProfile?.phone || order.driver?.phone || null,
+      driverVehicle: order.driverProfile?.vehicleType || null,
+      itemTotal: Math.round(order.itemTotal || 0),
+      deliveryFee: Math.round(order.deliveryFee || 0),
+      taxes: Math.round(order.taxes || 0),
+      giftWrapFee: Math.round(order.giftWrapFee || 0),
+      donationAmount: Math.round(order.donationAmount || 0),
+      discountAmount: Math.round(order.discountAmount || 0),
+      couponCode: order.couponCode ?? null,
+      grandTotal: Math.round(order.grandTotal || 0),
+      etaMinutes: order.etaMinutes ?? 0,
+      arrivedAt: order.arrivedAt ? new Date(order.arrivedAt).toISOString() : null,
+      deliveredAt: order.deliveredAt ? new Date(order.deliveredAt).toISOString() : null,
+      cancelledAt: order.cancelledAt ? new Date(order.cancelledAt).toISOString() : null,
+      cancellationReason: order.cancellationReason ?? null,
+      rejectedByVendor: Boolean(order.rejectedByVendor),
+      expiresAt: order.expiresAt ? new Date(order.expiresAt).toISOString() : null,
+      createdAt: order.createdAt ? new Date(order.createdAt).toISOString() : null,
+      updatedAt: order.updatedAt ? new Date(order.updatedAt).toISOString() : null,
+      items: order.items || [],
       history: (order.history || []).map((h: any) => ({
+        id: h.id,
         status: h.status,
-        timestamp: h.time || h.timestamp || h.createdAt || 'Today',
-        performer: h.actor || h.performer || 'System',
         note: h.note,
+        actorId: h.actorId ?? null,
+        actorRole: h.actorRole ?? null,
+        createdAt: h.createdAt ? new Date(h.createdAt).toISOString() : null,
       })),
+      tryAndBuySession: order.tryAndBuySession || null,
     };
   }
 
   async listOrders(query: AdminQueryDto) {
-    const store = this.prisma.getStore();
-    let orders = store.orders.map((o: any) => this.mapOrderToAdmin(o, store));
+    this.ensureDbConnected();
 
-    // Filter by tab / status
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 20;
+
+    const where: any = {};
     if (query.status && query.status !== 'ALL') {
-      orders = orders.filter((o: any) => o.status === query.status);
+      where.status = query.status;
     }
-
-    // Filter by fulfillment type
     if (query.fulfillmentType && query.fulfillmentType !== 'ALL') {
-      orders = orders.filter((o: any) => o.fulfillmentType === query.fulfillmentType);
+      if (query.fulfillmentType === 'TRY_AND_BUY') {
+        where.isTryAndBuy = true;
+      } else {
+        where.fulfillmentType = query.fulfillmentType;
+      }
+    }
+    if (query.vendor && query.vendor !== 'ALL') {
+      where.vendorId = query.vendor;
     }
 
-    // Filter by date range
-    if (query.dateRange && query.dateRange !== 'ALL') {
-      const now = new Date();
-      orders = orders.filter((o: any) => {
-        const orderDate = new Date(o.createdAt);
-        const diffDays = (now.getTime() - orderDate.getTime()) / (1000 * 3600 * 24);
-        if (query.dateRange === 'TODAY') return diffDays <= 1;
-        if (query.dateRange === '7DAYS') return diffDays <= 7;
-        if (query.dateRange === '30DAYS') return diffDays <= 30;
-        return true;
-      });
-    }
+    const rawOrders = await this.prisma.order.findMany({
+      where,
+      include: ADMIN_ORDER_INCLUDE,
+      orderBy: { createdAt: 'desc' },
+    });
 
-    // Filter by search query
+    let mapped = rawOrders.map((o) => this.mapOrderToAdmin(o));
+
     if (query.search && query.search.trim()) {
       const q = query.search.toLowerCase().trim();
-      orders = orders.filter(
-        (o: any) =>
+      mapped = mapped.filter(
+        (o) =>
           o.orderNumber.toLowerCase().includes(q) ||
-          o.customerName.toLowerCase().includes(q) ||
-          o.customerPhone.includes(q) ||
-          o.vendorName.toLowerCase().includes(q) ||
-          o.pickupHub.toLowerCase().includes(q) ||
-          o.items.some((item: any) => item.title.toLowerCase().includes(q)),
+          o.id.toLowerCase().includes(q) ||
+          (o.customerName || '').toLowerCase().includes(q) ||
+          (o.vendorName || '').toLowerCase().includes(q) ||
+          (o.driverName || '').toLowerCase().includes(q),
       );
     }
 
-    const total = orders.length;
-    const page = Number(query.page) || 1;
-    const limit = Number(query.limit) || 8;
-    const startIndex = (page - 1) * limit;
-    const paginated = orders.slice(startIndex, startIndex + limit);
+    const total = mapped.length;
+    const paginated = mapped.slice((page - 1) * limit, page * limit);
 
     return {
       data: paginated,
@@ -163,18 +157,21 @@ export class AdminOrdersService {
   }
 
   async getOrderById(id: string) {
-    const store = this.prisma.getStore();
+    this.ensureDbConnected();
     const cleanId = id.trim().replace(/^#/, '');
 
-    const order = store.orders.find(
-      (o: any) => o.id === cleanId || o.orderNumber.replace(/^#/, '') === cleanId,
-    );
+    const order = await this.prisma.order.findFirst({
+      where: {
+        OR: [{ id }, { id: cleanId }, { orderNumber: cleanId }],
+      },
+      include: ADMIN_ORDER_INCLUDE,
+    });
 
     if (!order) {
-      throw new NotFoundException(`Order record '${id}' was not found.`);
+      throw new NotFoundException(`Order #${id} could not be located.`);
     }
 
-    return this.mapOrderToAdmin(order, store);
+    return this.mapOrderToAdmin(order);
   }
 
   async assignDriver(
@@ -183,141 +180,96 @@ export class AdminOrdersService {
     actorId?: string,
     actorName?: string,
   ) {
-    const store = this.prisma.getStore();
-    const cleanOrderId = orderId.trim().replace(/^#/, '');
+    this.ensureDbConnected();
+    const cleanId = orderId.trim().replace(/^#/, '');
 
-    const order = store.orders.find(
-      (o: any) => o.id === cleanOrderId || o.orderNumber.replace(/^#/, '') === cleanOrderId,
-    );
+    const order = await this.prisma.order.findFirst({
+      where: {
+        OR: [{ id: orderId }, { id: cleanId }, { orderNumber: cleanId }],
+      },
+    });
 
     if (!order) {
-      throw new NotFoundException(`Order record '${orderId}' was not found.`);
+      throw new NotFoundException(`Order #${orderId} not found.`);
     }
 
-    // Validate order status
-    if (order.status !== 'READY_FOR_PICKUP' && order.status !== 'ASSIGNED') {
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: {
+        OR: [{ id: dto.driverId }, { userId: dto.driverId }],
+      },
+      include: { user: true },
+    });
+
+    if (!driver) {
+      throw new NotFoundException(`Delivery partner '${dto.driverId}' not found.`);
+    }
+
+    if (driver.kycStatus !== 'APPROVED') {
       throw new BadRequestException(
-        `Order #${order.orderNumber} is in '${order.status}' status. Only orders Ready for Pickup can be assigned.`,
+        `Cannot assign rider '${driver.fullName}': KYC status is '${driver.kycStatus}'.`,
       );
     }
 
-    // Validate driver
-    const driver = (store.adminDrivers || []).find(
-      (d: any) => d.id === dto.driverId || d.driverCode?.replace(/^#/, '') === dto.driverId,
-    ) || (store.drivers || []).find((d: any) => d.id === dto.driverId);
-
-    if (!driver) {
-      throw new NotFoundException(`Delivery partner with ID '${dto.driverId}' was not found.`);
-    }
-
-    const previousStatus = order.status;
-    order.status = 'ASSIGNED';
-    order.driverId = driver.id;
-    order.updatedAt = new Date().toISOString();
-
-    // Consume / clear driver's FIFO timestamp while occupied
-    driver.availableSince = null;
-    if (this.prisma.isConnectedToDb) {
-      this.prisma.driverProfile
-        .updateMany({
-          where: { OR: [{ id: driver.id }, { userId: driver.id }] },
-          data: { availableSince: null },
-        })
-        .catch(() => {});
-    }
-
-    const now = new Date();
-    const timeStr = `${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}`;
-
-    if (!order.history) (order as any).history = [];
-    (order.history as any).push({
-      status: 'ASSIGNED',
-      time: timeStr,
-      timestamp: now.toISOString(),
-      actor: 'ADMIN',
-      performer: actorName || 'Operations Admin',
-      note: dto.note || `Admin assigned rider ${driver.fullName || driver.name}`,
-    });
-
-    // Record audit event
-    const pickupHub = (order as any).pickupHub || 'Pickup Hub';
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'DRIVER_ASSIGNED_MANUAL' as any,
-      entityId: order.orderNumber,
-      entityName: `Order #${order.orderNumber}`,
-      entityType: 'Order' as any,
-      summary: `Manually assigned delivery partner ${driver.fullName || driver.name} to order #${order.orderNumber}`,
-      targetDescription: `Order #${order.orderNumber} Ready for Pickup at ${pickupHub}`,
-      changePayload: {
-        orderId: order.id,
-        orderNumber: order.orderNumber,
-        previousStatus,
-        newStatus: 'ASSIGNED',
-        assignedDriverId: driver.id,
-        assignedDriverName: driver.fullName || driver.name,
+    const updated = await this.orderTransition.executeTransition({
+      orderId: order.id,
+      nextStatus: 'ASSIGNED' as OrderStatus,
+      actorRole: Role.ADMIN,
+      actorId: actorId || null,
+      actorName: actorName || 'Operations Admin',
+      note:
+        dto.note?.trim() ||
+        `Admin ${actorName || actorId || ''} manually assigned rider ${driver.fullName}`.trim(),
+      auditAction: 'ADMIN_MANUAL_DRIVER_ASSIGNED',
+      extraOrderUpdate: {
+        driverId: driver.userId,
+        driverProfileId: driver.id,
       },
-      entityLink: `/admin/orders/${order.id}`,
     });
-
-    // Record driver notification
-    if (store.operationalNotifications) {
-      store.operationalNotifications.unshift({
-        id: `NOTIF-${Date.now().toString().slice(-4)}`,
-        timestamp: timeStr,
-        timestampFull: now.toLocaleString(),
-        category: 'Assignment',
-        targetRole: 'Driver',
-        recipientName: driver.fullName || driver.name,
-        recipientId: driver.id,
-        title: `New Delivery Assignment #${order.orderNumber}`,
-        messagePreview: `Order #${order.orderNumber} is ready for boutique pickup.`,
-        messageFull: `Order #${order.orderNumber} assigned for express delivery. Pickup: ${pickupHub}.`,
-        deliveryStatus: 'Delivered',
-        deliveryChannel: 'Push Notification',
-        read: false,
-        priority: 'Informational',
-      });
-    }
 
     return {
       success: true,
-      message: `Successfully assigned ${driver.fullName || driver.name} to order #${order.orderNumber}.`,
-      order: this.mapOrderToAdmin(order, store),
+      message: `Successfully assigned ${driver.fullName} to order #${order.orderNumber}.`,
+      order: this.mapOrderToAdmin(updated),
     };
   }
 
   async listAssignments(query: AdminQueryDto) {
-    const store = this.prisma.getStore();
-    let orders = store.orders
-      .filter((o: any) => o.status === 'READY_FOR_PICKUP' || o.status === 'ASSIGNED')
-      .map((o: any) => this.mapOrderToAdmin(o, store));
+    this.ensureDbConnected();
+
+    const orders = await this.prisma.order.findMany({
+      where: {
+        status: { in: ['READY_FOR_PICKUP', 'ASSIGNED'] },
+      },
+      include: ADMIN_ORDER_INCLUDE,
+      orderBy: { createdAt: 'asc' },
+    });
+
+    let mapped = orders.map((o) => this.mapOrderToAdmin(o));
 
     if (query.status && query.status !== 'ALL') {
       if (query.status === 'READY') {
-        orders = orders.filter((o: any) => o.status === 'READY_FOR_PICKUP');
-      } else if (query.status === 'ASSIGNED') {
-        orders = orders.filter((o: any) => o.status === 'ASSIGNED');
+        mapped = mapped.filter((o) => o.status === 'READY_FOR_PICKUP');
+      } else {
+        mapped = mapped.filter((o) => o.status === query.status);
       }
     }
 
     if (query.search && query.search.trim()) {
       const q = query.search.toLowerCase().trim();
-      orders = orders.filter(
-        (o: any) =>
+      mapped = mapped.filter(
+        (o) =>
           o.orderNumber.toLowerCase().includes(q) ||
-          o.customerName.toLowerCase().includes(q) ||
-          o.vendorName.toLowerCase().includes(q) ||
-          (o.assignedDriver && o.assignedDriver.fullName.toLowerCase().includes(q)),
+          (o.customerName || '').toLowerCase().includes(q) ||
+          (o.vendorName || '').toLowerCase().includes(q) ||
+          (o.driverName || '').toLowerCase().includes(q),
       );
     }
 
     return {
-      data: orders,
-      total: orders.length,
-      readyCount: orders.filter((o: any) => o.status === 'READY_FOR_PICKUP').length,
-      assignedCount: orders.filter((o: any) => o.status === 'ASSIGNED').length,
+      data: mapped,
+      total: mapped.length,
+      readyCount: mapped.filter((o) => o.status === 'READY_FOR_PICKUP').length,
+      assignedCount: mapped.filter((o) => o.status === 'ASSIGNED').length,
     };
   }
 }

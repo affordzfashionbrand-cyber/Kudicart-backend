@@ -1,4 +1,42 @@
-import { IsNotEmpty, IsString, IsIn, IsOptional, IsBoolean, IsArray, IsNumber } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsNotEmpty,
+  IsString,
+  IsIn,
+  IsOptional,
+  IsBoolean,
+  IsArray,
+  IsNumber,
+  Min,
+  ValidateNested,
+} from 'class-validator';
+
+export class CheckoutItemDto {
+  @IsOptional()
+  @IsString()
+  id?: string;
+
+  @IsNotEmpty()
+  @IsString()
+  productId: string;
+
+  @IsOptional()
+  @IsString()
+  size?: string;
+
+  @IsOptional()
+  @IsString()
+  trialSize?: string;
+
+  @IsOptional()
+  @IsString()
+  color?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  quantity?: number;
+}
 
 export class CheckoutDto {
   @IsNotEmpty({ message: 'addressId is required' })
@@ -20,6 +58,24 @@ export class CheckoutDto {
   @IsOptional()
   @IsBoolean()
   isBuyNow?: boolean;
+
+  @IsOptional()
+  @IsString()
+  deliveryInstructions?: string;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CheckoutItemDto)
+  buyNowItem?: CheckoutItemDto;
+
+  @IsOptional()
+  @IsBoolean()
+  giftWrap?: boolean;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  donationAmount?: number;
 
   @IsOptional()
   @IsArray()

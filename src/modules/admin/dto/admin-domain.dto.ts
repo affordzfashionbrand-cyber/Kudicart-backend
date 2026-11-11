@@ -6,6 +6,8 @@ import {
   IsNumber,
   IsBoolean,
   IsEmail,
+  IsDateString,
+  Min,
 } from 'class-validator';
 
 export class CreateCategoryDto {
@@ -69,19 +71,31 @@ export class UpdateCategoryDto {
 }
 
 export class UpdateProductStatusDto {
-  @IsNotEmpty({ message: 'Listing status is required' })
+  @IsOptional()
   @IsIn(['ACTIVE', 'DRAFT', 'SUSPENDED', 'REVIEW'])
-  listingStatus: 'ACTIVE' | 'DRAFT' | 'SUSPENDED' | 'REVIEW';
+  listingStatus?: 'ACTIVE' | 'DRAFT' | 'SUSPENDED' | 'REVIEW';
+
+  @IsOptional()
+  @IsIn(['ACTIVE', 'DRAFT', 'SUSPENDED', 'REVIEW'])
+  status?: 'ACTIVE' | 'DRAFT' | 'SUSPENDED' | 'REVIEW';
 }
 
 export class UpdateProductStockDto {
-  @IsNotEmpty({ message: 'Stock quantity is required' })
+  @IsOptional()
   @IsNumber()
-  stockQuantity: number;
+  stockQuantity?: number;
+
+  @IsOptional()
+  @IsNumber()
+  stock?: number;
 
   @IsOptional()
   @IsIn(['IN_STOCK', 'LOW_STOCK', 'OUT_OF_STOCK'])
   stockStatus?: 'IN_STOCK' | 'LOW_STOCK' | 'OUT_OF_STOCK';
+
+  @IsOptional()
+  @IsString()
+  stockBadge?: string;
 }
 
 export class AdminAssignDriverDto {
@@ -126,8 +140,8 @@ export class ModerateReviewDto {
 
 export class UpdateSupportTicketDto {
   @IsOptional()
-  @IsIn(['OPEN', 'IN_PROGRESS', 'RESOLVED'])
-  status?: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED';
+  @IsIn(['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'])
+  status?: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' | 'CLOSED';
 
   @IsOptional()
   @IsString()
@@ -136,6 +150,10 @@ export class UpdateSupportTicketDto {
   @IsOptional()
   @IsString()
   resolutionRemarks?: string;
+
+  @IsOptional()
+  @IsString()
+  resolutionNote?: string;
 }
 
 export class CreateAdminUserDto {
@@ -202,6 +220,10 @@ export class BroadcastNotificationDto {
 
   @IsOptional()
   @IsString()
+  message?: string;
+
+  @IsOptional()
+  @IsString()
   targetRole?: string = 'Central Admin';
 }
 
@@ -226,4 +248,148 @@ export class WorkspacePreferencesDto {
   @IsBoolean()
   audioAlertExceptions?: boolean;
 }
+
+export class CreateDarkStoreHubDto {
+  @IsNotEmpty({ message: 'Hub name is required' })
+  @IsString()
+  name: string;
+
+  @IsNotEmpty({ message: 'Locality is required' })
+  @IsString()
+  locality: string;
+
+  @IsNotEmpty({ message: 'Address is required' })
+  @IsString()
+  address: string;
+
+  @IsNumber()
+  lat: number;
+
+  @IsNumber()
+  lng: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  deliveryMinutes?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+}
+
+export class UpdateDarkStoreHubDto {
+  @IsOptional()
+  @IsString()
+  name?: string;
+
+  @IsOptional()
+  @IsString()
+  locality?: string;
+
+  @IsOptional()
+  @IsString()
+  address?: string;
+
+  @IsOptional()
+  @IsNumber()
+  lat?: number;
+
+  @IsOptional()
+  @IsNumber()
+  lng?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  deliveryMinutes?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+}
+
+export class CreateCouponDto {
+  @IsNotEmpty({ message: 'Coupon code is required' })
+  @IsString()
+  code: string;
+
+  @IsOptional()
+  @IsIn(['PERCENTAGE', 'FLAT'])
+  discountType?: 'PERCENTAGE' | 'FLAT' = 'PERCENTAGE';
+
+  @IsNumber()
+  @Min(0)
+  discountValue: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  minOrderValue?: number = 0;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  maxDiscount?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  usageLimit?: number;
+
+  @IsOptional()
+  @IsDateString()
+  startDate?: string;
+
+  @IsNotEmpty({ message: 'End date is required' })
+  @IsDateString()
+  endDate: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean = true;
+}
+
+export class UpdateCouponDto {
+  @IsOptional()
+  @IsString()
+  code?: string;
+
+  @IsOptional()
+  @IsIn(['PERCENTAGE', 'FLAT'])
+  discountType?: 'PERCENTAGE' | 'FLAT';
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  discountValue?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  minOrderValue?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  maxDiscount?: number | null;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  usageLimit?: number | null;
+
+  @IsOptional()
+  @IsDateString()
+  startDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  endDate?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
+}
+
 

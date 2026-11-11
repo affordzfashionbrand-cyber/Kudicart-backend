@@ -47,13 +47,13 @@
 ## Phase 12 — Notification Module — **Status:** [x]
 ## Phase 13 — Review Module — **Status:** [x]
 ## Phase 14 — Support Module — **Status:** [x]
-## Phase 15 — Ledger/Commission Module — **Status:** [ ]
+## Phase 15 — Ledger/Commission Module — **Status:** [x]
 ## Phase 16 — Media Module — **Status:** [x]
 ## Phase 17 — Reporting/CSV Module — **Status:** [ ]
-## Phase 18 — Audit Module — **Status:** [ ]
-## Phase 19 — Sentry Integration — **Status:** [ ]
-## Phase 20 — Cross-Client Integration Testing — **Status:** [ ]
-## Phase 21 — Security Verification — **Status:** [ ]
+## Phase 18 — Audit Module — **Status:** [x]
+## Phase 19 — Sentry Integration — **Status:** [x]
+## Phase 20 — Cross-Client Integration Testing — **Status:** [~]
+## Phase 21 — Security Verification — **Status:** [~]
 ## Phase 22 — Deployment — **Status:** [ ]
 
 All Customer & Driver backend phases: **Verified & Passing.**
@@ -104,8 +104,9 @@ No decision changes recorded.
 | 2026-10-31 | Admin Catalog & Media Storage | Full backend test suite & build | PASS | 122/122 unit tests passed (100% across 8 test suites); `nest build` exit code 0 |
 | 2026-11-02 | Customer Profile & Address Module | PostgreSQL Migration & Service Persistence | PASS | 129/129 unit tests passed (100% across 9 test suites); `nest build` exit code 0 |
 | 2026-11-03 | Address Coordinates & Tracking Policy | DB Sync, Haversine Serviceability & Driver Location Gating | PASS | 129/129 unit tests passed (100% across 9 test suites); `nest build` exit code 0 |
+| 2026-11-11 | Order Management Production Cutover (`DCR-006`..`DCR-011`) | `prisma migrate status`, `tsc --noEmit`, `nest build`, `npm test`, `openapi:generate`, `sync-contracts.js` | PASS | `4 migrations` up to date; `tsc --noEmit` & `nest build` exit 0; **15/15 test suites, 172/172 tests passed** against PostgreSQL including HTTP+WS `order-management.integration.spec.ts` (5/5), `admin.spec.ts` (46/46), `driver.spec.ts` (19/19), `app.spec.ts` (38/38), `tracking.spec.ts`, `e2e-delivery-tracking.spec.ts`, `payments*.spec.ts`; regenerated `openapi.json` & synced `order-contracts.ts` to all 3 clients |
 
 ---
 
 # 8. Next Action
-Customer and Driver App backend APIs and business logic are complete and verified. Proceed to frontend integration and subsequent admin/vendor web modules.
+Production Order Management backend APIs, state machine, PostgreSQL/outbox workers, single-port `/ws/tracking`, ledger, and audit logging are verified passing (`15/15` suites, `172/172` tests). Proceed with remaining Reporting/CSV & deployment verification.

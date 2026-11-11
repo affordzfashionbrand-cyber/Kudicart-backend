@@ -5,8 +5,8 @@ import { OutboxService } from './modules/queue/outbox.service';
 import { QueueService } from './modules/queue/queue.service';
 
 async function bootstrap() {
-  const logger = new Logger('KudiCartWorkerBootstrap');
-  logger.log('Starting KudiCart Background Job & Outbox Worker Process...');
+  const logger = new Logger('AffordzWorkerBootstrap');
+  logger.log('Starting Affordz Background Job & Outbox Worker Process...');
 
   const app = await NestFactory.createApplicationContext(WorkerModule, {
     logger: ['error', 'warn', 'log'],
@@ -45,7 +45,7 @@ async function bootstrap() {
   process.on('SIGTERM', () => handleShutdown('SIGTERM'));
   process.on('SIGINT', () => handleShutdown('SIGINT'));
 
-  logger.log('KudiCart Worker Process is active, resilient, and ready for jobs.');
+  logger.log('Affordz Worker Process is active, resilient, and ready for jobs.');
 }
 
 bootstrap().catch((err) => {

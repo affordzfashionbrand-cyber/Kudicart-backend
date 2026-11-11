@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
-import { PrismaService } from '../../prisma/prisma.service';
-import { StateMachineService } from '../orders/state-machine.service';
+import { OrdersDomainModule } from '../orders/orders-domain.module';
 import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
 import { FirebaseAdminService } from '../auth/firebase-admin.service';
 
@@ -28,6 +27,7 @@ import { DriverController } from './driver.controller';
 import { DriverService } from './driver.service';
 
 @Module({
+  imports: [OrdersDomainModule],
   controllers: [
     DriverAuthController,
     DriverProfileController,
@@ -40,7 +40,6 @@ import { DriverService } from './driver.service';
   ],
   providers: [
     FirebaseAdminService,
-    StateMachineService,
     RateLimitGuard,
     DriverAuthService,
     DriverProfileService,

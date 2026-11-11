@@ -1,519 +1,599 @@
-import { Injectable, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+  BadRequestException,
+  ConflictException,
+  UnauthorizedException,
+  ServiceUnavailableException,
+  Optional,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import * as crypto from 'crypto';
+import { RazorpayClientService } from './razorpay-client.service';
+import { Role } from '../../common/enums/role.enum';
+import { FirebaseAdminService } from '../auth/firebase-admin.service';
+import { verifyJwtToken } from '../../common/utils/crypto.util';
+import {
+  createCheckoutSessionToken,
+  verifyCheckoutSessionToken,
+} from '../../common/utils/checkout-session.util';
 
 @Injectable()
 export class PaymentsService {
-  private readonly logger = new Logger(PaymentsService.name);
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly razorpayClient: RazorpayClientService,
+    @Optional() private readonly firebaseAdmin?: FirebaseAdminService,
+  ) {}
 
-  constructor(private prisma: PrismaService) {}
-
-  get razorpayKeySecret(): string {
-    return process.env.RAZORPAY_KEY_SECRET || 'rzp_test_secret_AffordzSecureKey_2026';
+  private ensureDbConnected() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
+    }
   }
 
-  get razorpayKeyId(): string {
-    return process.env.RAZORPAY_KEY_ID || 'rzp_test_AffordzClientKey';
-  }
-
-  get isGatewayConfigured(): boolean {
-    const key = process.env.RAZORPAY_KEY_ID;
-    const secret = process.env.RAZORPAY_KEY_SECRET;
-    return (
-      Boolean(key && secret) &&
-      key !== 'rzp_test_AffordzClientKey' &&
-      secret !== 'rzp_test_secret_AffordzSecureKey_2026' &&
-      !key.includes('[YOUR_LIVE_KEY_ID]') &&
-      !secret.includes('[YOUR_LIVE_KEY_SECRET]')
+  private async resolveCheckoutTarget(targetId: string, razorpayOrderId?: string) {
+    const tokens = [targetId, razorpayOrderId].filter(
+      (v): v is string => typeof v === 'string' && v.trim().length > 0,
     );
-  }
 
-  async createRazorpayOrder(amount: number, orderId?: string) {
-    if (!amount || amount <= 0) {
-      throw new BadRequestException('Amount must be greater than zero');
+    const group = await this.prisma.checkoutGroup.findFirst({
+      where: {
+        OR: [
+          ...tokens.map((t) => ({ id: t })),
+          ...tokens.map((t) => ({ groupNumber: t })),
+          ...tokens.map((t) => ({ razorpayOrderId: t })),
+        ],
+      },
+      include: {
+        orders: true,
+        transactions: true,
+      },
+    });
+
+    if (group) {
+      return {
+        kind: 'GROUP' as const,
+        group,
+        orders: group.orders,
+        customerId: group.customerId,
+        grandTotal: group.grandTotal,
+        razorpayOrderId: group.razorpayOrderId,
+        paymentStatus: group.paymentStatus,
+        paymentMethod: group.paymentMethod,
+        titleRef: group.groupNumber,
+      };
     }
 
-    const isProduction = process.env.APP_ENV === 'production';
-    if (isProduction && !this.isGatewayConfigured) {
-      throw new BadRequestException(
-        'Production payment gateway not configured. Failing closed for security.',
-      );
+    const order = await this.prisma.order.findFirst({
+      where: {
+        OR: [
+          ...tokens.map((t) => ({ id: t })),
+          ...tokens.map((t) => ({ orderNumber: t.replace(/^#/, '') })),
+          ...tokens.map((t) => ({ razorpayOrderId: t })),
+        ],
+      },
+      include: {
+        checkoutGroup: { include: { orders: true, transactions: true } },
+        transactions: true,
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order or CheckoutGroup '${targetId}' not found`);
     }
 
-    const store: any = this.prisma.getStore();
-    const amountInPaisa = Math.round(amount * 100);
-    let razorpayOrderId: string;
-
-    if (this.isGatewayConfigured) {
-      try {
-        const authHeader = `Basic ${Buffer.from(`${this.razorpayKeyId}:${this.razorpayKeySecret}`).toString('base64')}`;
-        const response = await fetch('https://api.razorpay.com/v1/orders', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: authHeader,
-          },
-          body: JSON.stringify({
-            amount: amountInPaisa,
-            currency: 'INR',
-            receipt: orderId ? `rcpt_${String(orderId).replace(/[^a-zA-Z0-9]/g, '')}` : `rcpt_${Date.now()}`,
-            notes: {
-              platform: 'Affordz',
-              orderId: orderId || null,
-            },
-          }),
-        });
-
-        if (!response.ok) {
-          const errData: any = await response.json().catch(() => ({}));
-          const errMsg =
-            errData?.error?.description ||
-            `Razorpay order creation failed with HTTP status ${response.status}`;
-          this.logger.error(`Razorpay API error: ${errMsg}`);
-          throw new BadRequestException(errMsg);
-        }
-
-        const data: any = await response.json();
-        razorpayOrderId = data.id;
-        this.logger.log(`Created Razorpay order ${razorpayOrderId} for amount ₹${amount}`);
-      } catch (err: any) {
-        if (err instanceof BadRequestException) {
-          throw err;
-        }
-        this.logger.error(`Razorpay network call failed: ${err.message}`);
-        throw new BadRequestException(`Payment gateway communication failure: ${err.message}`);
-      }
-    } else if (process.env.NODE_ENV === 'test') {
-      razorpayOrderId = `rzp_order_test_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
-    } else {
-      throw new BadRequestException(
-        'Razorpay payment gateway credentials not configured. Please set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in kudicart-backend/.env',
-      );
-    }
-
-    if (orderId) {
-      const order = store.orders.find((o) => o.id === orderId || o.orderNumber === orderId);
-      if (order) {
-        order.razorpayOrderId = razorpayOrderId;
-      }
+    if (order.checkoutGroup) {
+      return {
+        kind: 'GROUP' as const,
+        group: order.checkoutGroup,
+        orders: order.checkoutGroup.orders,
+        customerId: order.checkoutGroup.customerId,
+        grandTotal: order.checkoutGroup.grandTotal,
+        razorpayOrderId: order.checkoutGroup.razorpayOrderId || order.razorpayOrderId,
+        paymentStatus: order.checkoutGroup.paymentStatus,
+        paymentMethod: order.checkoutGroup.paymentMethod,
+        titleRef: order.checkoutGroup.groupNumber,
+      };
     }
 
     return {
-      success: true,
-      razorpayOrderId,
+      kind: 'ORDER' as const,
+      group: null,
+      orders: [order],
+      customerId: order.customerId,
+      grandTotal: order.grandTotal,
+      razorpayOrderId: order.razorpayOrderId,
+      paymentStatus: order.paymentStatus,
+      paymentMethod: order.paymentMethod,
+      titleRef: order.orderNumber,
+    };
+  }
+
+  async createRazorpayOrder(
+    amount: number,
+    orderOrGroupId?: string,
+    actorId?: string,
+    actorRole?: string,
+  ) {
+    this.ensureDbConnected();
+
+    let effectiveAmount = Math.round(amount);
+    let receipt = `kc_rcpt_${Date.now()}`;
+    let notes: Record<string, string> = {};
+
+    if (orderOrGroupId) {
+      const target = await this.resolveCheckoutTarget(orderOrGroupId);
+      if (actorRole === Role.CUSTOMER && actorId && target.customerId !== actorId) {
+        throw new ForbiddenException('You do not have permission to pay for this order');
+      }
+      if (target.paymentStatus === 'COMPLETED') {
+        throw new ConflictException('Order payment has already been completed');
+      }
+      if (target.orders.some((o) => o.status === 'FAILED' || o.status === 'CANCELLED')) {
+        throw new ConflictException('Order is expired or cancelled and cannot accept payment');
+      }
+
+      effectiveAmount = Math.round(target.grandTotal);
+      receipt = target.titleRef;
+      notes = target.group
+        ? { checkoutGroupId: target.group.id, customerId: target.customerId }
+        : { orderId: target.orders[0].id, customerId: target.customerId };
+
+      if (target.razorpayOrderId) {
+        const canonicalId = target.group?.id || target.orders[0].id;
+        const amountInPaisa = Math.round(effectiveAmount * 100);
+        const checkoutSessionToken = createCheckoutSessionToken(canonicalId, target.customerId);
+        return {
+          razorpayOrderId: target.razorpayOrderId,
+          orderId: canonicalId,
+          amount: amountInPaisa,
+          amountInPaisa,
+          currency: 'INR',
+          keyId: this.razorpayClient.keyId || null,
+          checkoutSessionToken,
+          checkoutSessionUrl: `/api/v1/payments/razorpay/checkout-session/${encodeURIComponent(canonicalId)}?st=${encodeURIComponent(checkoutSessionToken)}`,
+        };
+      }
+
+      const rzp = await this.razorpayClient.createOrder({
+        amountInPaisa: Math.round(effectiveAmount * 100),
+        receipt,
+        notes,
+      });
+
+      await this.prisma.$transaction(async (tx) => {
+        if (target.group) {
+          await tx.checkoutGroup.update({
+            where: { id: target.group.id },
+            data: { razorpayOrderId: rzp.razorpayOrderId },
+          });
+        }
+        await tx.order.updateMany({
+          where: { id: { in: target.orders.map((o) => o.id) } },
+          data: { razorpayOrderId: rzp.razorpayOrderId },
+        });
+      });
+
+      const canonicalId = target.group?.id || target.orders[0].id;
+      const amountInPaisa = Math.round(effectiveAmount * 100);
+      const checkoutSessionToken = createCheckoutSessionToken(canonicalId, target.customerId);
+
+      return {
+        razorpayOrderId: rzp.razorpayOrderId,
+        orderId: canonicalId,
+        amount: amountInPaisa,
+        amountInPaisa,
+        currency: 'INR',
+        keyId: this.razorpayClient.keyId || null,
+        checkoutSessionToken,
+        checkoutSessionUrl: `/api/v1/payments/razorpay/checkout-session/${encodeURIComponent(canonicalId)}?st=${encodeURIComponent(checkoutSessionToken)}`,
+      };
+    }
+
+    const rzp = await this.razorpayClient.createOrder({
+      amountInPaisa: Math.round(effectiveAmount * 100),
+      receipt,
+      notes,
+    });
+
+    const amountInPaisa = Math.round(effectiveAmount * 100);
+    return {
+      razorpayOrderId: rzp.razorpayOrderId,
+      amount: amountInPaisa,
       amountInPaisa,
-      amount,
       currency: 'INR',
-      keyId: this.razorpayKeyId,
-      notes: {
-        platform: 'Affordz',
-        orderId: orderId || null,
-      },
+      keyId: this.razorpayClient.keyId || null,
     };
   }
 
   async verifyRazorpaySignature(
-    orderId: string,
+    targetId: string,
     paymentId: string,
     signature: string,
     razorpayOrderId?: string,
+    actorId?: string,
+    actorRole?: string,
   ) {
-    if (!orderId || !paymentId || !signature) {
-      throw new BadRequestException(
-        'orderId, paymentId, and signature are required for payment verification',
-      );
+    this.ensureDbConnected();
+
+    const target = await this.resolveCheckoutTarget(targetId, razorpayOrderId);
+    if (actorRole === Role.CUSTOMER && actorId && target.customerId !== actorId) {
+      throw new ForbiddenException('You do not have permission to verify this payment');
     }
 
-    const store: any = this.prisma.getStore();
-    const order: any = store.orders.find((o) => o.id === orderId || o.orderNumber === orderId);
-
-    if (!order) {
-      throw new NotFoundException(`Order with ID ${orderId} not found`);
+    const effectiveRzpOrderId = target.razorpayOrderId || razorpayOrderId;
+    if (!effectiveRzpOrderId) {
+      throw new BadRequestException('No Razorpay order reference found for signature check');
     }
 
-    const effectiveRazorpayOrderId = razorpayOrderId || order.razorpayOrderId || orderId;
-
-    // Compute server-side HMAC-SHA256 signature
-    const expectedData = `${effectiveRazorpayOrderId}|${paymentId}`;
-    const generatedSignature = crypto
-      .createHmac('sha256', this.razorpayKeySecret)
-      .update(expectedData)
-      .digest('hex');
-
-    const isProduction = process.env.APP_ENV === 'production';
-    if (isProduction && !this.isGatewayConfigured) {
-      throw new BadRequestException(
-        'Production payment gateway secret not configured. Failing closed for security.',
-      );
-    }
-
-    // Constant-time comparison for timing attack defense
-    const timingSafeCompare = (a: string, b: string): boolean => {
-      if (typeof a !== 'string' || typeof b !== 'string') return false;
-      const bufA = Buffer.from(a, 'utf8');
-      const bufB = Buffer.from(b, 'utf8');
-      if (bufA.length !== bufB.length) return false;
-      return crypto.timingSafeEqual(bufA, bufB);
-    };
-
-    const isHmacValid = timingSafeCompare(signature, generatedSignature);
-    const isValid = isProduction
-      ? isHmacValid
-      : isHmacValid || signature === 'sig_abc' || signature.startsWith('test_sig_');
-
-    if (!isValid) {
-      order.paymentStatus = 'FAILED';
-      throw new BadRequestException('Invalid Razorpay signature. Server-side payment verification failed.');
-    }
-
-    order.paymentStatus = 'COMPLETED';
-    order.razorpayOrderId = effectiveRazorpayOrderId;
-    order.razorpayPaymentId = paymentId;
-    order.updatedAt = new Date().toISOString();
-
-    order.history.push({
-      status: order.status,
-      time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      note: `Online payment of ₹${order.grandTotal} verified successfully (Payment ID: ${paymentId})`,
-      actor: 'SYSTEM',
+    const valid = this.razorpayClient.verifyPaymentSignature({
+      razorpayOrderId: effectiveRzpOrderId,
+      paymentId,
+      signature,
     });
 
-    // Record in paymentTransactions for reconciliation & audit
-    store.paymentTransactions = store.paymentTransactions || [];
-    const existingTx = store.paymentTransactions.find((tx: any) => tx.id === paymentId);
-    if (!existingTx) {
-      store.paymentTransactions.push({
-        id: paymentId,
-        orderId: order.id,
-        orderNumber: order.orderNumber,
-        razorpayOrderId: effectiveRazorpayOrderId,
-        amount: order.grandTotal,
-        amountInPaisa: Math.round(order.grandTotal * 100),
-        currency: 'INR',
-        status: 'CAPTURED',
-        method: 'RAZORPAY',
-        createdAt: new Date().toISOString(),
-      });
+    if (!valid) {
+      throw new BadRequestException('Invalid Razorpay payment signature');
     }
 
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.paymentTransaction.upsert({
-          where: { paymentId },
-          create: {
-            paymentId,
-            orderId: order.id,
-            razorpayOrderId: effectiveRazorpayOrderId,
-            amount: order.grandTotal,
-            currency: 'INR',
-            status: 'CAPTURED',
-            method: 'RAZORPAY',
-          },
-          update: {
-            status: 'CAPTURED',
-          },
-        });
-        await this.prisma.order.updateMany({
-          where: { OR: [{ id: order.id }, { orderNumber: order.id }] },
-          data: {
-            paymentStatus: 'COMPLETED',
-            razorpayOrderId: effectiveRazorpayOrderId,
-            razorpayPaymentId: paymentId,
-          },
-        });
-      } catch (err: any) {
-        this.logger.error(`Database paymentTransaction persistence failed: ${err.message}`);
-      }
+    if (target.orders.some((o) => o.status === 'FAILED' || o.status === 'CANCELLED')) {
+      throw new ConflictException('Order has already expired or been cancelled');
     }
+
+    await this.prisma.$transaction(async (tx) => {
+      if (target.group) {
+        await tx.checkoutGroup.update({
+          where: { id: target.group.id },
+          data: { paymentStatus: 'COMPLETED', razorpayPaymentId: paymentId },
+        });
+      }
+
+      await tx.order.updateMany({
+        where: { id: { in: target.orders.map((o) => o.id) } },
+        data: { paymentStatus: 'COMPLETED', razorpayPaymentId: paymentId },
+      });
+
+      const existing = await tx.paymentTransaction.findFirst({
+        where: { paymentId, transactionType: 'CAPTURE' },
+      });
+
+      if (!existing) {
+        await tx.paymentTransaction.create({
+          data: {
+            checkoutGroupId: target.group?.id || null,
+            orderId: target.orders.length === 1 ? target.orders[0].id : null,
+            paymentId,
+            razorpayOrderId: effectiveRzpOrderId,
+            signature,
+            amount: target.grandTotal,
+            currency: 'INR',
+            status: 'COMPLETED',
+            transactionType: 'CAPTURE',
+          },
+        });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          userId: actorId || target.customerId,
+          userRole: actorRole || Role.CUSTOMER,
+          action: 'PAYMENT_VERIFIED',
+          entityType: target.group ? 'CheckoutGroup' : 'Order',
+          entityId: target.group ? target.group.id : target.orders[0].id,
+          details: JSON.stringify({
+            paymentId,
+            razorpayOrderId: effectiveRzpOrderId,
+            amount: target.grandTotal,
+          }),
+        },
+      });
+    });
 
     return {
       verified: true,
-      status: 'PAID',
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      paymentId,
-      amountPaid: order.grandTotal,
+      checkoutGroupId: target.group?.id || null,
+      orderId: target.orders[0]?.id || null,
+      paymentStatus: 'COMPLETED',
+      razorpayOrderId: effectiveRzpOrderId,
+      razorpayPaymentId: paymentId,
     };
   }
 
-  async getPaymentStatus(orderId: string) {
-    if (!orderId) {
-      throw new BadRequestException('orderId is required');
+  async getPaymentStatus(orderOrGroupId: string, actorId?: string, actorRole?: string) {
+    this.ensureDbConnected();
+    const target = await this.resolveCheckoutTarget(orderOrGroupId);
+
+    if (actorRole === Role.CUSTOMER && actorId && target.customerId !== actorId) {
+      throw new ForbiddenException('You do not have permission to view this payment status');
     }
-    const store: any = this.prisma.getStore();
-    const order: any = store.orders.find((o: any) => o.id === orderId || o.orderNumber === orderId);
-    if (!order) {
-      throw new NotFoundException(`Order with ID ${orderId} not found`);
+    if (actorRole === Role.VENDOR && actorId) {
+      const vendor = await this.prisma.vendor.findFirst({ where: { userId: actorId } });
+      if (!vendor || !target.orders.some((o) => o.vendorId === vendor.id)) {
+        throw new ForbiddenException('Order does not belong to your vendor store');
+      }
     }
+    if (actorRole === Role.DRIVER && actorId) {
+      const driver = await this.prisma.driverProfile.findFirst({ where: { userId: actorId } });
+      if (
+        !target.orders.some(
+          (o) =>
+            o.driverId === actorId ||
+            (driver && o.driverProfileId === driver.id),
+        )
+      ) {
+        throw new ForbiddenException('Order is not assigned to your driver account');
+      }
+    }
+
+    const transactions = await this.prisma.paymentTransaction.findMany({
+      where: {
+        OR: [
+          ...(target.group ? [{ checkoutGroupId: target.group.id }] : []),
+          { orderId: { in: target.orders.map((o) => o.id) } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const primaryOrder = target.orders[0] || null;
 
     return {
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      paymentStatus: order.paymentStatus,
-      orderStatus: order.status,
-      paymentMethod: order.paymentMethod,
-      razorpayPaymentId: order.razorpayPaymentId || null,
-      razorpayOrderId: order.razorpayOrderId || null,
-      grandTotal: order.grandTotal,
-      updatedAt: order.updatedAt || order.createdAt,
+      orderId: primaryOrder?.id || null,
+      orderNumber: primaryOrder?.orderNumber || null,
+      orderStatus: primaryOrder?.status || null,
+      checkoutGroupId: target.group?.id || null,
+      paymentMethod: target.paymentMethod,
+      paymentStatus: target.paymentStatus,
+      razorpayOrderId: target.razorpayOrderId,
+      razorpayPaymentId:
+        (target.group as any)?.razorpayPaymentId || primaryOrder?.razorpayPaymentId || null,
+      updatedAt: (
+        target.group?.updatedAt ||
+        primaryOrder?.updatedAt ||
+        new Date()
+      ).toISOString(),
+      grandTotal: Math.round(target.grandTotal),
+      transactions,
     };
   }
 
-  async generateCheckoutHtml(orderId: string): Promise<string> {
-    const store: any = this.prisma.getStore();
-    let order: any = store.orders.find((o) => o.id === orderId || o.orderNumber === orderId);
+  async authenticateCheckoutSessionAccess(
+    orderOrGroupId: string,
+    sessionToken?: string,
+    authHeader?: string,
+  ): Promise<{ actorId: string; actorRole: string }> {
+    this.ensureDbConnected();
 
-    if (!order) {
-      throw new NotFoundException(`Order with ID ${orderId} not found`);
+    if (sessionToken?.trim()) {
+      const payload = verifyCheckoutSessionToken(sessionToken.trim());
+      if (payload.orderId !== orderOrGroupId) {
+        const target = await this.resolveCheckoutTarget(orderOrGroupId);
+        const matchesGroup = target.group?.id === payload.orderId;
+        const matchesOrder = target.orders.some((o) => o.id === payload.orderId);
+        if (target.customerId !== payload.sub || (!matchesGroup && !matchesOrder)) {
+          throw new UnauthorizedException('Checkout session token does not match requested order');
+        }
+      }
+      return { actorId: payload.sub, actorRole: Role.CUSTOMER };
     }
 
-    if (!order.razorpayOrderId) {
-      const rzpRes = await this.createRazorpayOrder(order.grandTotal, order.id);
-      order.razorpayOrderId = rzpRes.razorpayOrderId;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7).trim();
+      if (!token) {
+        throw new UnauthorizedException('Authentication token is missing');
+      }
+      const jwtResult = verifyJwtToken(token);
+      if (jwtResult.valid && jwtResult.payload?.sub) {
+        const user = await this.prisma.user.findUnique({ where: { id: jwtResult.payload.sub } });
+        if (!user || user.status !== 'ACTIVE') {
+          throw new UnauthorizedException('User account is not active');
+        }
+        return { actorId: user.id, actorRole: user.role };
+      }
+
+      if (this.firebaseAdmin) {
+        const decoded = await this.firebaseAdmin.verifyIdToken(token);
+        if (decoded?.uid) {
+          const user = await this.prisma.user.findFirst({
+            where: {
+              OR: [
+                { firebaseUid: decoded.uid },
+                ...(decoded.email ? [{ email: decoded.email.toLowerCase() }] : []),
+              ],
+            },
+          });
+          if (!user || user.status !== 'ACTIVE') {
+            throw new UnauthorizedException('User account is not active');
+          }
+          return { actorId: user.id, actorRole: user.role };
+        }
+      }
+
+      throw new UnauthorizedException('Invalid or expired Bearer token');
     }
 
-    const keyId = this.razorpayKeyId;
-    const amountInPaisa = Math.round(order.grandTotal * 100);
-    const orderNumber = order.orderNumber || order.id;
+    throw new UnauthorizedException('Checkout session token or Bearer authorization is required');
+  }
+
+  async generateCheckoutHtml(
+    orderOrGroupId: string,
+    actorId?: string,
+    actorRole?: string,
+  ): Promise<string> {
+    this.ensureDbConnected();
+    const target = await this.resolveCheckoutTarget(orderOrGroupId);
+    if (actorRole === Role.CUSTOMER && actorId && target.customerId !== actorId) {
+      throw new ForbiddenException('Access denied for this checkout session');
+    }
+
+    let rzpOrderId = target.razorpayOrderId;
+    if (!rzpOrderId && target.paymentMethod === 'RAZORPAY') {
+      const created = await this.createRazorpayOrder(
+        target.grandTotal,
+        orderOrGroupId,
+        actorId,
+        actorRole,
+      );
+      rzpOrderId = created.razorpayOrderId;
+    }
+
+    const customer = await this.prisma.user.findUnique({
+      where: { id: target.customerId },
+      select: { name: true, email: true, phone: true },
+    });
+
+    const esc = (v: string) =>
+      String(v || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+    const canonicalOrderId = target.group?.id || target.orders[0]?.id || orderOrGroupId;
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Affordz Secure Checkout</title>
   <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background-color: #0F172A;
-      color: #F8FAFC;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      padding: 24px 16px;
-    }
-    .card {
-      background: #1E293B;
-      border: 1px solid #334155;
-      border-radius: 24px;
-      padding: 32px 24px;
-      max-width: 420px;
-      width: 100%;
-      text-align: center;
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-    }
-    .logo-badge {
-      display: inline-flex;
-      align-items: center;
-      background: rgba(13, 148, 136, 0.15);
-      border: 1px solid #0D9488;
-      border-radius: 9999px;
-      padding: 6px 14px;
-      margin-bottom: 20px;
-      font-size: 11px;
-      font-weight: 800;
-      color: #2DD4BF;
-      letter-spacing: 1.5px;
-      text-transform: uppercase;
-    }
-    .title {
-      font-size: 22px;
-      font-weight: 800;
-      margin-bottom: 8px;
-    }
-    .subtitle {
-      font-size: 13px;
-      color: #94A3B8;
-      margin-bottom: 24px;
-    }
-    .details {
-      background: #0F172A;
-      border: 1px solid #334155;
-      border-radius: 16px;
-      padding: 18px;
-      margin-bottom: 24px;
-      text-align: left;
-    }
-    .row {
-      display: flex;
-      justify-content: space-between;
-      margin-bottom: 10px;
-      font-size: 13px;
-    }
-    .row:last-child {
-      margin-bottom: 0;
-      border-top: 1px dashed #334155;
-      padding-top: 10px;
-      font-weight: 800;
-    }
-    .label { color: #94A3B8; }
-    .val { color: #F8FAFC; }
-    .amount { color: #2DD4BF; font-size: 18px; }
-    .btn {
-      display: block;
-      width: 100%;
-      padding: 16px;
-      border: none;
-      border-radius: 16px;
-      background: #0D9488;
-      color: #FFFFFF;
-      font-size: 15px;
-      font-weight: 800;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-    .btn:hover { background: #0F766E; }
-    .status-msg {
-      margin-top: 16px;
-      font-size: 13px;
-      color: #94A3B8;
-    }
-    .spinner {
-      display: inline-block;
-      width: 20px;
-      height: 20px;
-      border: 3px solid rgba(255,255,255,0.3);
-      border-radius: 50%;
-      border-top-color: #FFFFFF;
-      animation: spin 1s ease-in-out infinite;
-      vertical-align: middle;
-      margin-right: 8px;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  </style>
 </head>
-<body>
-  <div class="card">
-    <div class="logo-badge">🛡️ Razorpay Secure Gateway</div>
-    <h1 class="title">Complete Payment</h1>
-    <p class="subtitle">Quick and secure online transaction for Affordz</p>
-
-    <div class="details">
-      <div class="row">
-        <span class="label">Order Number</span>
-        <span class="val">#${orderNumber}</span>
-      </div>
-      <div class="row">
-        <span class="label">Gateway Order</span>
-        <span class="val">${order.razorpayOrderId}</span>
-      </div>
-      <div class="row">
-        <span class="label">Total Amount</span>
-        <span class="val amount">₹${order.grandTotal}</span>
-      </div>
-    </div>
-
-    <button id="pay-btn" class="btn" onclick="openRazorpay()">Pay with Razorpay (₹${order.grandTotal})</button>
-    <div id="status" class="status-msg">Click above to open Razorpay payment options</div>
+<body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; background:#F8FAFC;">
+  <div style="text-align:center; padding:32px; background:#fff; border-radius:16px; box-shadow:0 10px 30px rgba(0,0,0,0.08); max-width:360px;">
+    <h2 style="margin:0 0 8px; color:#0F172A;">Affordz Checkout</h2>
+    <p style="margin:0 0 20px; color:#475569;">${esc(target.titleRef)} &middot; &#8377;${Math.round(target.grandTotal)}</p>
+    <button id="pay-btn" style="background:#0F172A; color:#fff; border:none; border-radius:10px; padding:12px 24px; font-weight:600; cursor:pointer; width:100%;">Pay with Razorpay</button>
+    <p id="status-msg" style="margin:14px 0 0; font-size:13px; color:#64748B;"></p>
   </div>
-
   <script>
+    function buildCallbackUrl(status, payload) {
+      var params = [
+        'orderId=' + encodeURIComponent("${esc(canonicalOrderId)}"),
+        'status=' + encodeURIComponent(status)
+      ];
+      if (payload && payload.razorpay_payment_id) {
+        params.push('razorpay_payment_id=' + encodeURIComponent(payload.razorpay_payment_id));
+      }
+      if (payload && payload.razorpay_order_id) {
+        params.push('razorpay_order_id=' + encodeURIComponent(payload.razorpay_order_id));
+      }
+      if (payload && payload.razorpay_signature) {
+        params.push('razorpay_signature=' + encodeURIComponent(payload.razorpay_signature));
+      }
+      return 'affordz://payment-callback?' + params.join('&');
+    }
     const options = {
-      key: "${keyId}",
-      amount: ${amountInPaisa},
+      key: "${esc(this.razorpayClient.keyId)}",
+      amount: ${Math.round(target.grandTotal * 100)},
       currency: "INR",
-      name: "Affordz Quick Commerce",
-      description: "Payment for Order #${orderNumber}",
-      order_id: "${order.razorpayOrderId}",
+      name: "Affordz",
+      description: "Order ${esc(target.titleRef)}",
+      order_id: "${esc(rzpOrderId || '')}",
       prefill: {
-        name: "Affordz Customer",
-        email: "customer@affordz.in",
-        contact: "+91 98450 12890"
+        name: "${esc(customer?.name || '')}",
+        email: "${esc(customer?.email || '')}",
+        contact: "${esc(customer?.phone || '')}"
       },
-      theme: {
-        color: "#0D9488"
-      },
-      handler: async function (response) {
-        document.getElementById('status').innerHTML = '<span class="spinner"></span> Verifying signature with Affordz server...';
-        document.getElementById('pay-btn').style.display = 'none';
-
-        try {
-          const verifyRes = await fetch('/api/v1/payments/razorpay/verify', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              orderId: "${order.id}",
-              paymentId: response.razorpay_payment_id,
-              signature: response.razorpay_signature,
-              razorpayOrderId: response.razorpay_order_id
-            })
-          });
-
-          const data = await verifyRes.json();
-          if (verifyRes.ok && data.verified) {
-            document.getElementById('status').innerHTML = '<span style="color:#22C55E;font-weight:bold;">✅ Payment Verified Successfully!</span><br><br>Returning to app...';
-            setTimeout(() => {
-              window.location.href = 'affordz://payment-callback?orderId=' + encodeURIComponent("${order.id}");
-            }, 1000);
-          } else {
-            throw new Error(data.message || 'Signature verification failed');
-          }
-        } catch (err) {
-          document.getElementById('status').innerHTML = '<span style="color:#EF4444;font-weight:bold;">❌ ' + err.message + '</span>';
-          document.getElementById('pay-btn').style.display = 'block';
-          document.getElementById('pay-btn').innerText = 'Retry Payment';
+      handler: function (response) {
+        if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'RAZORPAY_SUCCESS', payload: response }));
+          return;
         }
+        document.getElementById('status-msg').textContent = 'Returning to Affordz...';
+        window.location.href = buildCallbackUrl('success', response);
       },
       modal: {
-        ondismiss: function() {
-          document.getElementById('status').innerText = 'Payment was cancelled. You can click above to retry.';
-          window.location.href = 'affordz://payment-callback?orderId=' + encodeURIComponent("${order.id}") + '&status=CANCELLED';
+        ondismiss: function () {
+          if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'RAZORPAY_DISMISSED' }));
+            return;
+          }
+          document.getElementById('status-msg').textContent = 'Payment dismissed. Returning to Affordz...';
+          window.location.href = buildCallbackUrl('dismissed', null);
         }
       }
     };
-
-    function openRazorpay() {
-      if (typeof Razorpay === 'undefined') {
-        alert('Razorpay script is loading, please try again in a moment.');
-        return;
-      }
+    document.getElementById('pay-btn').onclick = function () {
       const rzp = new Razorpay(options);
-      rzp.on('payment.failed', function (response) {
-        document.getElementById('status').innerHTML = '<span style="color:#EF4444;">Payment failed: ' + (response.error.description || 'Unknown error') + '</span>';
-      });
       rzp.open();
-    }
-
-    // Auto-launch checkout after short delay
-    window.addEventListener('DOMContentLoaded', () => {
-      setTimeout(() => {
-        try { openRazorpay(); } catch(e) {}
-      }, 500);
-    });
+    };
   </script>
 </body>
 </html>`;
   }
 
-  async confirmCod(orderId: string) {
-    const store: any = this.prisma.getStore();
-    const order = store.orders.find((o) => o.id === orderId || o.orderNumber === orderId);
+  async confirmCod(orderId: string, actorId?: string, actorRole?: string) {
+    this.ensureDbConnected();
+    const cleanId = orderId.trim().replace(/^#/, '');
+
+    const order = await this.prisma.order.findFirst({
+      where: { OR: [{ id: orderId }, { id: cleanId }, { orderNumber: cleanId }] },
+    });
 
     if (!order) {
-      throw new NotFoundException(`Order with ID ${orderId} not found`);
+      throw new NotFoundException(`Order '${orderId}' not found`);
     }
 
-    order.paymentMethod = 'COD';
-    order.paymentStatus = 'PENDING';
-    order.updatedAt = new Date().toISOString();
+    if (actorRole === Role.DRIVER) {
+      const driver = actorId
+        ? await this.prisma.driverProfile.findFirst({ where: { userId: actorId } })
+        : null;
+      const ownsOrder =
+        order.driverId === actorId || (driver && order.driverProfileId === driver.id);
+      if (!ownsOrder) {
+        throw new ForbiddenException('Order is not assigned to your driver account');
+      }
+    }
 
-    order.history.push({
-      status: order.status,
-      time: new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }),
-      note: `Cash on Delivery selected. Collect ₹${order.grandTotal} on delivery.`,
-      actor: 'CUSTOMER',
+    if (order.paymentMethod !== 'COD') {
+      throw new BadRequestException('Order payment method is not COD');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id: order.id },
+        data: { paymentStatus: 'COMPLETED' },
+      });
+
+      const codPayId = `cod_${order.id}`;
+      const existing = await tx.paymentTransaction.findFirst({
+        where: { paymentId: codPayId, transactionType: 'CAPTURE' },
+      });
+
+      if (!existing) {
+        await tx.paymentTransaction.create({
+          data: {
+            orderId: order.id,
+            checkoutGroupId: order.checkoutGroupId,
+            paymentId: codPayId,
+            amount: order.grandTotal,
+            currency: 'INR',
+            status: 'COMPLETED',
+            method: 'COD',
+            transactionType: 'CAPTURE',
+          },
+        });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          userId: actorId || null,
+          userRole: actorRole || Role.DRIVER,
+          action: 'COD_PAYMENT_CONFIRMED',
+          entityType: 'Order',
+          entityId: order.id,
+          details: JSON.stringify({ amount: order.grandTotal }),
+        },
+      });
     });
 
     return {
-      confirmed: true,
-      paymentMethod: 'COD',
+      success: true,
       orderId: order.id,
-      orderNumber: order.orderNumber,
-      amountToCollect: order.grandTotal,
+      paymentMethod: 'COD',
+      paymentStatus: 'COMPLETED',
     };
   }
 }

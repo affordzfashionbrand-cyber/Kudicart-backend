@@ -11,12 +11,16 @@ import {
 import { DriverShiftsService } from './driver-shifts.service';
 import { BookSlotDto, CancelSlotDto } from './dto/slot-booking.dto';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { Role } from '../../common/enums/role.enum';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 import { RateLimit } from '../../common/decorators/rate-limit.decorator';
 import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
 
 @Controller('api/v1/driver/shifts')
-@UseGuards(FirebaseAuthGuard, RateLimitGuard)
+@UseGuards(FirebaseAuthGuard, RolesGuard, RateLimitGuard)
+@Roles(Role.DRIVER)
 export class DriverShiftsController {
   constructor(private readonly shiftsService: DriverShiftsService) {}
 

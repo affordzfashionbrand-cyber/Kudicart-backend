@@ -16,12 +16,16 @@ import { DocumentUploadDto } from './dto/document-upload.dto';
 import { UpdateDriverStatusDto } from './dto/update-driver-status.dto';
 import { UpdateLocationDto } from './dto/update-location.dto';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { Role } from '../../common/enums/role.enum';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 import { RateLimit } from '../../common/decorators/rate-limit.decorator';
 import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
 
 @Controller('api/v1/driver/profile')
-@UseGuards(FirebaseAuthGuard, RateLimitGuard)
+@UseGuards(FirebaseAuthGuard, RolesGuard, RateLimitGuard)
+@Roles(Role.DRIVER)
 export class DriverProfileController {
   constructor(private readonly profileService: DriverProfileService) {}
 

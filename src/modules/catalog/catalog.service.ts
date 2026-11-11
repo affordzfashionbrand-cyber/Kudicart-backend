@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { GetProductsDto } from './dto/get-products.dto';
 import { SearchSuggestionsDto } from './dto/search-suggestions.dto';
@@ -19,15 +23,154 @@ export interface SearchSuggestionsResponse {
   recentPicks: any[];
 }
 
+const ID_ALIASES: Record<string, string> = {
+  '101': 'prod-2',
+  'prod-101': 'prod-2',
+  '102': 'prod-1',
+  'prod-102': 'prod-1',
+  '103': 'prod-3',
+  'prod-103': 'prod-3',
+  '104': 'prod-5',
+  'prod-104': 'prod-5',
+  '105': 'prod-6',
+  'prod-105': 'prod-6',
+  '106': 'prod-4',
+  'prod-106': 'prod-4',
+  '107': 'prod-10',
+  'prod-107': 'prod-10',
+  '108': 'prod-7',
+  'prod-108': 'prod-7',
+  '1': 'prod-1',
+  'prod-1': 'prod-1',
+  '2': 'prod-5',
+  'prod-2': 'prod-5',
+  '3': 'prod-9',
+  'prod-3': 'prod-3',
+  '4': 'prod-6',
+  'prod-4': 'prod-4',
+  '9': 'prod-4',
+  'prod-9': 'prod-9',
+};
+
 @Injectable()
 export class CatalogService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
+
+  private ensureDbConnected() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
+    }
+  }
+
+  private computeCategoryCounts(
+    categories: any[],
+    directProductCounts: Map<string, number>,
+  ): Map<string, number> {
+    const childrenMap = new Map<string, string[]>();
+    for (const c of categories) {
+      if (c.parentId) {
+        const list = childrenMap.get(c.parentId) || [];
+        list.push(c.id);
+        childrenMap.set(c.parentId, list);
+      }
+    }
+
+    const memo = new Map<string, number>();
+    const countWithDescendants = (id: string, visited = new Set<string>()): number => {
+      if (memo.has(id)) return memo.get(id)!;
+      if (visited.has(id)) return 0;
+      visited.add(id);
+
+      let total = directProductCounts.get(id) || 0;
+      for (const childId of childrenMap.get(id) || []) {
+        total += countWithDescendants(childId, visited);
+      }
+      memo.set(id, total);
+      return total;
+    };
+
+    for (const c of categories) {
+      countWithDescendants(c.id);
+    }
+
+    return memo;
+  }
+
+  private async loadCategoryStats() {
+    const [categories, groupedCounts] = await Promise.all([
+      this.prisma.category.findMany({
+        where: { isActive: true },
+        orderBy: [{ level: 'asc' }, { displayOrder: 'asc' }, { name: 'asc' }],
+      }),
+      this.prisma.product.groupBy({
+        by: ['categoryId'],
+        where: { listingStatus: 'ACTIVE' },
+        _count: { _all: true },
+      }),
+    ]);
+
+    const directCounts = new Map<string, number>();
+    for (const row of groupedCounts) {
+      directCounts.set(row.categoryId, row._count._all);
+    }
+
+    const totalCounts = this.computeCategoryCounts(categories, directCounts);
+    return { categories, totalCounts };
+  }
+
+  private formatCategoryNode(cat: any, totalCounts: Map<string, number>, children: any[] = []) {
+    const productCount = totalCounts.get(cat.id) || 0;
+    return {
+      id: cat.id,
+      code: cat.code,
+      name: cat.name,
+      slug: cat.slug,
+      description: cat.description,
+      level: cat.level,
+      parentId: cat.parentId,
+      icon: cat.icon,
+      image: cat.image,
+      banner: cat.banner,
+      gender: cat.gender,
+      displayOrder: cat.displayOrder,
+      isActive: cat.isActive,
+      isPopular: cat.isPopular,
+      productCount,
+      countText: productCount > 0 ? `${productCount} styles` : cat.countText || '0 styles',
+      children,
+    };
+  }
+
+  private collectDescendantIds(categories: any[], rootId: string): Set<string> {
+    const result = new Set<string>([rootId]);
+    const queue = [rootId];
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const cat of categories) {
+        if (cat.parentId === current && !result.has(cat.id)) {
+          result.add(cat.id);
+          queue.push(cat.id);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  private matchesGender(catGender: string | null | undefined, requestedGender?: string): boolean {
+    if (!requestedGender) return true;
+    if (!catGender) return true;
+    const req = requestedGender.trim().toLowerCase();
+    const val = catGender.trim().toLowerCase();
+    return val === req || val === 'unisex';
+  }
 
   /**
    * Returns categories. Supports:
    * - tree: true (returns full L1 -> L2 -> L3 hierarchy)
    * - parentId (returns direct children)
-   * - level (returns categories at that level, e.g. 1 for main departments)
+   * - level (returns categories at that level)
    * - gender ('Women' | 'Men' | 'Kids' | 'Unisex')
    */
   async getCategories(options?: {
@@ -36,326 +179,224 @@ export class CatalogService {
     level?: number;
     gender?: string;
   }) {
-    const store = this.prisma.getStore();
-    const allCategories = store.categories || [];
-    const allProducts = store.products || [];
-
-    const countStylesForCategory = (cat: any): number => {
-      const descendantIds = new Set<string>([
-        cat.id.toLowerCase(),
-        cat.slug.toLowerCase(),
-        cat.name.toLowerCase(),
-      ]);
-
-      const collectDescendants = (parentId: string) => {
-        allCategories
-          .filter((c: any) => c.parentId === parentId)
-          .forEach((child: any) => {
-            descendantIds.add(child.id.toLowerCase());
-            descendantIds.add(child.slug.toLowerCase());
-            descendantIds.add(child.name.toLowerCase());
-            collectDescendants(child.id);
-          });
-      };
-      collectDescendants(cat.id);
-
-      return allProducts.filter((p: any) => {
-        const pCat = (p.category || '').toLowerCase();
-        const pCatId = (p.categoryId || '').toLowerCase();
-        const pGender = (p.gender || '').toLowerCase();
-        return descendantIds.has(pCat) || descendantIds.has(pCatId) || (cat.level === 1 && cat.name.toLowerCase() === pGender);
-      }).length;
-    };
+    this.ensureDbConnected();
 
     if (options?.tree) {
       return this.getCategoryHierarchy(options?.gender);
     }
 
-    let filtered = [...allCategories];
+    const { categories, totalCounts } = await this.loadCategoryStats();
 
-    if (options?.parentId !== undefined) {
-      filtered = filtered.filter((c: any) => c.parentId === options.parentId);
-    } else if (options?.level !== undefined) {
-      filtered = filtered.filter((c: any) => c.level === options.level);
-    }
-
-    if (options?.gender && options.gender.toLowerCase() !== 'all') {
-      const g = options.gender.toLowerCase();
-      filtered = filtered.filter(
-        (c: any) =>
-          !c.gender ||
-          c.gender.toLowerCase() === g ||
-          c.gender.toLowerCase() === 'unisex',
-      );
-    }
-
-    filtered.sort((a: any, b: any) => (a.displayOrder || 0) - (b.displayOrder || 0));
-
-    return filtered.map((c: any) => {
-      const styles = countStylesForCategory(c);
-      return {
-        ...c,
-        productCount: styles,
-        countText: styles > 0 ? `${styles} styles` : c.countText || 'Explore styles',
-      };
-    });
+    return categories
+      .filter((c) => {
+        if (options?.parentId && c.parentId !== options.parentId) return false;
+        if (options?.level !== undefined && c.level !== options.level) return false;
+        if (!this.matchesGender(c.gender, options?.gender)) return false;
+        return true;
+      })
+      .map((c) => this.formatCategoryNode(c, totalCounts));
   }
 
-  /**
-   * Full 3-Tier Hierarchy:
-   * Level 1 (Departments: Women, Men, Kids, Footwear, Beauty, Accessories)
-   * -> Level 2 (Sub-Categories: Indian & Fusion Wear, Western Wear, Footwear, etc.)
-   *   -> Level 3 (Sub-Sub-Categories: Kurtas, Sarees, Dresses, T-Shirts, Sneakers, etc.)
-   */
   async getCategoryHierarchy(gender?: string) {
-    const store = this.prisma.getStore();
-    const allCategories = store.categories || [];
-    const allProducts = store.products || [];
+    this.ensureDbConnected();
+    const { categories, totalCounts } = await this.loadCategoryStats();
 
-    const countStyles = (cat: any): number => {
-      const ids = new Set<string>([
-        cat.id.toLowerCase(),
-        cat.slug.toLowerCase(),
-        cat.name.toLowerCase(),
-      ]);
-      const addChildren = (pid: string) => {
-        allCategories
-          .filter((c: any) => c.parentId === pid)
-          .forEach((child: any) => {
-            ids.add(child.id.toLowerCase());
-            ids.add(child.slug.toLowerCase());
-            ids.add(child.name.toLowerCase());
-            addChildren(child.id);
-          });
-      };
-      addChildren(cat.id);
+    const filtered = categories.filter((c) => this.matchesGender(c.gender, gender));
+    const byParent = new Map<string, any[]>();
 
-      return allProducts.filter((p: any) => {
-        const pCat = (p.category || '').toLowerCase();
-        const pCatId = (p.categoryId || '').toLowerCase();
-        const pGender = (p.gender || '').toLowerCase();
-        return ids.has(pCat) || ids.has(pCatId) || (cat.level === 1 && cat.name.toLowerCase() === pGender);
-      }).length;
-    };
-
-    let l1 = allCategories.filter((c: any) => c.level === 1);
-    if (gender && gender.toLowerCase() !== 'all') {
-      const g = gender.toLowerCase();
-      l1 = l1.filter(
-        (c: any) =>
-          !c.gender ||
-          c.gender.toLowerCase() === g ||
-          c.gender.toLowerCase() === 'unisex',
-      );
+    for (const c of filtered) {
+      const parentKey = c.parentId || '__ROOT__';
+      const arr = byParent.get(parentKey) || [];
+      arr.push(c);
+      byParent.set(parentKey, arr);
     }
 
-    l1.sort((a: any, b: any) => (a.displayOrder || 0) - (b.displayOrder || 0));
+    const buildTree = (parentId: string, visited = new Set<string>()): any[] => {
+      const children = byParent.get(parentId) || [];
+      return children.map((node) => {
+        if (visited.has(node.id)) {
+          return this.formatCategoryNode(node, totalCounts, []);
+        }
+        const nextVisited = new Set(visited);
+        nextVisited.add(node.id);
+        return this.formatCategoryNode(node, totalCounts, buildTree(node.id, nextVisited));
+      });
+    };
 
-    return l1.map((catL1: any) => {
-      const l1Count = countStyles(catL1);
-      const l2 = allCategories
-        .filter((c: any) => c.parentId === catL1.id)
-        .sort((a: any, b: any) => (a.displayOrder || 0) - (b.displayOrder || 0))
-        .map((catL2: any) => {
-          const l2Count = countStyles(catL2);
-          const l3 = allCategories
-            .filter((c: any) => c.parentId === catL2.id)
-            .sort((a: any, b: any) => (a.displayOrder || 0) - (b.displayOrder || 0))
-            .map((catL3: any) => {
-              const l3Count = countStyles(catL3);
-              return {
-                ...catL3,
-                productCount: l3Count,
-                countText: l3Count > 0 ? `${l3Count} styles` : catL3.countText,
-              };
-            });
-
-          return {
-            ...catL2,
-            productCount: l2Count,
-            countText: l2Count > 0 ? `${l2Count} styles` : catL2.countText,
-            subcategories: l3,
-            children: l3,
-          };
-        });
-
-      return {
-        ...catL1,
-        productCount: l1Count,
-        countText: l1Count > 0 ? `${l1Count} styles` : catL1.countText,
-        subcategories: l2,
-        children: l2,
-      };
-    });
+    return buildTree('__ROOT__');
   }
 
   async getCategoryById(id: string) {
-    const store = this.prisma.getStore();
-    const cat = store.categories.find(
-      (c: any) => c.id.toLowerCase() === id.toLowerCase() || c.slug.toLowerCase() === id.toLowerCase(),
+    this.ensureDbConnected();
+    const { categories, totalCounts } = await this.loadCategoryStats();
+
+    const target = categories.find(
+      (c) => c.id === id || c.code === id || c.slug === id,
     );
-    if (!cat) throw new NotFoundException(`Category ${id} not found`);
-    const children = store.categories.filter((c: any) => c.parentId === cat.id);
-    return {
-      ...cat,
-      children,
-      subcategories: children,
-    };
+
+    if (!target) {
+      throw new NotFoundException(`Category '${id}' not found.`);
+    }
+
+    const children = categories
+      .filter((c) => c.parentId === target.id)
+      .map((child) => this.formatCategoryNode(child, totalCounts));
+
+    return this.formatCategoryNode(target, totalCounts, children);
   }
 
   async getSubcategories(parentId: string) {
-    const store = this.prisma.getStore();
-    const subcats = store.categories.filter(
-      (c: any) => c.parentId && c.parentId.toLowerCase() === parentId.toLowerCase(),
+    this.ensureDbConnected();
+    const { categories, totalCounts } = await this.loadCategoryStats();
+
+    const resolvedParent = categories.find(
+      (c) => c.id === parentId || c.code === parentId || c.slug === parentId,
     );
-    return subcats.map((sc: any) => {
-      const leaves = store.categories.filter((leaf: any) => leaf.parentId === sc.id);
-      return {
-        ...sc,
-        children: leaves,
-        subcategories: leaves,
-      };
-    });
+    const lookupParentId = resolvedParent ? resolvedParent.id : parentId;
+
+    return categories
+      .filter((c) => c.parentId === lookupParentId)
+      .map((c) => this.formatCategoryNode(c, totalCounts));
   }
 
   async getDarkStores() {
-    if (this.prisma.isConnectedToDb) {
-      try {
-        const hubs = await this.prisma.darkStoreHub.findMany({ where: { isActive: true } });
-        if (hubs && hubs.length > 0) return hubs;
-      } catch (err: any) {
-        // Safe fallback
-      }
-    }
-    return this.prisma.getStore().darkStores;
+    this.ensureDbConnected();
+    return this.prisma.darkStoreHub.findMany({
+      where: { isActive: true },
+      orderBy: [{ deliveryMinutes: 'asc' }, { name: 'asc' }],
+    });
   }
 
   async getActiveCoupons() {
-    if (this.prisma.isConnectedToDb) {
-      try {
-        const coupons = await this.prisma.coupon.findMany({ where: { isActive: true } });
-        if (coupons && coupons.length > 0) return coupons;
-      } catch (err: any) {
-        // Safe fallback
-      }
-    }
-    return this.prisma.getStore().coupons.filter((c) => c.isActive);
+    this.ensureDbConnected();
+    const now = new Date();
+    return this.prisma.coupon.findMany({
+      where: {
+        isActive: true,
+        endDate: { gte: now },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
-  /**
-   * Search Suggestions Engine:
-   * Provides real-time keyword autocompletions, matching categories, matching brands,
-   * trending queries, and instant preview products.
-   */
   async getSearchSuggestions(dto?: SearchSuggestionsDto): Promise<SearchSuggestionsResponse> {
+    this.ensureDbConnected();
+
     const rawQuery = (dto?.q || '').trim();
     const query = rawQuery.toLowerCase();
-    const limit = Math.min(20, Math.max(1, Number(dto?.limit) || 8));
-    const allProducts = this.prisma.getStore().products;
-    const allCategories = this.prisma.getStore().categories;
+    const limit = Math.min(Math.max(Number(dto?.limit || 8), 1), 20);
 
+    const [allProductsRaw, allCategories] = await Promise.all([
+      this.prisma.product.findMany({
+        where: { listingStatus: 'ACTIVE' },
+        include: {
+          category: true,
+          vendor: true,
+          darkStoreHub: true,
+        },
+      }),
+      this.prisma.category.findMany({
+        where: { isActive: true },
+        orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
+      }),
+    ]);
+
+    const allProducts = allProductsRaw.map((p) => this.mapProductWithHub(p));
     const trending = [
-      'Handloom Silk Sarees',
-      'Embroidered Anarkali Sets',
-      'Chanderi Silk Tunics',
-      'Tiered Floral Maxi Dresses',
-      'Structured Linen Shirts',
-      'Raw Selvedge Denim',
-      'Court Leather Sneakers',
-      'Minimal Leather Totes',
+      'Mulberry Silk',
+      'Banarasi',
+      'Kurta Set',
+      'Try & Buy',
+      'Bandhgala',
+      'Express Pod',
     ];
 
-    // If query is empty, return trending keywords, top categories, top brands & instant picks
     if (!query) {
-      const popularCategories = allCategories.slice(0, 5).map((c) => {
+      const popularCats = allCategories
+        .filter((c) => c.isPopular || c.level === 1)
+        .slice(0, 6)
+        .map((c) => ({
+          id: c.id,
+          name: c.name,
+          count: allProducts.filter(
+            (p) =>
+              p.category.toLowerCase() === c.name.toLowerCase() ||
+              p.categoryId.toLowerCase() === c.id.toLowerCase(),
+          ).length,
+        }));
+
+      const brandCounts = new Map<string, number>();
+      for (const p of allProducts) {
+        brandCounts.set(p.brand, (brandCounts.get(p.brand) || 0) + 1);
+      }
+
+      const brands = Array.from(brandCounts.entries())
+        .map(([name, count]) => ({ name, count }))
+        .slice(0, 6);
+
+      return {
+        query: '',
+        suggestions: trending.map((text) => ({ text, type: 'keyword' as const })),
+        categories: popularCats,
+        brands,
+        trending,
+        recentPicks: allProducts.slice(0, 4),
+      };
+    }
+
+    const tokens = query.split(/\s+/).filter(Boolean);
+    const suggestionMap = new Map<
+      string,
+      { type: 'keyword' | 'category' | 'brand'; count: number }
+    >();
+
+    for (const c of allCategories) {
+      if (
+        c.name.toLowerCase().includes(query) ||
+        tokens.some((t) => c.name.toLowerCase().includes(t))
+      ) {
         const count = allProducts.filter(
           (p) =>
             p.category.toLowerCase() === c.name.toLowerCase() ||
             p.categoryId.toLowerCase() === c.id.toLowerCase(),
         ).length;
-        return { id: c.id, name: c.name, count };
-      });
-
-      const brandCounts: Record<string, number> = {};
-      allProducts.forEach((p) => {
-        brandCounts[p.brand] = (brandCounts[p.brand] || 0) + 1;
-      });
-
-      const topBrands = Object.entries(brandCounts)
-        .map(([name, count]) => ({ name, count }))
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 5);
-
-      const recentPicks = allProducts
-        .filter((p) => p.rating >= 4.8)
-        .slice(0, 4)
-        .map((p) => this.mapProductWithHub(p));
-
-      return {
-        query: '',
-        suggestions: trending.slice(0, limit).map((text) => ({ text, type: 'keyword' })),
-        categories: popularCategories,
-        brands: topBrands,
-        trending,
-        recentPicks,
-      };
+        suggestionMap.set(c.name, { type: 'category', count });
+      }
     }
 
-    const tokens = query.split(/\s+/).filter(Boolean);
-
-    // 1. Gather Keyword Suggestions from Titles, Tags, Fabrics
-    const suggestionMap = new Map<string, { type: 'keyword' | 'category' | 'brand'; count: number }>();
-
-    // Check Categories
-    allCategories.forEach((cat) => {
-      const catNameLower = cat.name.toLowerCase();
-      if (catNameLower.includes(query) || tokens.some((t) => catNameLower.includes(t))) {
-        const count = allProducts.filter(
-          (p) =>
-            p.category.toLowerCase() === cat.name.toLowerCase() ||
-            p.categoryId.toLowerCase() === cat.id.toLowerCase(),
-        ).length;
-        suggestionMap.set(cat.name, { type: 'category', count });
-      }
-    });
-
-    // Check Brands
     const brandSeen = new Set<string>();
-    allProducts.forEach((p) => {
-      const brandLower = p.brand.toLowerCase();
-      if (brandLower.includes(query) || tokens.some((t) => brandLower.includes(t))) {
+    for (const p of allProducts) {
+      if (
+        p.brand.toLowerCase().includes(query) ||
+        tokens.some((t) => p.brand.toLowerCase().includes(t))
+      ) {
         if (!brandSeen.has(p.brand)) {
           brandSeen.add(p.brand);
           const count = allProducts.filter((prod) => prod.brand === p.brand).length;
           suggestionMap.set(p.brand, { type: 'brand', count });
         }
       }
-    });
 
-    // Check Titles and Tags for completions
-    allProducts.forEach((p) => {
       const titleLower = p.title.toLowerCase();
       if (titleLower.includes(query) || tokens.every((t) => titleLower.includes(t))) {
         suggestionMap.set(p.title, { type: 'keyword', count: 1 });
       }
 
-      if (p.tags && Array.isArray(p.tags)) {
-        p.tags.forEach((tag: string) => {
-          if (tag.toLowerCase().includes(query)) {
-            const capitalTag = tag.charAt(0).toUpperCase() + tag.slice(1);
+      if (Array.isArray(p.tags)) {
+        for (const tag of p.tags) {
+          if (String(tag).toLowerCase().includes(query)) {
+            const capitalTag = String(tag).charAt(0).toUpperCase() + String(tag).slice(1);
             if (!suggestionMap.has(capitalTag)) {
               suggestionMap.set(capitalTag, { type: 'keyword', count: 1 });
             }
           }
-        });
-      }
-
-      if (p.fabric && p.fabric.toLowerCase().includes(query)) {
-        if (!suggestionMap.has(p.fabric)) {
-          suggestionMap.set(p.fabric, { type: 'keyword', count: 1 });
         }
       }
-    });
+
+      if (p.fabric && p.fabric.toLowerCase().includes(query) && !suggestionMap.has(p.fabric)) {
+        suggestionMap.set(p.fabric, { type: 'keyword', count: 1 });
+      }
+    }
 
     const suggestions: SearchSuggestionItem[] = Array.from(suggestionMap.entries())
       .map(([text, meta]) => ({
@@ -366,9 +407,12 @@ export class CatalogService {
       }))
       .slice(0, limit);
 
-    // Matching Categories with counts
     const matchingCategories = allCategories
-      .filter((c) => c.name.toLowerCase().includes(query) || tokens.some((t) => c.name.toLowerCase().includes(t)))
+      .filter(
+        (c) =>
+          c.name.toLowerCase().includes(query) ||
+          tokens.some((t) => c.name.toLowerCase().includes(t)),
+      )
       .map((c) => ({
         id: c.id,
         name: c.name,
@@ -379,13 +423,11 @@ export class CatalogService {
         ).length,
       }));
 
-    // Matching Brands with counts
     const matchingBrands = Array.from(brandSeen).map((brand) => ({
       name: brand,
       count: allProducts.filter((p) => p.brand === brand).length,
     }));
 
-    // Instant Product Picks: top matching products
     const instantProducts = await this.searchProducts({ search: rawQuery, limit: 4 });
 
     return {
@@ -400,170 +442,184 @@ export class CatalogService {
 
   /**
    * Search Products Engine:
-   * Multi-token relevance scoring, token matching across title, brand, category,
-   * fabric, origin, description, tags. Supports comprehensive filters and sorting.
+   * Multi-token relevance scoring across title, brand, category, fabric, origin,
+   * description, and tags with filtering and sorting backed by PostgreSQL.
    */
   async searchProducts(query?: GetProductsDto) {
-    let products = [...this.prisma.getStore().products];
+    this.ensureDbConnected();
+
+    const [rawProducts, allCategories] = await Promise.all([
+      this.prisma.product.findMany({
+        where: { listingStatus: 'ACTIVE' },
+        include: {
+          category: true,
+          vendor: true,
+          darkStoreHub: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.category.findMany({
+        where: { isActive: true },
+      }),
+    ]);
+
+    let products = rawProducts.map((p) => this.mapProductWithHub(p));
     const searchTerm = (query?.search || '').trim();
 
-    // 1. Keyword & Multi-token Relevance Scoring
     if (searchTerm) {
-      const q = searchTerm.toLowerCase();
-      const tokens = q.split(/\s+/).filter(Boolean);
+      const tokens = searchTerm
+        .toLowerCase()
+        .split(/\s+/)
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const fullQuery = searchTerm.toLowerCase();
 
-      const scoredProducts = products
-        .map((p: any) => {
-          let score = 0;
-          const title = (p.title || '').toLowerCase();
-          const brand = (p.brand || '').toLowerCase();
-          const category = (p.category || '').toLowerCase();
-          const categoryId = (p.categoryId || '').toLowerCase();
-          const fabric = (p.fabric || '').toLowerCase();
-          const origin = (p.origin || '').toLowerCase();
-          const desc = (p.description || '').toLowerCase();
-          const tags: string[] = Array.isArray(p.tags) ? p.tags.map((t: string) => t.toLowerCase()) : [];
+      const scored: Array<{ product: any; score: number }> = [];
+      for (const p of products) {
+        const title = (p.title || '').toLowerCase();
+        const brand = (p.brand || '').toLowerCase();
+        const category = (p.category || '').toLowerCase();
+        const fabric = (p.fabric || '').toLowerCase();
+        const origin = (p.origin || '').toLowerCase();
+        const description = (p.description || '').toLowerCase();
+        const tags = Array.isArray(p.tags) ? p.tags.join(' ').toLowerCase() : '';
+        const gender = (p.gender || '').toLowerCase();
 
-          // Exact phrase matches
-          if (title === q) score += 120;
-          else if (title.startsWith(q)) score += 70;
-          else if (title.includes(q)) score += 45;
+        let score = 0;
+        if (title.includes(fullQuery)) score += 30;
+        if (brand.includes(fullQuery)) score += 20;
+        if (category.includes(fullQuery)) score += 18;
+        if (tags.includes(fullQuery)) score += 16;
+        if (fabric.includes(fullQuery)) score += 12;
 
-          if (brand === q) score += 100;
-          else if (brand.includes(q)) score += 40;
-
-          if (category === q || categoryId === q) score += 60;
-          else if (category.includes(q)) score += 30;
-
-          if (fabric.includes(q)) score += 30;
-          if (origin.includes(q)) score += 20;
-          if (desc.includes(q)) score += 15;
-
-          if (tags.some((t) => t === q)) score += 50;
-          else if (tags.some((t) => t.includes(q))) score += 25;
-
-          // Multi-token evaluation
-          let matchedTokensCount = 0;
-          tokens.forEach((token) => {
-            let tokenMatched = false;
-            if (title.includes(token)) {
-              score += 25;
-              tokenMatched = true;
-            }
-            if (brand.includes(token)) {
-              score += 20;
-              tokenMatched = true;
-            }
-            if (category.includes(token) || categoryId.includes(token)) {
-              score += 20;
-              tokenMatched = true;
-            }
-            if (tags.some((t) => t.includes(token))) {
-              score += 15;
-              tokenMatched = true;
-            }
-            if (fabric.includes(token)) {
-              score += 10;
-              tokenMatched = true;
-            }
-            if (desc.includes(token)) {
-              score += 5;
-              tokenMatched = true;
-            }
-            if (tokenMatched) matchedTokensCount++;
-          });
-
-          // All tokens matched bonus
-          if (tokens.length > 1 && matchedTokensCount === tokens.length) {
-            score += 50;
+        let matchedTokenCount = 0;
+        for (const token of tokens) {
+          let tokenMatched = false;
+          if (title.includes(token)) {
+            score += 10;
+            tokenMatched = true;
           }
+          if (brand.includes(token)) {
+            score += 8;
+            tokenMatched = true;
+          }
+          if (category.includes(token)) {
+            score += 8;
+            tokenMatched = true;
+          }
+          if (tags.includes(token)) {
+            score += 7;
+            tokenMatched = true;
+          }
+          if (fabric.includes(token)) {
+            score += 6;
+            tokenMatched = true;
+          }
+          if (origin.includes(token)) {
+            score += 4;
+            tokenMatched = true;
+          }
+          if (gender === token) {
+            score += 5;
+            tokenMatched = true;
+          }
+          if (description.includes(token)) {
+            score += 2;
+            tokenMatched = true;
+          }
+          if (tokenMatched) {
+            matchedTokenCount += 1;
+          }
+        }
 
-          return { product: p, score };
-        })
-        .filter((item) => item.score > 0);
+        if (tokens.length > 1 && matchedTokenCount === tokens.length) {
+          score += 25;
+        }
 
-      // Sort by score descending unless explicit sort is specified
-      if (!query?.sortBy && !query?.sort) {
-        scoredProducts.sort((a, b) => b.score - a.score);
+        const singleFuzzy =
+          tokens.length === 1 &&
+          matchedTokenCount === 0 &&
+          [title, brand, category, tags, fabric].some((field) =>
+            field.split(/\s+/).some((word) => word.startsWith(tokens[0].slice(0, 3))),
+          );
+        if (singleFuzzy && tokens[0].length >= 3) {
+          score += 3;
+          matchedTokenCount = 1;
+        }
+
+        if (matchedTokenCount > 0 && score > 0) {
+          scored.push({ product: p, score });
+        }
       }
 
-      products = scoredProducts.map((item) => item.product);
+      scored.sort((a, b) => b.score - a.score || b.product.rating - a.product.rating);
+      products = scored.map((s) => s.product);
     }
 
-    // 2. Fulfillment Type Filter
     if (query?.fulfillmentType) {
-      const ft = query.fulfillmentType.toUpperCase();
-      if (ft !== 'ALL') {
-        products = products.filter((p: any) => p.fulfillmentType === ft);
-      }
+      products = products.filter((p) => p.fulfillmentType === query.fulfillmentType);
     }
 
-    // 3. Try & Buy Filter
-    if (query?.tryAndBuyOnly === 'true' || query?.tryAndBuyOnly === '1' || (query?.tryAndBuyOnly as any) === true) {
-      products = products.filter((p: any) => p.tryAndBuyEligible === true);
+    if (
+      query?.tryAndBuyOnly === 'true' ||
+      query?.tryAndBuyOnly === '1' ||
+      (query?.tryAndBuyOnly as any) === true
+    ) {
+      products = products.filter((p) => p.tryAndBuyEligible === true);
     }
 
-    // 4. Category Filter (Supports L1 Department, L2 Subcategory, or L3 Leaf matching)
-    if (query?.category && query.category.toLowerCase() !== 'all') {
-      const cat = query.category.toLowerCase();
-      const store = this.prisma.getStore();
-      const allCategories = store.categories || [];
+    if (query?.gender) {
+      const reqGender = query.gender.trim().toLowerCase();
+      products = products.filter(
+        (p) => !p.gender || p.gender.toLowerCase() === reqGender || p.gender.toLowerCase() === 'unisex',
+      );
+    }
 
-      // Collect target category and all its descendants
-      const matchingCatIds = new Set<string>([cat]);
-      const targetCat = allCategories.find(
-        (c: any) =>
-          c.id.toLowerCase() === cat ||
-          c.slug.toLowerCase() === cat ||
-          c.name.toLowerCase() === cat,
+    const activeCategoryFilter =
+      query?.subSubCategory ||
+      query?.subCategory ||
+      (query?.category && query.category.toLowerCase() !== 'all' ? query.category : undefined);
+
+    if (activeCategoryFilter) {
+      const needle = activeCategoryFilter.trim().toLowerCase();
+      const matchedCategory = allCategories.find(
+        (c) =>
+          c.id.toLowerCase() === needle ||
+          c.slug?.toLowerCase() === needle ||
+          c.code?.toLowerCase() === needle ||
+          c.name.toLowerCase() === needle,
       );
 
-      if (targetCat) {
-        matchingCatIds.add(targetCat.id.toLowerCase());
-        matchingCatIds.add(targetCat.slug.toLowerCase());
-        matchingCatIds.add(targetCat.name.toLowerCase());
-
-        const collectDescendants = (parentId: string) => {
-          allCategories
-            .filter((c: any) => c.parentId === parentId)
-            .forEach((child: any) => {
-              matchingCatIds.add(child.id.toLowerCase());
-              matchingCatIds.add(child.slug.toLowerCase());
-              matchingCatIds.add(child.name.toLowerCase());
-              collectDescendants(child.id);
-            });
-        };
-        collectDescendants(targetCat.id);
-      }
-
-      products = products.filter((p: any) => {
-        const pCat = (p.category || '').toLowerCase();
-        const pCatId = (p.categoryId || '').toLowerCase();
-        const pGender = (p.gender || '').toLowerCase();
-        return (
-          matchingCatIds.has(pCat) ||
-          matchingCatIds.has(pCatId) ||
-          (targetCat?.level === 1 && targetCat.name.toLowerCase() === pGender)
+      if (matchedCategory) {
+        const descendantIds = this.collectDescendantIds(allCategories, matchedCategory.id);
+        products = products.filter(
+          (p) =>
+            descendantIds.has(p.categoryId) ||
+            p.category.toLowerCase() === matchedCategory.name.toLowerCase(),
         );
-      });
+      } else {
+        products = products.filter(
+          (p) =>
+            p.category.toLowerCase().includes(needle) ||
+            p.categoryId.toLowerCase() === needle,
+        );
+      }
     }
 
-    // 5. Price Bounds
     if (query?.minPrice !== undefined && query?.minPrice !== '') {
       const min = Number(query.minPrice);
-      if (!isNaN(min)) {
+      if (!Number.isNaN(min)) {
         products = products.filter((p) => p.price >= min);
       }
     }
 
     if (query?.maxPrice !== undefined && query?.maxPrice !== '') {
       const max = Number(query.maxPrice);
-      if (!isNaN(max)) {
+      if (!Number.isNaN(max)) {
         products = products.filter((p) => p.price <= max);
       }
     }
 
-    // 6. Sorting
     const sortOption = query?.sortBy || query?.sort;
     if (sortOption) {
       switch (sortOption) {
@@ -580,28 +636,26 @@ export class CatalogService {
           products.sort((a, b) => b.reviewsCount - a.reviewsCount);
           break;
         case 'newest':
-          products.sort((a, b) => (b.id > a.id ? 1 : -1));
+          products.sort(
+            (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+          );
           break;
       }
     }
 
-    // 7. Attach Real-Time Badges & Dark Store Hub
-    const mapped = products.map((p: any) => this.mapProductWithHub(p));
-
-    // 8. Pagination
     if (query?.page && query?.limit) {
-      const page = Math.max(1, Number(query.page));
-      const limit = Math.max(1, Number(query.limit));
-      const start = (page - 1) * limit;
-      return mapped.slice(start, start + limit);
+      const page = Math.max(Number(query.page) || 1, 1);
+      const limit = Math.max(Number(query.limit) || 20, 1);
+      const offset = (page - 1) * limit;
+      return products.slice(offset, offset + limit);
     }
 
     if (query?.limit && !query?.page) {
-      const limit = Math.max(1, Number(query.limit));
-      return mapped.slice(0, limit);
+      const limit = Math.max(Number(query.limit) || 20, 1);
+      return products.slice(0, limit);
     }
 
-    return mapped;
+    return products;
   }
 
   async getProducts(query?: GetProductsDto) {
@@ -609,118 +663,66 @@ export class CatalogService {
   }
 
   async getProductById(id: string) {
+    this.ensureDbConnected();
+
     const rawId = String(id).trim();
-    const ID_ALIASES: Record<string, string> = {
-      '101': 'prod-2',
-      'prod-101': 'prod-2',
-      '102': 'prod-1',
-      'prod-102': 'prod-1',
-      '103': 'prod-3',
-      'prod-103': 'prod-3',
-      '104': 'prod-5',
-      'prod-104': 'prod-5',
-      '105': 'prod-6',
-      'prod-105': 'prod-6',
-      '106': 'prod-4',
-      'prod-106': 'prod-4',
-      '107': 'prod-10',
-      'prod-107': 'prod-10',
-      '108': 'prod-7',
-      'prod-108': 'prod-7',
-      '1': 'prod-1',
-      'prod-1': 'prod-1',
-      '2': 'prod-5',
-      'prod-2': 'prod-2',
-      '3': 'prod-9',
-      'prod-3': 'prod-3',
-      '4': 'prod-6',
-      'prod-4': 'prod-4',
-      '5': 'prod-5',
-      'prod-5': 'prod-5',
-      '6': 'prod-6',
-      'prod-6': 'prod-6',
-      '7': 'prod-7',
-      'prod-7': 'prod-7',
-      '8': 'prod-8',
-      'prod-8': 'prod-8',
-      '9': 'prod-4',
-      'prod-9': 'prod-9',
-      '10': 'prod-10',
-      'prod-10': 'prod-10',
-    };
-    const cleanId = ID_ALIASES[rawId] || rawId;
+    const resolvedId = ID_ALIASES[rawId] || rawId;
 
-    if (this.prisma.isConnectedToDb) {
-      try {
-        const dbProduct = await this.prisma.product.findFirst({
-          where: { OR: [{ id: cleanId }, { id: rawId }] },
-          include: { vendor: true, darkStoreHub: true, category: true },
-        });
-        if (dbProduct) {
-          return this.mapProductWithHub(dbProduct);
-        }
-      } catch (err: any) {
-        // Safe fallback
-      }
+    const dbProduct = await this.prisma.product.findFirst({
+      where: {
+        OR: [{ id: resolvedId }, { id: rawId }, { sku: rawId }],
+      },
+      include: {
+        category: true,
+        vendor: true,
+        darkStoreHub: true,
+      },
+    });
+
+    if (!dbProduct) {
+      throw new NotFoundException(`Product with ID '${id}' not found.`);
     }
 
-    const product: any = this.prisma.getStore().products.find(
-      (p) =>
-        p.id === cleanId ||
-        p.id === `prod-${cleanId}` ||
-        p.id.replace('prod-', '') === cleanId ||
-        p.id.replace('deal-', '') === cleanId ||
-        (cleanId.startsWith('prod-') && p.id === cleanId.replace('prod-', '')) ||
-        p.id === ID_ALIASES[cleanId],
-    );
-    if (!product) {
-      throw new NotFoundException(`Product with ID ${id} not found`);
-    }
-
-    const vendor = this.prisma.getStore().vendors.find((v) => v.id === product.vendorId);
-    const hub = product.darkStoreHubId
-      ? this.prisma.getStore().darkStores.find((h) => h.id === product.darkStoreHubId)
-      : null;
-
-    return {
-      ...product,
-      stockBadge:
-        product.stockQuantity <= 0
-          ? 'Out of Stock'
-          : product.stockQuantity <= 3
-          ? `Only ${product.stockQuantity} Left`
-          : product.fulfillmentType === 'DARK_STORE'
-          ? `${hub?.deliveryMinutes || 18}m Delivery`
-          : 'In Stock',
-      inStock: product.stockQuantity > 0,
-      darkStoreHub: hub,
-      vendor: vendor
-        ? {
-            id: vendor.id,
-            storeName: vendor.storeName,
-            address: vendor.address,
-          }
-        : undefined,
-    };
+    return this.mapProductWithHub(dbProduct);
   }
 
   private mapProductWithHub(p: any) {
-    const hub = p.darkStoreHubId
-      ? this.prisma.getStore().darkStores.find((h) => h.id === p.darkStoreHubId)
-      : null;
+    const categoryName =
+      typeof p.category === 'string' ? p.category : p.category?.name || '';
+    const stockBadge =
+      p.stockBadge ||
+      (p.stockQuantity > 0
+        ? p.stockQuantity <= 3
+          ? `Only ${p.stockQuantity} left`
+          : 'In Stock'
+        : 'Out of Stock');
 
     return {
       ...p,
-      stockBadge:
-        p.stockQuantity <= 0
-          ? 'Out of Stock'
-          : p.stockQuantity <= 3
-          ? `Only ${p.stockQuantity} Left`
-          : p.fulfillmentType === 'DARK_STORE'
-          ? `${hub?.deliveryMinutes || 18}m Delivery`
-          : 'In Stock',
-      inStock: p.stockQuantity > 0,
-      darkStoreHub: hub,
+      category: categoryName,
+      categoryId: p.categoryId || p.category?.id || '',
+      stockBadge,
+      vendorName: p.vendor?.storeName || 'Affordz Official Store',
+      vendor: p.vendor
+        ? {
+            id: p.vendor.id,
+            storeName: p.vendor.storeName,
+            operatingHub: p.vendor.operatingHub,
+            address: p.vendor.address,
+          }
+        : null,
+      darkStoreHub: p.darkStoreHub
+        ? {
+            id: p.darkStoreHub.id,
+            name: p.darkStoreHub.name,
+            locality: p.darkStoreHub.locality,
+            address: p.darkStoreHub.address,
+            lat: p.darkStoreHub.lat,
+            lng: p.darkStoreHub.lng,
+            deliveryMinutes: p.darkStoreHub.deliveryMinutes,
+            isActive: p.darkStoreHub.isActive,
+          }
+        : null,
     };
   }
 }

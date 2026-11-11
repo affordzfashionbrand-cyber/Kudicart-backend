@@ -1,65 +1,174 @@
-import {
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { NotificationsService } from '../../notifications/notifications.service';
+import { Role } from '../../../common/enums/role.enum';
 import { AdminQueryDto } from '../dto/admin-query.dto';
 import { BroadcastNotificationDto } from '../dto/admin-domain.dto';
 
+function mapNotificationCategory(rawCategory: string): string {
+  switch ((rawCategory || '').toUpperCase()) {
+    case 'KYC':
+      return 'KYC';
+    case 'DELIVERY':
+    case 'ASSIGNMENT':
+      return 'Assignment';
+    case 'ORDER':
+    case 'PAYMENT':
+    case 'ORDER UPDATES':
+    case 'ORDER_UPDATES':
+      return 'Order Updates';
+    case 'SYSTEM':
+    case 'ALERT':
+    case 'SYSTEM ALERTS':
+    case 'SYSTEM_ALERTS':
+      return 'System Alerts';
+    default:
+      return rawCategory || 'System Alerts';
+  }
+}
+
+function mapRoleLabel(role: string | null): string {
+  switch ((role || '').toUpperCase()) {
+    case Role.DRIVER:
+      return 'Driver';
+    case Role.CUSTOMER:
+      return 'Customer';
+    case Role.VENDOR:
+      return 'Vendor';
+    case Role.ADMIN:
+      return 'Central Admin';
+    default:
+      return 'Central Admin';
+  }
+}
+
+function resolveBroadcastRole(scope?: string, targetRole?: string): Role {
+  const combined = `${scope || ''} ${targetRole || ''}`.toLowerCase();
+  if (combined.includes('driver') || combined.includes('fleet')) return Role.DRIVER;
+  if (combined.includes('vendor') || combined.includes('merchant') || combined.includes('boutique')) {
+    return Role.VENDOR;
+  }
+  if (combined.includes('customer')) return Role.CUSTOMER;
+  return Role.ADMIN;
+}
+
+function mapNotificationRow(row: any) {
+  const payload =
+    row.data && typeof row.data === 'object' ? (row.data as Record<string, any>) : {};
+  const targetRole = mapRoleLabel(row.role);
+
+  return {
+    id: row.id,
+    timestamp: row.createdAt.toLocaleTimeString('en-IN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }),
+    timestampFull: row.createdAt.toISOString(),
+    category: mapNotificationCategory(row.category),
+    targetRole,
+    recipientName:
+      payload.recipientName || row.user?.name || row.user?.email || targetRole,
+    recipientId: row.userId || targetRole,
+    title: row.title,
+    messagePreview: row.body.slice(0, 120),
+    messageFull: row.body,
+    deliveryStatus: 'Delivered' as const,
+    deliveryChannel: payload.channel || 'Push + In-App',
+    read: Boolean(row.isRead),
+    priority:
+      payload.priority === 'Critical'
+        ? 'Critical'
+        : payload.priority === 'Warning' || payload.priority === 'Operational Warning'
+          ? 'Warning'
+          : 'Informational',
+    dispatchedHub: payload.scope || 'Central Ops HQ',
+    orderId: row.orderId || payload.orderId || undefined,
+  };
+}
+
 @Injectable()
 export class AdminNotificationsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notificationsService: NotificationsService,
+  ) {}
 
   async listNotifications(query: AdminQueryDto) {
-    const store = this.prisma.getStore();
-    let notifications = store.operationalNotifications || [];
-
-    if (query.search && query.search.trim()) {
-      const q = query.search.toLowerCase().trim();
-      notifications = notifications.filter(
-        (n: any) =>
-          n.title.toLowerCase().includes(q) ||
-          n.messagePreview.toLowerCase().includes(q) ||
-          n.recipientName.toLowerCase().includes(q) ||
-          n.recipientId.toLowerCase().includes(q),
-      );
+    if (!this.prisma.isConnectedToDb) {
+      return { data: [], total: 0, unreadCount: 0 };
     }
 
-    if (query.category && query.category !== 'ALL') {
-      notifications = notifications.filter((n: any) => n.category === query.category);
+    const take = Math.min(Math.max(Number(query.limit) || 50, 1), 100);
+    const where: any = {};
+
+    if (query.search && query.search.trim()) {
+      const s = query.search.trim();
+      where.OR = [
+        { title: { contains: s, mode: 'insensitive' } },
+        { body: { contains: s, mode: 'insensitive' } },
+        { userId: { contains: s, mode: 'insensitive' } },
+        { orderId: { contains: s, mode: 'insensitive' } },
+      ];
     }
 
     if (query.role && query.role !== 'ALL') {
-      notifications = notifications.filter((n: any) => n.targetRole === query.role);
+      where.role = resolveBroadcastRole(undefined, query.role);
     }
 
-    if (query.status && query.status !== 'ALL') {
-      notifications = notifications.filter((n: any) => n.deliveryStatus === query.status);
-    }
+    const [rows, total, unreadCount] = await Promise.all([
+      this.prisma.notification.findMany({
+        where,
+        include: {
+          user: { select: { id: true, name: true, email: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+      }),
+      this.prisma.notification.count({ where }),
+      this.prisma.notification.count({ where: { ...where, isRead: false } }),
+    ]);
 
-    const unreadCount = notifications.filter((n: any) => !n.read).length;
+    let mapped = rows.map(mapNotificationRow);
+
+    if (query.category && query.category !== 'ALL') {
+      mapped = mapped.filter((n) => n.category === query.category);
+    }
 
     return {
-      data: notifications,
-      total: notifications.length,
+      data: mapped,
+      total: query.category && query.category !== 'ALL' ? mapped.length : total,
       unreadCount,
     };
   }
 
   async markAsRead(id: string) {
-    const store = this.prisma.getStore();
-    const notification = (store.operationalNotifications || []).find((n: any) => n.id === id);
-
-    if (!notification) {
+    if (!this.prisma.isConnectedToDb) {
       throw new NotFoundException(`Notification record '${id}' was not found.`);
     }
 
-    notification.read = true;
+    const existing = await this.prisma.notification.findUnique({
+      where: { id },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Notification record '${id}' was not found.`);
+    }
+
+    const updated = await this.prisma.notification.update({
+      where: { id },
+      data: {
+        isRead: true,
+        readAt: existing.readAt || new Date(),
+      },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
 
     return {
       success: true,
       message: `Notification #${id} marked as read.`,
-      notification,
+      notification: mapNotificationRow(updated),
     };
   }
 
@@ -68,54 +177,75 @@ export class AdminNotificationsService {
     actorId?: string,
     actorName?: string,
   ) {
-    const store = this.prisma.getStore();
-    const now = new Date();
-    const pad = (n: number) => n.toString().padStart(2, '0');
-    const timeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const recipientRole = resolveBroadcastRole(dto.scope, dto.targetRole);
+    const body = dto.note?.trim() || dto.message?.trim() || dto.title.trim();
 
-    const newNotif = {
-      id: `NOTIF-${Date.now().toString().slice(-4)}`,
-      timestamp: timeStr,
-      timestampFull: now.toLocaleString(),
-      category: 'System Alerts' as const,
-      targetRole: (dto.targetRole || 'Central Admin') as any,
-      recipientName: dto.scope || 'All Operational Hubs',
-      recipientId: 'BROADCAST',
-      title: dto.title,
-      messagePreview: dto.note ? `${dto.note.slice(0, 80)}...` : dto.title,
-      messageFull: dto.note || dto.title,
-      deliveryStatus: 'Delivered' as const,
-      deliveryChannel: 'In-App Dispatch' as const,
-      read: false,
-      priority: (dto.severity === 'Operational Warning' ? 'Warning' : 'Informational') as any,
-      dispatchedHub: dto.scope || 'Central Ops HQ',
-    };
-
-    if (!store.operationalNotifications) store.operationalNotifications = [];
-    store.operationalNotifications.unshift(newNotif);
-
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'NOTIFICATION_BROADCAST' as any,
-      entityId: newNotif.id,
-      entityName: newNotif.title,
-      entityType: 'Order' as any,
-      summary: `Broadcast operational announcement '${newNotif.title}' to ${newNotif.recipientName}`,
-      targetDescription: `System Broadcast Notification`,
-      changePayload: {
-        title: dto.title,
-        scope: dto.scope,
-        severity: dto.severity,
+    const pushResult = await this.notificationsService.sendNotification({
+      recipientRole,
+      title: dto.title.trim(),
+      body,
+      category: 'ALERT',
+      data: {
+        scope: dto.scope || 'All Hubs & Fleets',
+        priority: dto.severity || 'Informational',
+        recipientName: dto.scope || mapRoleLabel(recipientRole),
+        channel: 'Push + In-App',
       },
-      entityLink: `/admin/notifications`,
     });
+
+    if (this.prisma.isConnectedToDb) {
+      await this.prisma.auditLog
+        .create({
+          data: {
+            userId: actorId || null,
+            userEmail: actorName || null,
+            userRole: 'ADMIN',
+            action: 'NOTIFICATION_BROADCAST',
+            entityType: 'Notification',
+            entityId: pushResult.notificationId || 'BROADCAST',
+            details: JSON.stringify({
+              title: dto.title.trim(),
+              scope: dto.scope || 'All Hubs & Fleets',
+              severity: dto.severity || 'Informational',
+              recipientRole,
+              tokenCount: pushResult.tokenCount,
+            }),
+          },
+        })
+        .catch(() => {});
+    }
+
+    const saved =
+      pushResult.notificationId && this.prisma.isConnectedToDb
+        ? await this.prisma.notification.findUnique({
+            where: { id: pushResult.notificationId },
+            include: { user: { select: { id: true, name: true, email: true } } },
+          })
+        : null;
+
+    const mapped = saved
+      ? mapNotificationRow(saved)
+      : mapNotificationRow({
+          id: pushResult.notificationId || `NOTIF-${Date.now()}`,
+          userId: null,
+          role: recipientRole,
+          orderId: null,
+          category: 'ALERT',
+          title: dto.title.trim(),
+          body,
+          data: {
+            scope: dto.scope || 'All Hubs & Fleets',
+            priority: dto.severity || 'Informational',
+            recipientName: dto.scope || mapRoleLabel(recipientRole),
+          },
+          isRead: false,
+          createdAt: new Date(),
+        });
 
     return {
       success: true,
       message: 'Operational broadcast announcement dispatched successfully.',
-      notification: newNotif,
+      notification: mapped,
     };
   }
 }
-

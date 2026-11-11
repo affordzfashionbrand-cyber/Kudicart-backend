@@ -18,6 +18,11 @@ import { Role } from '../../../common/enums/role.enum';
 export class AdminReportsController {
   constructor(private readonly reportsService: AdminReportsService) {}
 
+  @Get()
+  async generateReportByQuery(@Query() query: AdminQueryDto & { category?: string }) {
+    return this.reportsService.generateReport(query.category || 'ORDERS', query);
+  }
+
   @Get(':category')
   async generateReport(
     @Param('category') category: string,

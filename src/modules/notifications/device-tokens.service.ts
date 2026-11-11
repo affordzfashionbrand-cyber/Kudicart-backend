@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Role } from '../../common/enums/role.enum';
 
@@ -8,182 +8,136 @@ export class DeviceTokensService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  /**
-   * Registers or updates an FCM device token for an authenticated user.
-   */
   async registerToken(
     userId: string,
     role: Role | string,
     platform: 'android' | 'ios' | 'web' | string,
     token: string,
   ) {
-    if (!token || !userId) {
-      return { success: false, message: 'User ID and FCM token are required' };
+    if (!userId || !token || !token.trim()) {
+      throw new BadRequestException('Valid userId and device token are required.');
     }
 
-    const maskedToken = `${token.slice(0, 8)}...${token.slice(-6)}`;
+    const normalizedRole = Object.values(Role).includes(role as Role)
+      ? (role as Role)
+      : Role.CUSTOMER;
+    const normalizedToken = token.trim();
+    const normalizedPlatform = ['android', 'ios', 'web'].includes(platform)
+      ? platform
+      : 'android';
 
-    // Database persistence
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.deviceToken.upsert({
-          where: { token },
-          create: {
-            userId,
-            role: role as any,
-            platform,
-            token,
-            isActive: true,
-            lastSeenAt: new Date(),
-          },
-          update: {
-            userId,
-            role: role as any,
-            platform,
-            isActive: true,
-            lastSeenAt: new Date(),
-          },
-        });
-        this.logger.log(`Registered device token ${maskedToken} for user ${userId} (${role}) in DB`);
-        return { success: true, registered: true };
-      } catch (err: any) {
-        this.logger.warn(`Failed to persist device token to DB: ${err.message}. Saving to fallback store.`);
-      }
+    if (!this.prisma.isConnectedToDb) {
+      throw new BadRequestException('Database connection is required for device registration.');
     }
 
-    // In-memory store mirror
-    const store = this.prisma.getStore();
-    if (!store.deviceTokens) {
-      store.deviceTokens = [];
-    }
-
-    const existing = store.deviceTokens.find((t: any) => t.token === token);
-    if (existing) {
-      existing.userId = userId;
-      existing.role = role;
-      existing.platform = platform;
-      existing.isActive = true;
-      existing.lastSeenAt = new Date().toISOString();
-    } else {
-      store.deviceTokens.push({
-        id: `dt-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+    const saved = await this.prisma.deviceToken.upsert({
+      where: { token: normalizedToken },
+      create: {
         userId,
-        role,
-        platform,
-        token,
+        role: normalizedRole as any,
+        platform: normalizedPlatform,
+        token: normalizedToken,
         isActive: true,
-        createdAt: new Date().toISOString(),
-        lastSeenAt: new Date().toISOString(),
-      });
-    }
+        lastSeenAt: new Date(),
+      },
+      update: {
+        userId,
+        role: normalizedRole as any,
+        platform: normalizedPlatform,
+        isActive: true,
+        lastSeenAt: new Date(),
+      },
+    });
 
-    this.logger.log(`Registered device token ${maskedToken} for user ${userId} (${role}) in store`);
-    return { success: true, registered: true };
+    this.logger.log(
+      `Registered active FCM token for user=${userId} role=${normalizedRole} platform=${normalizedPlatform}`,
+    );
+
+    return {
+      success: true,
+      id: saved.id,
+      userId: saved.userId,
+      role: saved.role,
+      platform: saved.platform,
+      token: saved.token,
+      isActive: saved.isActive,
+    };
   }
 
-  /**
-   * Unregisters (deactivates) an FCM device token upon logout.
-   */
   async unregisterToken(userId: string, token: string) {
-    if (!token) return { success: false };
-
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.deviceToken.updateMany({
-          where: { token, userId },
-          data: { isActive: false, updatedAt: new Date() },
-        });
-      } catch (err: any) {
-        this.logger.warn(`Failed to deactivate device token in DB: ${err.message}`);
-      }
+    if (!userId || !token || !token.trim()) {
+      throw new BadRequestException('Valid userId and device token are required.');
     }
 
-    const store = this.prisma.getStore();
-    if (store.deviceTokens) {
-      const entry = store.deviceTokens.find((t: any) => t.token === token && t.userId === userId);
-      if (entry) {
-        entry.isActive = false;
-      }
+    if (!this.prisma.isConnectedToDb) {
+      return { success: false, removedCount: 0 };
     }
 
-    return { success: true, unregistered: true };
+    const res = await this.prisma.deviceToken.updateMany({
+      where: {
+        userId,
+        token: token.trim(),
+        isActive: true,
+      },
+      data: {
+        isActive: false,
+      },
+    });
+
+    return {
+      success: true,
+      deactivatedCount: res.count,
+    };
   }
 
-  /**
-   * Retrieves all active device tokens for a given user.
-   */
-  async getActiveTokensForUser(userId: string, role?: Role): Promise<string[]> {
-    if (this.prisma.isConnectedToDb) {
-      try {
-        const records = await this.prisma.deviceToken.findMany({
-          where: {
-            userId,
-            isActive: true,
-            ...(role ? { role: role as any } : {}),
-          },
-          select: { token: true },
-        });
-        return records.map((r) => r.token);
-      } catch (err: any) {
-        this.logger.warn(`Failed to fetch active tokens from DB: ${err.message}`);
-      }
+  async getActiveTokensForUser(userId: string, role?: Role | string): Promise<string[]> {
+    if (!userId || !this.prisma.isConnectedToDb) {
+      return [];
     }
 
-    const store = this.prisma.getStore();
-    if (!store.deviceTokens) return [];
-    return store.deviceTokens
-      .filter((t: any) => t.userId === userId && t.isActive && (!role || t.role === role))
-      .map((t: any) => t.token);
+    const rows = await this.prisma.deviceToken.findMany({
+      where: {
+        userId,
+        isActive: true,
+        ...(role ? { role: role as any } : {}),
+      },
+      select: { token: true },
+    });
+
+    return Array.from(new Set(rows.map((r) => r.token).filter(Boolean)));
   }
 
-  /**
-   * Retrieves all active device tokens for an entire role (e.g. all DRIVERs).
-   */
-  async getActiveTokensForRole(role: Role): Promise<string[]> {
-    if (this.prisma.isConnectedToDb) {
-      try {
-        const records = await this.prisma.deviceToken.findMany({
-          where: { role: role as any, isActive: true },
-          select: { token: true },
-        });
-        return records.map((r) => r.token);
-      } catch (err: any) {
-        this.logger.warn(`Failed to fetch role tokens from DB: ${err.message}`);
-      }
+  async getActiveTokensForRole(role: Role | string): Promise<string[]> {
+    if (!role || !this.prisma.isConnectedToDb) {
+      return [];
     }
 
-    const store = this.prisma.getStore();
-    if (!store.deviceTokens) return [];
-    return store.deviceTokens
-      .filter((t: any) => t.role === role && t.isActive)
-      .map((t: any) => t.token);
+    const rows = await this.prisma.deviceToken.findMany({
+      where: {
+        role: role as any,
+        isActive: true,
+      },
+      select: { token: true },
+    });
+
+    return Array.from(new Set(rows.map((r) => r.token).filter(Boolean)));
   }
 
-  /**
-   * Deactivates tokens that FCM reported as invalid or unregistered.
-   */
-  async deactivateInvalidTokens(tokens: string[]) {
-    if (!tokens || tokens.length === 0) return;
-
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.deviceToken.updateMany({
-          where: { token: { in: tokens } },
-          data: { isActive: false, updatedAt: new Date() },
-        });
-      } catch (err: any) {
-        this.logger.warn(`Failed to deactivate invalid tokens in DB: ${err.message}`);
-      }
+  async deactivateInvalidTokens(tokens: string[]): Promise<{ deactivatedCount: number }> {
+    const clean = Array.from(new Set((tokens || []).map((t) => t?.trim()).filter(Boolean)));
+    if (clean.length === 0 || !this.prisma.isConnectedToDb) {
+      return { deactivatedCount: 0 };
     }
 
-    const store = this.prisma.getStore();
-    if (store.deviceTokens) {
-      store.deviceTokens.forEach((t: any) => {
-        if (tokens.includes(t.token)) {
-          t.isActive = false;
-        }
-      });
+    const res = await this.prisma.deviceToken.updateMany({
+      where: { token: { in: clean } },
+      data: { isActive: false },
+    });
+
+    if (res.count > 0) {
+      this.logger.warn(`Deactivated ${res.count} stale/invalid FCM token(s).`);
     }
+
+    return { deactivatedCount: res.count };
   }
 }
-

@@ -100,6 +100,7 @@ export class FirebaseAdminService implements OnModuleInit {
     phoneNumber?: string;
     email?: string;
     name?: string;
+    picture?: string;
   }> {
     if (!idToken || typeof idToken !== 'string') {
       throw new UnauthorizedException('Firebase ID token is required');
@@ -111,8 +112,8 @@ export class FirebaseAdminService implements OnModuleInit {
         const parts = idToken.split(':');
         return {
           uid: parts[1] || 'test-firebase-uid',
-          phoneNumber: parts[2] || '+91 98450 12890',
-          email: parts[3] || 'test.customer@kudicart.in',
+          phoneNumber: parts[2] ? parts[2] : undefined,
+          email: parts[3] ? parts[3] : undefined,
           name: 'Test Firebase User',
         };
       }
@@ -120,8 +121,8 @@ export class FirebaseAdminService implements OnModuleInit {
         return {
           uid: 'fb-user-123',
           phoneNumber: '+91 98450 12890',
-          email: 'customer@kudicart.in',
-          name: 'KudiCart Customer',
+          email: 'customer@affordz.in',
+          name: 'Affordz Customer',
         };
       }
     }
@@ -142,6 +143,7 @@ export class FirebaseAdminService implements OnModuleInit {
         phoneNumber: decoded.phone_number,
         email: decoded.email,
         name: decoded.name,
+        picture: decoded.picture,
       };
     } catch (err: any) {
       this.logger.warn(`Firebase token verification failed: ${err.message}`);
@@ -193,7 +195,7 @@ export class FirebaseAdminService implements OnModuleInit {
           priority: 'high',
           notification: {
             sound: 'default',
-            channelId: 'kudicart_critical_alerts',
+            channelId: 'affordz_critical_alerts',
           },
         },
       };

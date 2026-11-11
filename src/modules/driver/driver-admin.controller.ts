@@ -1,108 +1,122 @@
 import {
   Controller,
-  Post,
   Get,
+  Patch,
   Param,
   Body,
   UseGuards,
-  HttpCode,
-  HttpStatus,
   NotFoundException,
+  BadRequestException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { KycReviewDto } from './dto/kyc-review.dto';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Role } from '../../common/enums/role.enum';
+import { KycReviewDto } from './dto/kyc-review.dto';
 
 @Controller('api/v1/admin/drivers')
 @UseGuards(FirebaseAuthGuard, RolesGuard)
 @Roles(Role.ADMIN)
 export class DriverAdminController {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
+
+  private ensureDbConnected() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
+    }
+  }
 
   @Get()
   async listDrivers() {
-    const store = this.prisma.getStore();
+    this.ensureDbConnected();
+    const drivers = await this.prisma.driverProfile.findMany({
+      include: {
+        user: { select: { id: true, email: true, status: true } },
+        documents: true,
+      },
+      orderBy: [{ isOnline: 'desc' }, { createdAt: 'desc' }],
+    });
+
     return {
-      success: true,
-      count: store.drivers.length,
-      drivers: store.drivers.map((d) => ({
+      drivers: drivers.map((d) => ({
         id: d.id,
+        userId: d.userId,
         fullName: d.fullName,
         phone: d.phone,
         kycStatus: d.kycStatus,
         isOnline: d.isOnline,
+        tier: d.tier,
+        rating: d.rating,
         completedDeliveries: d.completedDeliveries,
-        vehicle: d.vehicle,
+        vehicleRegistration: d.vehicleRegistration,
+        documentsCount: d.documents.length,
+        createdAt: d.createdAt.toISOString(),
       })),
     };
   }
 
   @Get(':id')
   async getDriverDetails(@Param('id') id: string) {
-    const store = this.prisma.getStore();
-    const driver = store.drivers.find((d) => d.id === id || d.userId === id);
+    this.ensureDbConnected();
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { OR: [{ id }, { userId: id }] },
+      include: {
+        user: { select: { id: true, email: true, status: true } },
+        documents: true,
+      },
+    });
     if (!driver) {
-      throw new NotFoundException(`Driver with ID ${id} not found`);
+      throw new NotFoundException('Driver not found');
     }
     return {
-      success: true,
-      driver,
+      ...driver,
+      aadhaarNumber: driver.aadhaarNumber
+        ? `XXXX-XXXX-${driver.aadhaarNumber.slice(-4)}`
+        : null,
     };
   }
 
-  @Post(':id/kyc/review')
-  @HttpCode(HttpStatus.OK)
+  @Patch(':id/kyc')
   async reviewKyc(@Param('id') id: string, @Body() dto: KycReviewDto) {
-    const store = this.prisma.getStore();
-    const driver = store.drivers.find((d) => d.id === id || d.userId === id);
+    this.ensureDbConnected();
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { OR: [{ id }, { userId: id }] },
+    });
     if (!driver) {
-      throw new NotFoundException(`Driver with ID ${id} not found`);
+      throw new NotFoundException('Driver not found');
     }
 
-    driver.kycStatus = dto.status;
-    if (dto.status === 'APPROVED') {
-      driver.rejectionReason = null;
-      driver.status = 'Active';
-      // Mark all uploaded documents as verified
-      if (driver.documents) {
-        Object.keys(driver.documents).forEach((key) => {
-          if (key !== 'selfie' && (driver.documents as any)[key]) {
-            (driver.documents as any)[key].status = 'VERIFIED';
-          }
-        });
-      }
-    } else {
-      driver.rejectionReason = dto.rejectionReason || 'Document verification failed. Please check details and resubmit.';
-      driver.status = 'Needs Attention';
-      if (driver.documents?.drivingLicence) {
-        driver.documents.drivingLicence.status = 'REJECTED';
-      }
+    if (dto.status === 'REJECTED' && !dto.rejectionReason?.trim()) {
+      throw new BadRequestException('A rejection reason must be provided when rejecting KYC');
     }
 
-    // Add administrative notification for the driver
-    store.notifications.unshift({
-      id: `notif-${Date.now()}`,
-      driverId: driver.id,
-      category: 'SYSTEM',
-      title: dto.status === 'APPROVED' ? 'Account Verified & Approved!' : 'KYC Verification Needs Attention',
-      body:
-        dto.status === 'APPROVED'
-          ? 'Your onboarding documents have been verified by KudiCart Admin. You can now go Online.'
-          : `KYC review outcome: ${driver.rejectionReason}`,
-      timestamp: 'Just now',
-      read: false,
-      createdAt: new Date().toISOString(),
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const res = await tx.driverProfile.update({
+        where: { id: driver.id },
+        data: {
+          kycStatus: dto.status,
+          rejectionReason:
+            dto.status === 'REJECTED' ? dto.rejectionReason!.trim() : null,
+        },
+      });
+      await tx.driverDocument.updateMany({
+        where: { driverId: driver.id },
+        data: {
+          status: dto.status === 'APPROVED' ? 'VERIFIED' : 'REJECTED',
+          verifiedAt: dto.status === 'APPROVED' ? new Date() : null,
+        },
+      });
+      return res;
     });
 
     return {
       success: true,
       message: `Driver KYC status updated to ${dto.status}`,
-      driverId: driver.id,
-      kycStatus: driver.kycStatus,
-      rejectionReason: driver.rejectionReason,
+      driverId: updated.id,
+      kycStatus: updated.kycStatus,
+      rejectionReason: updated.rejectionReason,
     };
   }
 }

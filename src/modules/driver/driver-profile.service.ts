@@ -1,105 +1,144 @@
 import {
   Injectable,
   NotFoundException,
-  ForbiddenException,
   BadRequestException,
-  Logger,
+  ServiceUnavailableException,
   Optional,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { TrackingRealtimeGateway } from '../orders/tracking-realtime.gateway';
+import { LIVE_TRACKING_ACTIVE_STATUSES, OrderStatus } from '../../common/contracts/order-contracts';
 import { UpdateDriverProfileDto } from './dto/update-driver-profile.dto';
 import { UpdateVehicleDto } from './dto/update-vehicle.dto';
 import { DocumentUploadDto } from './dto/document-upload.dto';
 import { UpdateLocationDto } from './dto/update-location.dto';
-import { TrackingRealtimeGateway } from '../orders/tracking-realtime.gateway';
+
+function maskAadhaar(aadhaar?: string | null): string | null {
+  if (!aadhaar) return null;
+  const digits = aadhaar.replace(/\D/g, '');
+  if (digits.length < 4) return 'XXXX-XXXX-XXXX';
+  return `XXXX-XXXX-${digits.slice(-4)}`;
+}
 
 @Injectable()
 export class DriverProfileService {
-  private readonly logger = new Logger(DriverProfileService.name);
+  private readonly lastLocationTimestampByDriver = new Map<string, number>();
 
   constructor(
-    private prisma: PrismaService,
-    @Optional() private trackingGateway?: TrackingRealtimeGateway,
+    private readonly prisma: PrismaService,
+    @Optional() private readonly trackingGateway?: TrackingRealtimeGateway,
   ) {}
 
-  public resolveDriver(driverId?: string) {
-    if (!driverId) {
-      throw new BadRequestException('Driver identifier is required');
+  private ensureDbConnected() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
     }
-    const store = this.prisma.getStore();
-    const driver = store.drivers.find((d) => d.id === driverId || d.userId === driverId);
+  }
+
+  private async resolveDriver(driverIdOrUserId?: string) {
+    this.ensureDbConnected();
+    if (!driverIdOrUserId) {
+      throw new BadRequestException('Authenticated driver context is required');
+    }
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { OR: [{ id: driverIdOrUserId }, { userId: driverIdOrUserId }] },
+      include: { user: true, documents: true },
+    });
     if (!driver) {
-      throw new NotFoundException(`Driver profile not found for identifier: ${driverId}`);
+      throw new NotFoundException('Delivery partner profile not found');
     }
     return driver;
   }
 
-  async getProfile(driverId?: string) {
-    const driver = this.resolveDriver(driverId);
-    const store = this.prisma.getStore();
-    const darkStore = store.darkStores[0];
+  private groupDocuments(docs: any[], selfieUrl?: string | null) {
+    const grouped: Record<string, any> = {
+      selfie: selfieUrl ? { uri: selfieUrl } : null,
+      aadhaar: { front: null, back: null, status: 'PENDING' },
+      pan: { front: null, back: null, status: 'PENDING' },
+      drivingLicence: { front: null, back: null, status: 'PENDING' },
+      vehicleRc: { front: null, back: null, status: 'PENDING' },
+    };
 
-    // Mask sensitive Aadhaar number for security
-    let maskedAadhaar = driver.aadhaarNumber || '';
-    const cleanAadhaar = maskedAadhaar.replace(/\s/g, '');
-    if (cleanAadhaar.length === 12) {
-      maskedAadhaar = `•••• •••• ${cleanAadhaar.slice(8, 12)}`;
+    for (const d of docs || []) {
+      const side = d.side || 'front';
+      if (!grouped[d.type]) {
+        grouped[d.type] = { front: null, back: null, status: d.status };
+      }
+      grouped[d.type][side] = {
+        id: d.id,
+        uri: d.fileUrl,
+        name: d.fileName,
+        size: d.fileSize,
+        type: d.mimeType,
+        uploadedAt: d.createdAt.toISOString(),
+      };
+      grouped[d.type].status = d.status;
     }
+
+    return grouped;
+  }
+
+  async getProfile(driverId?: string) {
+    const driver = await this.resolveDriver(driverId);
+    const docs = this.groupDocuments(driver.documents, driver.selfieUrl);
 
     return {
       id: driver.id,
+      userId: driver.userId,
+      name: driver.fullName,
       fullName: driver.fullName,
-      name: driver.name,
-      role: driver.role || 'Delivery Partner',
-      status: driver.status || 'Active',
       phone: driver.phone,
-      tier: driver.tier || 'Silver Tier',
-      avatarInitial: driver.avatarInitial || 'DP',
-      photo: driver.photo,
-      aadhaarNumber: maskedAadhaar,
+      email: driver.user?.email || null,
+      photo: driver.selfieUrl || driver.user?.avatar || null,
+      tier: driver.tier,
+      rating: driver.rating,
+      completedDeliveries: driver.completedDeliveries,
+      isOnline: driver.isOnline,
+      availableSince: driver.availableSince ? driver.availableSince.toISOString() : null,
+      kycStatus: driver.kycStatus,
+      rejectionReason: driver.rejectionReason,
+      aadhaarNumber: maskAadhaar(driver.aadhaarNumber),
       panNumber: driver.panNumber,
       dob: driver.dob,
       licenseNumber: driver.licenseNumber,
       workPreference: driver.workPreference,
-      rating: driver.rating,
-      completedDeliveries: driver.completedDeliveries,
-      isOnline: driver.isOnline,
-      kycStatus: driver.kycStatus,
-      rejectionReason: driver.rejectionReason,
-      vehicle: driver.vehicle,
-      assignedStore: {
-        name: darkStore.name,
-        address: darkStore.address,
+      vehicle: {
+        registrationNumber: driver.vehicleRegistration,
+        vehicleType: driver.vehicleType,
+        make: driver.vehicleMake,
+        model: driver.vehicleModel,
+        rcStatus: driver.rcStatus,
+        rcNumber: driver.rcNumber,
       },
-      workSummary: driver.workSummary,
+      documents: docs,
+      currentLocation:
+        driver.currentLat != null && driver.currentLng != null
+          ? {
+              latitude: driver.currentLat,
+              longitude: driver.currentLng,
+              heading: driver.currentHeading ?? 0,
+            }
+          : null,
+      status: driver.user?.status || 'ACTIVE',
     };
   }
 
   async updateDetails(driverId: string | undefined, dto: UpdateDriverProfileDto) {
-    const driver = this.resolveDriver(driverId);
+    const driver = await this.resolveDriver(driverId);
 
-    if (dto.fullName) {
-      driver.fullName = dto.fullName.trim();
-      const parts = driver.fullName.split(' ');
-      const first = parts[0] || '';
-      const lastInitial = parts.length > 1 ? ` ${parts[parts.length - 1][0]}.` : '';
-      driver.name = `${first}${lastInitial}`;
-      driver.avatarInitial = parts
-        .map((p) => p[0])
-        .slice(0, 2)
-        .join('')
-        .toUpperCase() || 'DP';
+    const data: Record<string, any> = {};
+    if (dto.fullName || dto.name) {
+      data.fullName = (dto.fullName || dto.name)!.trim();
     }
-
-    if (dto.phone) driver.phone = dto.phone;
+    if (dto.phone) data.phone = dto.phone.trim();
     if (dto.aadhaarNumber) {
-      const cleanAadhaar = dto.aadhaarNumber.replace(/\s/g, '');
-      if (cleanAadhaar.length !== 12 || /^([0-9])\1{11}$/.test(cleanAadhaar)) {
-        throw new BadRequestException('Aadhaar number must contain 12 valid digits');
+      const cleaned = dto.aadhaarNumber.replace(/\s+/g, '');
+      if (!/^\d{12}$/.test(cleaned)) {
+        throw new BadRequestException('Aadhaar number must contain 12 digits');
       }
-      driver.aadhaarNumber = cleanAadhaar;
+      data.aadhaarNumber = cleaned;
     }
-    if (dto.panNumber) driver.panNumber = dto.panNumber.toUpperCase().trim();
+    if (dto.panNumber) data.panNumber = dto.panNumber.toUpperCase().trim();
     if (dto.dob) {
       const parts = dto.dob.trim().split('/');
       if (parts.length === 3) {
@@ -124,43 +163,56 @@ export class DriverProfileService {
           throw new BadRequestException('Driver must be at least 18 years old');
         }
       }
-      driver.dob = dto.dob.trim();
+      data.dob = dto.dob.trim();
     }
-    if (dto.licenseNumber) driver.licenseNumber = dto.licenseNumber.trim();
-    if (dto.workPreference) driver.workPreference = dto.workPreference as any;
-    if (dto.photo) driver.photo = dto.photo;
-    if (dto.name) driver.name = dto.name;
+    if (dto.licenseNumber) data.licenseNumber = dto.licenseNumber.trim();
+    if (dto.workPreference) data.workPreference = dto.workPreference;
+    if (dto.photo) data.selfieUrl = dto.photo;
+
+    await this.prisma.driverProfile.update({
+      where: { id: driver.id },
+      data,
+    });
 
     return this.getProfile(driver.id);
   }
 
   async updateVehicle(driverId: string | undefined, dto: UpdateVehicleDto) {
-    const driver = this.resolveDriver(driverId);
-    driver.vehicle = {
-      registrationNumber: dto.registrationNumber.toUpperCase(),
-      vehicleType: dto.vehicleType,
-      make: dto.make,
-      model: dto.model,
-      rcStatus: 'Verified',
-      rcNumber: dto.registrationNumber.toUpperCase(),
-    };
+    const driver = await this.resolveDriver(driverId);
+    const updated = await this.prisma.driverProfile.update({
+      where: { id: driver.id },
+      data: {
+        vehicleRegistration: dto.registrationNumber.toUpperCase(),
+        vehicleType: dto.vehicleType,
+        vehicleMake: dto.make,
+        vehicleModel: dto.model,
+        rcStatus: 'Verified',
+        rcNumber: dto.registrationNumber.toUpperCase(),
+      },
+    });
+
     return {
       success: true,
       message: 'Vehicle details updated successfully',
-      vehicle: driver.vehicle,
+      vehicle: {
+        registrationNumber: updated.vehicleRegistration,
+        vehicleType: updated.vehicleType,
+        make: updated.vehicleMake,
+        model: updated.vehicleModel,
+        rcStatus: updated.rcStatus,
+        rcNumber: updated.rcNumber,
+      },
     };
   }
 
   async uploadDocument(driverId: string | undefined, dto: DocumentUploadDto) {
-    const driver = this.resolveDriver(driverId);
+    const driver = await this.resolveDriver(driverId);
 
-    // Validate allowed file extensions
     const validExtensions = /\.(jpg|jpeg|png|webp|pdf)$/i;
     if (!validExtensions.test(dto.fileName)) {
       throw new BadRequestException('Unsupported format. Allowed formats: JPG, PNG, WEBP, PDF');
     }
 
-    // Validate size limit (5MB)
     if (dto.fileSize) {
       const match = dto.fileSize.match(/([0-9.]+)\s*MB/i);
       if (match && parseFloat(match[1]) > 5.0) {
@@ -168,259 +220,181 @@ export class DriverProfileService {
       }
     }
 
-    const fileRecord = {
-      uri: dto.fileUri,
-      name: dto.fileName,
-      size: dto.fileSize || '2.0 MB',
-      type: dto.mimeType || 'image/jpeg',
-      uploadedAt: new Date().toISOString(),
-    };
-
     if (dto.docType === 'selfie') {
-      driver.documents.selfie = fileRecord;
-      driver.photo = dto.fileUri;
+      await this.prisma.driverProfile.update({
+        where: { id: driver.id },
+        data: { selfieUrl: dto.fileUri },
+      });
     } else {
       const side = dto.side || 'front';
-      if (!driver.documents[dto.docType]) {
-        driver.documents[dto.docType] = { front: null, back: null, status: 'PENDING' };
+      const existingDoc = await this.prisma.driverDocument.findFirst({
+        where: { driverId: driver.id, type: dto.docType, side },
+      });
+      if (existingDoc) {
+        await this.prisma.driverDocument.update({
+          where: { id: existingDoc.id },
+          data: {
+            fileName: dto.fileName,
+            fileUrl: dto.fileUri,
+            fileSize: dto.fileSize || '2.0 MB',
+            mimeType: dto.mimeType || 'image/jpeg',
+            status: 'PENDING',
+          },
+        });
+      } else {
+        await this.prisma.driverDocument.create({
+          data: {
+            driverId: driver.id,
+            type: dto.docType,
+            side,
+            fileName: dto.fileName,
+            fileUrl: dto.fileUri,
+            fileSize: dto.fileSize || '2.0 MB',
+            mimeType: dto.mimeType || 'image/jpeg',
+            status: 'PENDING',
+          },
+        });
       }
-      driver.documents[dto.docType][side] = fileRecord;
     }
 
+    const refreshed = await this.resolveDriver(driver.id);
     return {
       success: true,
       message: `Document ${dto.docType} (${dto.side || 'file'}) uploaded successfully`,
-      documents: driver.documents,
+      documents: this.groupDocuments(refreshed.documents, refreshed.selfieUrl),
     };
   }
 
   async getKycStatus(driverId?: string) {
-    const driver = this.resolveDriver(driverId);
-    const documentsArray = driver.kycDocuments || [
-      { type: 'Aadhaar Card', status: 'VERIFIED', verifiedAt: '2026-01-11T12:00:00Z' },
-      { type: 'Driving License', number: driver.licenseNumber || 'DL-04202209418', status: 'VERIFIED', verifiedAt: '2026-01-11T12:00:00Z' },
-      { type: 'Vehicle RC', number: driver.vehicleDetails?.rcNumber || 'KA03EV4821', status: 'VERIFIED', verifiedAt: '2026-01-11T12:00:00Z' },
-    ];
+    const driver = await this.resolveDriver(driverId);
+    const docs = this.groupDocuments(driver.documents, driver.selfieUrl);
+
     return {
       driverId: driver.id,
-      fullName: driver.fullName || driver.name,
-      name: driver.name,
+      fullName: driver.fullName,
+      name: driver.fullName,
       kycStatus: driver.kycStatus,
       isApproved: driver.kycStatus === 'APPROVED',
-      rejectionReason: driver.rejectionReason || null,
-      documents: documentsArray,
-      kycDocuments: documentsArray,
-      uploadedDocuments: driver.documents,
-      vehicle: driver.vehicle,
+      rejectionReason: driver.rejectionReason,
+      documents: docs,
     };
   }
 
   async submitKyc(driverId: string | undefined) {
-    const driver = this.resolveDriver(driverId);
+    const driver = await this.resolveDriver(driverId);
+    const docs = this.groupDocuments(driver.documents, driver.selfieUrl);
 
-    // Ensure documents exist (PAN card only has a front face; Aadhaar, DL, and RC require both sides)
-    const docs = driver.documents;
-    const isComplete = Boolean(
-      docs?.aadhaar?.front &&
-        docs?.aadhaar?.back &&
-        docs?.pan?.front &&
-        docs?.drivingLicence?.front &&
-        docs?.drivingLicence?.back &&
-        docs?.vehicleRc?.front &&
-        docs?.vehicleRc?.back &&
-        docs?.selfie,
-    );
-
-    if (!isComplete) {
-      throw new BadRequestException(
-        'All required documents (Aadhaar front & back, PAN front, DL front & back, RC front & back, Selfie) must be uploaded before submitting KYC.',
-      );
+    if (!docs.pan?.front) {
+      throw new BadRequestException('PAN Card front image is required before submitting KYC');
     }
 
-    driver.kycStatus = 'PENDING';
-    driver.rejectionReason = null;
-    driver.status = 'Pending Verification';
+    const updated = await this.prisma.driverProfile.update({
+      where: { id: driver.id },
+      data: { kycStatus: 'UNDER_REVIEW', rejectionReason: null },
+    });
 
     return {
       success: true,
       message: 'KYC submitted successfully. Documents are now under administrative review.',
-      kycStatus: driver.kycStatus,
+      kycStatus: updated.kycStatus,
     };
   }
 
   async updateAvailability(driverId: string | undefined, isOnline: boolean) {
-    const driver = this.resolveDriver(driverId);
+    const driver = await this.resolveDriver(driverId);
 
-    // Enforce account approval: unapproved accounts cannot go online
     if (isOnline && driver.kycStatus !== 'APPROVED') {
-      throw new ForbiddenException(
-        `Driver account cannot go Online while KYC status is '${driver.kycStatus}'. Verification must be APPROVED first.`,
+      throw new BadRequestException(
+        'Cannot go online until KYC verification is approved by Operations Admin',
       );
     }
 
-    driver.isOnline = isOnline;
-    driver.availableSince = isOnline ? (driver.availableSince || new Date().toISOString()) : null;
-
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.driverProfile.updateMany({
-          where: {
-            OR: [{ id: driver.id }, { userId: driver.userId || driver.id }],
-          },
-          data: {
-            isOnline,
-            availableSince: isOnline ? (driver.availableSince ? new Date(driver.availableSince) : new Date()) : null,
-            updatedAt: new Date(),
-          },
-        });
-      } catch (err: any) {
-        this.logger.warn(`Failed to update driver availability in database: ${err.message}`);
-      }
-    }
+    const now = isOnline ? new Date() : null;
+    const updated = await this.prisma.driverProfile.update({
+      where: { id: driver.id },
+      data: {
+        isOnline,
+        availableSince: now,
+      },
+    });
 
     return {
       success: true,
-      driverId: driver.id,
-      isOnline: driver.isOnline,
-      availableSince: driver.availableSince,
+      driverId: updated.id,
+      isOnline: updated.isOnline,
+      availableSince: updated.availableSince ? updated.availableSince.toISOString() : null,
       message: `Driver status set to ${isOnline ? 'Online (Ready for assignments)' : 'Offline'}`,
     };
   }
 
   async updateLocation(driverId: string | undefined, dto: UpdateLocationDto) {
-    const driver = this.resolveDriver(driverId);
+    const driver = await this.resolveDriver(driverId);
 
-    // Validate GPS coordinate bounds
-    if (
-      typeof dto.latitude !== 'number' ||
-      isNaN(dto.latitude) ||
-      dto.latitude < -90 ||
-      dto.latitude > 90 ||
-      typeof dto.longitude !== 'number' ||
-      isNaN(dto.longitude) ||
-      dto.longitude < -180 ||
-      dto.longitude > 180
-    ) {
-      throw new BadRequestException('Invalid GPS coordinates supplied');
+    const lastTs = this.lastLocationTimestampByDriver.get(driver.id) || 0;
+    if (dto.timestamp && dto.timestamp < lastTs) {
+      return {
+        success: true,
+        driverId: driver.id,
+        location: {
+          latitude: driver.currentLat,
+          longitude: driver.currentLng,
+          heading: driver.currentHeading ?? 0,
+        },
+        ignoredStaleUpdate: true,
+      };
     }
 
-    // Validate heading (0 to 360 degrees) and speed (0 to 150)
-    if (dto.heading !== undefined) {
-      if (typeof dto.heading !== 'number' || isNaN(dto.heading) || dto.heading < 0 || dto.heading > 360) {
-        throw new BadRequestException('Invalid heading: must be between 0 and 360 degrees');
-      }
-    }
-    if (dto.speed !== undefined) {
-      if (typeof dto.speed !== 'number' || isNaN(dto.speed) || dto.speed < 0 || dto.speed > 150) {
-        throw new BadRequestException('Invalid speed value');
-      }
-    }
-
-    // Timestamp validation and out-of-order rejection
-    const now = Date.now();
-    let updateTime = now;
     if (dto.timestamp) {
-      const parsed = typeof dto.timestamp === 'number' ? dto.timestamp : new Date(dto.timestamp).getTime();
-      if (isNaN(parsed)) {
-        throw new BadRequestException('Invalid timestamp format');
-      }
-      if (parsed > now + 300000) {
-        throw new BadRequestException('Timestamp cannot be in the future');
-      }
-      if (parsed < now - 86400000) {
-        throw new BadRequestException('Timestamp is too old');
-      }
-      updateTime = parsed;
+      this.lastLocationTimestampByDriver.set(driver.id, dto.timestamp);
     }
 
-    // Protect newer persisted locations from being overwritten by older buffered locations
-    if (driver.currentLocation?.updatedAt) {
-      const lastUpdate = new Date(driver.currentLocation.updatedAt).getTime();
-      if (updateTime <= lastUpdate) {
-        this.logger.warn(
-          `[DriverLocation] Ignored stale/out-of-order update for driver ${driver.id}: updateTime=${new Date(updateTime).toISOString()} <= lastUpdate=${driver.currentLocation.updatedAt}`,
-        );
-        return {
-          success: true,
-          driverId: driver.id,
-          location: driver.currentLocation,
-          ignoredStaleUpdate: true,
-        };
-      }
-    }
+    await this.prisma.driverProfile.update({
+      where: { id: driver.id },
+      data: {
+        currentLat: dto.latitude,
+        currentLng: dto.longitude,
+        currentHeading: dto.heading ?? 0,
+      },
+    });
 
-    // Ownership check on active assignment if orderId provided
-    const store = this.prisma.getStore();
+    // Find active order to broadcast location if live
     let targetOrderId = dto.orderId;
-
-    if (targetOrderId) {
-      const order: any = store.orders.find((o) => o.id === targetOrderId || o.orderNumber === targetOrderId);
-      if (order) {
-        if (order.driverId !== driver.id && order.driverProfileId !== driver.id) {
-          throw new ForbiddenException('Driver is not assigned to this order');
-        }
-        if (['DELIVERED', 'CANCELLED', 'RETURNED'].includes(order.status)) {
-          throw new BadRequestException('Cannot update location for completed or cancelled order');
-        }
-      }
-    } else {
-      // Find current active order for this driver
-      const activeOrder: any = store.orders.find(
-        (o: any) =>
-          (o.driverId === driver.id || o.driverProfileId === driver.id) &&
-          ['ASSIGNED', 'PICKED_UP', 'OUT_FOR_DELIVERY'].includes(o.status),
-      );
-      if (activeOrder) {
-        targetOrderId = activeOrder.id;
-      }
-    }
-
-    driver.currentLocation = {
-      latitude: dto.latitude,
-      longitude: dto.longitude,
-      heading: dto.heading || 0,
-      accuracy: dto.accuracy,
-      speed: dto.speed,
-      updatedAt: new Date(updateTime).toISOString(),
-    };
-
-    this.logger.log(
-      `[DriverLocation] Location persisted for driver ${driver.id} (order: ${targetOrderId || 'none'}): lat=${dto.latitude.toFixed(5)}, lng=${dto.longitude.toFixed(5)}, timestamp=${driver.currentLocation.updatedAt}`,
-    );
-
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.driverProfile.updateMany({
-          where: { id: driver.id },
-          data: {
-            currentLat: dto.latitude,
-            currentLng: dto.longitude,
-            currentHeading: dto.heading || 0,
-            // CRITICAL: availableSince is strictly NOT touched
-          },
-        });
-      } catch {
-        // Fall back gracefully to memory store
-      }
-    }
-
-    // Broadcast live location update to subscribed customer clients
-    if (targetOrderId && this.trackingGateway) {
-      this.trackingGateway.broadcastLocationUpdate(targetOrderId, {
-        latitude: dto.latitude,
-        longitude: dto.longitude,
-        heading: dto.heading || 0,
-        accuracy: dto.accuracy,
-        speed: dto.speed,
-        updatedAt: driver.currentLocation.updatedAt,
-        isStale: false,
+    if (!targetOrderId) {
+      const activeOrder = await this.prisma.order.findFirst({
+        where: {
+          OR: [{ driverProfileId: driver.id }, { driverId: driver.userId }],
+          status: { in: [...LIVE_TRACKING_ACTIVE_STATUSES] as any[] },
+        },
+        orderBy: { updatedAt: 'desc' },
       });
+      targetOrderId = activeOrder?.id;
+    }
+
+    if (targetOrderId && this.trackingGateway) {
+      const orderRow = await this.prisma.order.findUnique({
+        where: { id: targetOrderId },
+        select: { id: true, status: true },
+      });
+      if (orderRow && LIVE_TRACKING_ACTIVE_STATUSES.includes(orderRow.status as OrderStatus)) {
+        this.trackingGateway.broadcastLocationUpdate(orderRow.id, {
+          latitude: dto.latitude,
+          longitude: dto.longitude,
+          heading: dto.heading || 0,
+          accuracy: dto.accuracy,
+          speed: dto.speed,
+          updatedAt: new Date().toISOString(),
+        });
+      }
     }
 
     return {
       success: true,
       driverId: driver.id,
-      location: driver.currentLocation,
+      location: {
+        latitude: dto.latitude,
+        longitude: dto.longitude,
+        heading: dto.heading || 0,
+      },
     };
   }
 }

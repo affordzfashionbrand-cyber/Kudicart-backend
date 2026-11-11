@@ -16,7 +16,9 @@ enum Role {
 
 enum UserStatus {
   ACTIVE
+  INACTIVE
   SUSPENDED
+  DELETED
 }
 
 enum OrderStatus {
@@ -31,6 +33,7 @@ enum OrderStatus {
   RETURNING
   RETURNED
   CANCELLED
+  FAILED
 }
 
 enum PaymentMethod {
@@ -42,6 +45,7 @@ enum PaymentStatus {
   PENDING
   COMPLETED
   FAILED
+  REFUND_PENDING
   REFUNDED
 }
 
@@ -49,6 +53,7 @@ enum SupportTicketStatus {
   OPEN
   IN_PROGRESS
   RESOLVED
+  CLOSED
 }
 
 enum FulfillmentType {
@@ -73,15 +78,18 @@ model User {
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
 
-  addresses    Address[]
-  carts        Cart[]
-  orders       Order[]         @relation("CustomerOrders")
-  driverOrders Order[]         @relation("DriverOrders")
-  reviews      Review[]
-  tickets      SupportTicket[]
-  vendor       Vendor?
-  driverProfile DriverProfile?
-  deviceTokens DeviceToken[]
+  addresses       Address[]
+  carts           Cart[]
+  checkoutGroups  CheckoutGroup[]
+  orders          Order[]          @relation("CustomerOrders")
+  driverOrders    Order[]          @relation("DriverOrders")
+  reviews         Review[]
+  tickets         SupportTicket[]
+  vendor          Vendor?
+  driverProfile   DriverProfile?
+  deviceTokens    DeviceToken[]
+  notifications   Notification[]
+  idempotencyKeys IdempotencyKey[]
 }
 
 model Address {
@@ -107,8 +115,10 @@ model Address {
 
 model Category {
   id           String     @id @default(uuid())
+  code         String?    @unique
   name         String
   slug         String?    @unique
+  description  String?
   level        Int        @default(1) // 1: Main Category, 2: SubCategory, 3: SubSubCategory
   parentId     String?
   parent       Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
@@ -131,16 +141,26 @@ model Category {
 }
 
 model Vendor {
-  id        String    @id @default(uuid())
-  userId    String    @unique
-  user      User      @relation(fields: [userId], references: [id])
-  storeName String
-  products      Product[]
-  orders        Order[]       @relation("VendorOrders")
-  ledgerEntries LedgerEntry[]
-  payouts       VendorPayout[]
-  createdAt     DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  id              String         @id @default(uuid())
+  userId          String         @unique
+  user            User           @relation(fields: [userId], references: [id])
+  storeName       String
+  commissionRate  Float          @default(12.5)
+  status          String         @default("ACTIVE")
+  address         String?
+  phone           String?
+  contactPerson   String?
+  latitude        Float?
+  longitude       Float?
+  operatingHub    String?
+  category        String?
+  rejectionReason String?
+  products        Product[]
+  orders          Order[]        @relation("VendorOrders")
+  ledgerEntries   LedgerEntry[]
+  payouts         VendorPayout[]
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
 }
 
 model DarkStoreHub {
@@ -159,6 +179,7 @@ model DarkStoreHub {
 
 model Product {
   id                String          @id @default(uuid())
+  sku               String?
   vendorId          String
   vendor            Vendor          @relation(fields: [vendorId], references: [id])
   categoryId        String
@@ -173,6 +194,9 @@ model Product {
   reviewsCount      Int             @default(0)
   stockQuantity     Int             @default(10)
   stockBadge        String?
+  listingStatus     String          @default("ACTIVE")
+  gender            String?
+  tags              String[]        @default([])
   readyToShip       Boolean         @default(true)
   sizes             String[]
   fabric            String?
@@ -214,12 +238,15 @@ model Coupon {
 }
 
 model Cart {
-  id        String     @id @default(uuid())
-  userId    String     @unique
-  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  items     CartItem[]
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  id             String     @id @default(uuid())
+  userId         String     @unique
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  couponCode     String?
+  giftWrap       Boolean    @default(false)
+  donationAmount Float      @default(0)
+  items          CartItem[]
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
 }
 
 model CartItem {
@@ -236,35 +263,80 @@ model CartItem {
   updatedAt DateTime @updatedAt
 }
 
-model Order {
+model CheckoutGroup {
   id                String               @id @default(uuid())
-  orderNumber       String               @unique
+  groupNumber       String               @unique
   customerId        String
-  customer          User                 @relation("CustomerOrders", fields: [customerId], references: [id])
-  vendorId          String?
-  vendor            Vendor?              @relation("VendorOrders", fields: [vendorId], references: [id], onDelete: SetNull)
-  driverId          String?
-  driver            User?                @relation("DriverOrders", fields: [driverId], references: [id])
-  driverProfileId   String?
-  driverProfile     DriverProfile?       @relation("DriverProfileOrders", fields: [driverProfileId], references: [id], onDelete: SetNull)
+  customer          User                 @relation(fields: [customerId], references: [id])
   addressId         String?
-  address           Address?             @relation(fields: [addressId], references: [id], onDelete: SetNull)
   deliveryAddress   Json?
-  status            OrderStatus          @default(PLACED)
   paymentMethod     PaymentMethod
   paymentStatus     PaymentStatus        @default(PENDING)
-  razorpayOrderId   String?
+  razorpayOrderId   String?              @unique
   razorpayPaymentId String?
-  itemTotal         Float
-  deliveryFee       Float                @default(40.0)
-  taxes             Float
-  grandTotal        Float
-  etaMinutes        Int                  @default(35)
-  isTryAndBuy       Boolean              @default(false)
   couponCode        String?
-  discountAmount    Float                @default(0)
+  itemTotal         Float
+  discountTotal     Float                @default(0)
+  giftWrapFee       Float                @default(0)
+  donationAmount    Float                @default(0)
+  deliveryFeeTotal  Float                @default(0)
+  taxesTotal        Float                @default(0)
+  grandTotal        Float
+  expiresAt         DateTime?
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
+
+  orders            Order[]
+  transactions      PaymentTransaction[]
+
+  @@index([customerId])
+  @@index([paymentStatus, expiresAt])
+}
+
+model Order {
+  id                 String               @id @default(uuid())
+  orderNumber        String               @unique
+  version            Int                  @default(1)
+  checkoutGroupId    String?
+  checkoutGroup      CheckoutGroup?       @relation(fields: [checkoutGroupId], references: [id], onDelete: SetNull)
+  customerId         String
+  customer           User                 @relation("CustomerOrders", fields: [customerId], references: [id])
+  vendorId           String?
+  vendor             Vendor?              @relation("VendorOrders", fields: [vendorId], references: [id], onDelete: SetNull)
+  driverId           String?
+  driver             User?                @relation("DriverOrders", fields: [driverId], references: [id])
+  driverProfileId    String?
+  driverProfile      DriverProfile?       @relation("DriverProfileOrders", fields: [driverProfileId], references: [id], onDelete: SetNull)
+  addressId          String?
+  address            Address?             @relation(fields: [addressId], references: [id], onDelete: SetNull)
+  deliveryAddress    Json?
+  fulfillmentType    FulfillmentType      @default(DARK_STORE)
+  status             OrderStatus          @default(PLACED)
+  paymentMethod      PaymentMethod
+  paymentStatus      PaymentStatus        @default(PENDING)
+  razorpayOrderId    String?
+  razorpayPaymentId  String?
+  itemTotal          Float
+  deliveryFee        Float                @default(40.0)
+  taxes              Float
+  giftWrapFee        Float                @default(0)
+  donationAmount     Float                @default(0)
+  grandTotal         Float
+  etaMinutes         Int                  @default(35)
+  isTryAndBuy        Boolean              @default(false)
+  couponCode           String?
+  discountAmount       Float                @default(0)
+  deliveryInstructions String?
+  verificationPhotos   String[]             @default([])
+  deliveryOtpHash      String?
+  arrivedAt          DateTime?
+  deliveredAt        DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+  rejectedByVendor   Boolean              @default(false)
+  expiresAt          DateTime?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
 
   items              OrderItem[]
   history            OrderStatusHistory[]
@@ -275,27 +347,32 @@ model Order {
   ledgerEntries      LedgerEntry[]
   dispatchAssignment DispatchAssignment?
 
+  @@index([checkoutGroupId])
   @@index([customerId])
   @@index([vendorId])
   @@index([driverId])
   @@index([driverProfileId])
   @@index([status])
+  @@index([paymentStatus, expiresAt])
   @@index([createdAt])
 }
 
 model OrderItem {
-  id        String   @id @default(uuid())
-  orderId   String
-  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  productId String
-  product   Product  @relation(fields: [productId], references: [id])
-  title     String
-  brand     String
-  size      String
-  trialSize String?
-  price     Float
-  quantity  Int
-  image     String
+  id                String    @id @default(uuid())
+  orderId           String
+  order             Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId         String
+  product           Product   @relation(fields: [productId], references: [id])
+  title             String
+  brand             String
+  size              String
+  trialSize         String?
+  price             Float
+  quantity          Int
+  image             String
+  tryAndBuyDecision String?
+  returnCondition   String?
+  collectedAt       DateTime?
 }
 
 model OrderStatusHistory {
@@ -304,33 +381,49 @@ model OrderStatusHistory {
   order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
   status    OrderStatus
   note      String?
+  actorId   String?
+  actorRole String?
   createdAt DateTime    @default(now())
 }
 
 model SupportTicket {
-  id        String              @id @default(uuid())
-  userId    String
-  user      User                @relation(fields: [userId], references: [id])
-  orderId   String?
-  order     Order?              @relation(fields: [orderId], references: [id])
-  title     String
-  category  String
-  status    SupportTicketStatus @default(OPEN)
-  createdAt DateTime            @default(now())
-  updatedAt DateTime            @updatedAt
+  id                String              @id @default(uuid())
+  userId            String
+  user              User                @relation(fields: [userId], references: [id])
+  orderId           String?
+  order             Order?              @relation(fields: [orderId], references: [id])
+  title             String
+  description       String              @default("")
+  category          String
+  priority          String              @default("MEDIUM")
+  status            SupportTicketStatus @default(OPEN)
+  assignee          String?
+  resolutionRemarks String?
+  resolvedAt        DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
 }
 
 model Review {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
-  productId String
-  product   Product  @relation(fields: [productId], references: [id])
-  orderId   String
-  order     Order    @relation(fields: [orderId], references: [id])
-  rating    Int
-  comment   String
-  createdAt DateTime @default(now())
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id])
+  rating     Int
+  comment    String
+  status     String   @default("PUBLISHED")
+  flagReason String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@index([productId, status, createdAt])
+  @@index([userId, createdAt])
 }
 
 model DriverProfile {
@@ -440,10 +533,13 @@ model TryAndBuySession {
   amountDue                  Float?
   paymentStatus              String?
   returnManifestId           String?
-  keptItemIds                String[]       @default([])
-  returnedItemIds            String[]       @default([])
+  keptItemIds               String[]       @default([])
+  returnedItemIds           String[]       @default([])
+  handoverImages            String[]       @default([])
+  returnImages              String[]       @default([])
+  customerSelectionAt       DateTime?
   storeReconciliationStatus String?
-  storeReconciledAt          DateTime?
+  storeReconciledAt         DateTime?
   createdAt                  DateTime       @default(now())
   updatedAt                  DateTime       @updatedAt
 
@@ -484,20 +580,28 @@ model AuditLog {
 }
 
 model PaymentTransaction {
-  id              String   @id @default(uuid())
-  orderId         String
-  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  paymentId       String   @unique
+  id              String         @id @default(uuid())
+  orderId         String?
+  order           Order?         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  checkoutGroupId String?
+  checkoutGroup   CheckoutGroup? @relation(fields: [checkoutGroupId], references: [id], onDelete: Cascade)
+  paymentId       String
+  refundId        String?        @unique
+  transactionType String         @default("CAPTURE")
   razorpayOrderId String?
   signature       String?
   amount          Float
-  currency        String   @default("INR")
+  currency        String         @default("INR")
   status          String
   method          String?
-  eventId         String?  @unique
+  eventId         String?        @unique
   failureReason   String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([paymentId])
+  @@index([checkoutGroupId])
+  @@index([orderId])
 }
 
 model LedgerEntry {
@@ -563,4 +667,84 @@ model OutboxEvent {
 
   @@index([status, createdAt])
   @@index([aggregateType, aggregateId])
+}
+
+model IdempotencyKey {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scope        String
+  key          String
+  requestHash  String
+  statusCode   Int
+  responseBody Json
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+
+  @@unique([userId, scope, key])
+  @@index([expiresAt])
+}
+
+model WebhookEvent {
+  id              String   @id @default(uuid())
+  provider        String   @default("RAZORPAY")
+  eventId         String   @unique
+  eventType       String
+  payloadHash     String
+  orderId         String?
+  checkoutGroupId String?
+  processedAt     DateTime @default(now())
+}
+
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String?
+  user      User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role?
+  orderId   String?
+  category  String    @default("ORDER")
+  title     String
+  body      String
+  data      Json?
+  isRead    Boolean   @default(false)
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, isRead, createdAt])
+  @@index([role, createdAt])
+}
+
+model DriverShift {
+  id           String   @id @default(uuid())
+  dayOfWeek    Int
+  day          String
+  dateStr      String
+  timeRange    String
+  duration     String
+  hub          String
+  hubAddress   String   @default("")
+  status       String   @default("CONFIRMED")
+  statusLabel  String
+  breakTime    String?
+  attendance   String?
+  displayOrder Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model DriverSurge {
+  id          String   @id @default(uuid())
+  title       String
+  area        String
+  timeWindow  String
+  bonusAmount Int
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model WorkspaceSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
 }

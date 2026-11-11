@@ -1,148 +1,231 @@
 import {
   Injectable,
-  NotFoundException,
   BadRequestException,
+  NotFoundException,
   ForbiddenException,
+  ConflictException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateReviewDto } from './dto/create-review.dto';
 
+const ID_ALIASES: Record<string, string> = {
+  '1': 'prod-1',
+  '101': 'prod-2',
+  '102': 'prod-1',
+  '103': 'prod-3',
+  '104': 'prod-5',
+  '105': 'prod-6',
+  '106': 'prod-4',
+  '107': 'prod-10',
+  '108': 'prod-7',
+  '2': 'prod-5',
+  '3': 'prod-9',
+  '4': 'prod-6',
+  '9': 'prod-4',
+};
+
 @Injectable()
 export class ReviewsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
+
+  private ensureDbConnected() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
+    }
+  }
+
+  private resolveProductId(productId: string): string {
+    return ID_ALIASES[productId] || productId;
+  }
+
+  private async resolveCanonicalUserId(userId: string): Promise<string> {
+    const user = await this.prisma.user.findFirst({
+      where: {
+        OR: [{ id: userId }, { firebaseUid: userId }],
+      },
+      select: { id: true },
+    });
+
+    if (!user) {
+      throw new NotFoundException('Authenticated customer profile not found.');
+    }
+
+    return user.id;
+  }
+
+  private formatReview(review: any) {
+    const authorName = review.user?.name || 'Verified Buyer';
+    const authorAvatar = review.user?.avatar || null;
+    const authorId = review.user?.id || review.userId;
+
+    return {
+      id: review.id,
+      userId: review.userId,
+      productId: review.productId,
+      orderId: review.orderId,
+      rating: review.rating,
+      comment: review.comment,
+      status: review.status,
+      createdAt: review.createdAt,
+      updatedAt: review.updatedAt,
+      author: {
+        id: authorId,
+        name: authorName,
+        avatar: authorAvatar,
+      },
+      user: {
+        id: authorId,
+        name: authorName,
+        avatar: authorAvatar,
+      },
+    };
+  }
 
   async createReview(userId: string, dto: CreateReviewDto) {
-    const store = this.prisma.getStore();
+    this.ensureDbConnected();
 
-    // 1. Verify Product
-    let product = store.products.find(
-      (p) => p.id === dto.productId || p.id === `prod-${dto.productId}` || dto.productId.includes(p.id)
-    );
-    if (!product && store.products.length > 0) {
-      product = store.products[0];
-    }
+    const canonicalUserId = await this.resolveCanonicalUserId(userId);
+    const resolvedProductId = this.resolveProductId(dto.productId);
+
+    const product = await this.prisma.product.findUnique({
+      where: { id: resolvedProductId },
+      select: { id: true, title: true },
+    });
+
     if (!product) {
-      throw new NotFoundException(`Product ${dto.productId} not found`);
+      throw new NotFoundException(`Product '${dto.productId}' not found.`);
     }
 
-    // 2. Verify Order & Delivery Status (Review eligibility rule: order must be delivered to customer)
-    const order: any = store.orders.find((o) => o.id === dto.orderId || o.orderNumber === dto.orderId);
+    const order = await this.prisma.order.findFirst({
+      where: {
+        OR: [{ id: dto.orderId }, { orderNumber: dto.orderId }],
+      },
+      include: {
+        items: true,
+        tryAndBuySession: true,
+      },
+    });
 
     if (!order) {
-      throw new NotFoundException(`Order ${dto.orderId} not found`);
+      throw new NotFoundException(`Order '${dto.orderId}' not found.`);
     }
 
-    if (order.customerId && order.customerId !== userId && !userId.startsWith('usr-customer') && !order.customerId.startsWith('usr-customer')) {
-      throw new ForbiddenException('You can only review products from your own orders');
+    if (order.customerId !== canonicalUserId) {
+      throw new ForbiddenException('You can only review products from your own orders.');
     }
 
-    if (order.status !== 'DELIVERED') {
-      throw new BadRequestException('You can only review items after the order is delivered');
+    const matchingItems = order.items.filter(
+      (item) => item.productId === product.id || item.productId === dto.productId,
+    );
+
+    if (matchingItems.length === 0) {
+      throw new BadRequestException('This product was not purchased in the specified order.');
     }
 
-    const hasItem = order.items.some((i: any) => i.productId === product.id || i.id === product.id);
-    if (!hasItem) {
-      // Add item association so review integrity holds
-      order.items.push({
-        id: `oi-${Date.now()}`,
+    if (order.isTryAndBuy) {
+      const session = order.tryAndBuySession;
+      const hasKeptDecision = matchingItems.some(
+        (item) =>
+          item.tryAndBuyDecision === 'KEEP' ||
+          (session?.keptItemIds || []).includes(item.id),
+      );
+
+      if (session) {
+        const isSettled = session.stage === 'COMPLETED' || session.stage === 'SETTLED';
+        if (!isSettled || !hasKeptDecision) {
+          throw new BadRequestException(
+            'Reviews for Try & Buy orders require a settled trial with the product kept.',
+          );
+        }
+      } else {
+        const isDeliveredWithoutReturn =
+          order.status === 'DELIVERED' &&
+          matchingItems.some((item) => item.tryAndBuyDecision !== 'RETURN');
+        if (!isDeliveredWithoutReturn) {
+          throw new BadRequestException(
+            'Only delivered orders with kept items can be reviewed.',
+          );
+        }
+      }
+    } else if (order.status !== 'DELIVERED') {
+      throw new BadRequestException('You can only review products after the order is DELIVERED.');
+    }
+
+    const duplicate = await this.prisma.review.findFirst({
+      where: {
+        userId: canonicalUserId,
         productId: product.id,
-        title: product.title,
-        brand: product.brand,
-        size: 'M',
-        price: product.price,
-        quantity: 1,
-        image: (product as any).image || product.galleryImages?.[0],
-      });
+        orderId: order.id,
+      },
+    });
+
+    if (duplicate) {
+      throw new ConflictException('You have already submitted a review for this item on this order.');
     }
 
-    // 3. Create Review
-    const newReview = {
-      id: `rev-${Date.now()}`,
-      userId,
-      productId: product.id,
-      orderId: order.id,
-      rating: dto.rating,
-      comment: dto.comment,
-      createdAt: new Date().toISOString(),
-    };
+    const created = await this.prisma.$transaction(async (tx) => {
+      const review = await tx.review.create({
+        data: {
+          id: `rev-${randomUUID().slice(0, 8)}`,
+          userId: canonicalUserId,
+          productId: product.id,
+          orderId: order.id,
+          rating: dto.rating,
+          comment: dto.comment.trim(),
+          status: 'PUBLISHED',
+        },
+        include: {
+          user: {
+            select: { id: true, name: true, avatar: true },
+          },
+        },
+      });
 
-    store.reviews.push(newReview);
+      const stats = await tx.review.aggregate({
+        where: { productId: product.id, status: 'PUBLISHED' },
+        _avg: { rating: true },
+        _count: { _all: true },
+      });
 
-    // 4. Update Product average rating
-    const productReviews = store.reviews.filter((r) => r.productId === dto.productId);
-    const avgRating =
-      productReviews.reduce((sum, r) => sum + r.rating, 0) / productReviews.length;
+      const nextRating =
+        stats._avg.rating !== null ? Number(stats._avg.rating.toFixed(1)) : 4.5;
 
-    product.rating = Number(avgRating.toFixed(1));
-    product.reviewsCount = productReviews.length;
+      await tx.product.update({
+        where: { id: product.id },
+        data: {
+          rating: nextRating,
+          reviewsCount: stats._count._all,
+        },
+      });
+
+      return review;
+    });
 
     return {
       success: true,
-      message: 'Review submitted successfully',
-      review: newReview,
+      review: this.formatReview(created),
     };
   }
 
   async getReviewsForProduct(productId: string) {
-    const store = this.prisma.getStore();
-    const rawId = String(productId).trim();
-    const ID_ALIASES: Record<string, string> = {
-      '101': 'prod-2',
-      'prod-101': 'prod-2',
-      '102': 'prod-1',
-      'prod-102': 'prod-1',
-      '103': 'prod-3',
-      'prod-103': 'prod-3',
-      '104': 'prod-5',
-      'prod-104': 'prod-5',
-      '105': 'prod-6',
-      'prod-105': 'prod-6',
-      '106': 'prod-4',
-      'prod-106': 'prod-4',
-      '107': 'prod-10',
-      'prod-107': 'prod-10',
-      '108': 'prod-7',
-      'prod-108': 'prod-7',
-      '1': 'prod-1',
-      'prod-1': 'prod-1',
-      '2': 'prod-5',
-      'prod-2': 'prod-2',
-      '3': 'prod-9',
-      'prod-3': 'prod-3',
-      '4': 'prod-6',
-      'prod-4': 'prod-4',
-      '5': 'prod-5',
-      'prod-5': 'prod-5',
-      '6': 'prod-6',
-      'prod-6': 'prod-6',
-      '7': 'prod-7',
-      'prod-7': 'prod-7',
-      '8': 'prod-8',
-      'prod-8': 'prod-8',
-      '9': 'prod-4',
-      'prod-9': 'prod-9',
-      '10': 'prod-10',
-      'prod-10': 'prod-10',
-    };
-    const targetId = ID_ALIASES[rawId] || rawId;
+    this.ensureDbConnected();
 
-    const reviews = store.reviews.filter(
-      (r) => r.productId === targetId || r.productId === rawId
-    );
-
-    return reviews.map((r) => {
-      const user = store.users.find((u) => u.id === r.userId);
-      return {
-        id: r.id,
-        productId: r.productId,
-        rating: r.rating,
-        comment: r.comment,
-        createdAt: r.createdAt,
-        author: {
-          name: user?.name || 'Verified Customer',
-          avatar: user?.avatar,
+    const resolvedProductId = this.resolveProductId(productId);
+    const reviews = await this.prisma.review.findMany({
+      where: {
+        productId: resolvedProductId,
+        status: 'PUBLISHED',
+      },
+      include: {
+        user: {
+          select: { id: true, name: true, avatar: true },
         },
-      };
+      },
+      orderBy: { createdAt: 'desc' },
     });
+
+    return reviews.map((review) => this.formatReview(review));
   }
 }

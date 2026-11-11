@@ -63,8 +63,37 @@ export class AdminUserAccessController {
     return this.accessService.getRolePermissions();
   }
 
+  @Get('permissions')
+  async getPermissionsAlias() {
+    return this.accessService.getRolePermissions();
+  }
+
   @Put('role-permissions')
   async updateRolePermissions(
+    @Body() dto: UpdateRolePermissionsDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.accessService.updateRolePermissions(dto, actor?.id, actor?.name);
+  }
+
+  @Patch('role-permissions')
+  async patchRolePermissionsAlias(
+    @Body() dto: UpdateRolePermissionsDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.accessService.updateRolePermissions(dto, actor?.id, actor?.name);
+  }
+
+  @Put('permissions')
+  async putPermissionsAlias(
+    @Body() dto: UpdateRolePermissionsDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.accessService.updateRolePermissions(dto, actor?.id, actor?.name);
+  }
+
+  @Patch('permissions')
+  async patchPermissionsAlias(
     @Body() dto: UpdateRolePermissionsDto,
     @CurrentUser() actor: AuthenticatedUser,
   ) {

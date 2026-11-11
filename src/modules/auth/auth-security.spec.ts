@@ -17,7 +17,6 @@ import { DriverAuthService } from '../driver/driver-auth.service';
 import { AdminAuthService } from '../admin/services/admin-auth.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
-import { DispatchService } from '../orders/dispatch.service';
 import { AppModule } from '../../app.module';
 
 describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
@@ -35,6 +34,7 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
     app = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
+    await app.init();
 
     authGuard = app.get<FirebaseAuthGuard>(FirebaseAuthGuard);
     rolesGuard = new RolesGuard(app.get<Reflector>(Reflector));
@@ -185,7 +185,7 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
         name: 'Ananya Sharma',
       });
       const { context, request } = createMockContext(`Bearer ${token}`);
-      const allowed = authGuard.canActivate(context);
+      const allowed = await authGuard.canActivate(context);
       expect(allowed).toBe(true);
       expect(request.user).toBeDefined();
       expect(request.user.id).toBe('usr-1');
@@ -209,31 +209,31 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
       };
     };
 
-    it('rejects Customer token on Admin-only routes with 403 Forbidden', () => {
+    it('rejects Customer token on Admin-only routes with 403 Forbidden', async () => {
       const customerToken = createJwtToken({ uid: 'usr-1', role: Role.CUSTOMER });
       const { context } = createMockContext(customerToken);
 
       // 1. AuthGuard accepts verified token
-      authGuard.canActivate(context);
+      await authGuard.canActivate(context);
       // 2. RolesGuard checks Role.ADMIN
       jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue([Role.ADMIN]);
       expect(() => rolesGuard.canActivate(context)).toThrow(ForbiddenException);
     });
 
-    it('rejects Driver token on Admin-only routes with 403 Forbidden', () => {
+    it('rejects Driver token on Admin-only routes with 403 Forbidden', async () => {
       const driverToken = createJwtToken({ uid: 'usr-driver-1', role: Role.DRIVER, driverId: 'drv-1' });
       const { context } = createMockContext(driverToken);
 
-      authGuard.canActivate(context);
+      await authGuard.canActivate(context);
       jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue([Role.ADMIN]);
       expect(() => rolesGuard.canActivate(context)).toThrow(ForbiddenException);
     });
 
-    it('allows Admin token on Admin routes', () => {
+    it('allows Admin token on Admin routes', async () => {
       const adminToken = createJwtToken({ uid: 'usr-admin-1', role: Role.ADMIN });
       const { context, request } = createMockContext(adminToken);
 
-      authGuard.canActivate(context);
+      await authGuard.canActivate(context);
       jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue([Role.ADMIN]);
       expect(rolesGuard.canActivate(context)).toBe(true);
       expect(request.user.role).toBe(Role.ADMIN);
@@ -267,6 +267,46 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
       const verified = verifyJwtToken(res.token);
       expect(verified.valid).toBe(true);
       expect(verified.payload.role).toBe(Role.CUSTOMER);
+    });
+
+    it('normalizes phone formats between sendOtp and verifyOtp', async () => {
+      await authService.sendOtp('9845012890');
+      const testOtp = authService.getOtpForTesting('+91 98450 12890');
+      expect(testOtp).toMatch(/^\d{6}$/);
+
+      const res = await authService.verifyOtp('+919845012890', testOtp!);
+      expect(res.success).toBe(true);
+      expect(res.token).toBeDefined();
+    });
+
+    it('returns devOtp only in local non-test development and omits it in test/staging', async () => {
+      const prevNodeEnv = process.env.NODE_ENV;
+      const prevAppEnv = process.env.APP_ENV;
+      const prevDisable = process.env.DISABLE_DEV_OTP;
+
+      try {
+        process.env.NODE_ENV = 'test';
+        process.env.APP_ENV = 'development';
+        delete process.env.DISABLE_DEV_OTP;
+        const testRes = await authService.sendOtp('+91 98450 12890');
+        expect((testRes as any).devOtp).toBeUndefined();
+
+        delete process.env.NODE_ENV;
+        process.env.APP_ENV = 'development';
+        const devRes = await authService.sendOtp('+91 98450 12890');
+        expect((devRes as any).devOtp).toMatch(/^\d{6}$/);
+        expect((devRes as any).countdownSeconds).toBe(30);
+
+        process.env.APP_ENV = 'staging';
+        const stagingRes = await authService.sendOtp('+91 98450 12890');
+        expect((stagingRes as any).devOtp).toBeUndefined();
+      } finally {
+        process.env.NODE_ENV = prevNodeEnv;
+        if (prevAppEnv === undefined) delete process.env.APP_ENV;
+        else process.env.APP_ENV = prevAppEnv;
+        if (prevDisable === undefined) delete process.env.DISABLE_DEV_OTP;
+        else process.env.DISABLE_DEV_OTP = prevDisable;
+      }
     });
 
     it('logs in via Firebase ID token and returns signed JWT', async () => {
@@ -315,7 +355,7 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
     it('rejects invalid admin password with 401 Unauthorized', async () => {
       await expect(
         adminAuthService.login({
-          email: 'amara@kudicart.com',
+          email: 'amara@affordz.in',
           password: 'WrongPassword123!',
         }),
       ).rejects.toThrow(UnauthorizedException);
@@ -323,8 +363,8 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
 
     it('authenticates valid admin and returns signed JWT with Role.ADMIN', async () => {
       const res = await adminAuthService.login({
-        email: 'amara@kudicart.com',
-        password: 'KudiCart#Admin2026!',
+        email: 'amara@affordz.in',
+        password: 'Affordz#Admin2026!',
       });
       expect(res.success).toBe(true);
       expect(res.role).toBe(Role.ADMIN);
@@ -340,7 +380,7 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
     });
 
     it('authenticates recognized admin via Firebase ID token', async () => {
-      const testToken = 'test-firebase-id-token:fb-admin-user:+919999900000:amara@kudicart.com';
+      const testToken = 'test-firebase-id-token:fb-admin-user:+919999900000:amara@affordz.in';
       const res = await adminAuthService.loginFirebase(testToken);
       expect(res.success).toBe(true);
       expect(res.role).toBe(Role.ADMIN);
@@ -370,14 +410,15 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
       expect(result.error).toBe('Unsupported or prohibited JWT algorithm');
     });
 
-    it('does not default driverId to drv-1 when driverId claim is absent from token', () => {
-      const token = createJwtToken({ uid: 'usr-unassigned-driver', role: Role.DRIVER });
+    it('does not default driverId to drv-1 when driverId claim is absent from token', async () => {
+      const token = createJwtToken({ sub: 'usr-unassigned-driver', role: Role.DRIVER });
       const mockReq: any = { headers: { authorization: `Bearer ${token}` } };
       const mockCtx: any = {
         switchToHttp: () => ({ getRequest: () => mockReq }),
       };
 
-      authGuard.canActivate(mockCtx);
+      const statelessGuard = new FirebaseAuthGuard();
+      await statelessGuard.canActivate(mockCtx);
       expect(mockReq.user).toBeDefined();
       expect(mockReq.user.role).toBe(Role.DRIVER);
       expect(mockReq.user.driverId).toBeUndefined();
@@ -390,26 +431,14 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
       ).rejects.toThrow(Error);
     });
 
-    it('FIFO dispatch fails safely when zero drivers are online/available', async () => {
-      const dispatchService = app.get<DispatchService>(DispatchService);
-      const store = prisma.getStore();
-
-      // Temporarily mark all drivers offline
-      const originalStates = store.drivers.map((d: any) => ({ id: d.id, isOnline: d.isOnline }));
-      store.drivers.forEach((d: any) => { d.isOnline = false; });
-
-      const testOrder = store.orders[0];
-      testOrder.status = 'READY_FOR_PICKUP';
-
-      const res = await dispatchService.dispatchOrderFifo(testOrder.id);
-      expect(res.success).toBe(false);
-      expect(res.message).toMatch(/No delivery partners are currently available/);
-
-      // Restore states
-      originalStates.forEach((os: any) => {
-        const d = store.drivers.find((dr: any) => dr.id === os.id);
-        if (d) d.isOnline = os.isOnline;
-      });
+    it('D-006 manual dispatch: rejects non-admin callers with 403 Forbidden', async () => {
+      const ordersService = app.get<OrdersService>(OrdersService);
+      await expect(
+        ordersService.assignDriver('nonexistent-order', 'drv-1', Role.VENDOR, 'usr-vendor-1'),
+      ).rejects.toThrow(ForbiddenException);
+      await expect(
+        ordersService.assignDriver('nonexistent-order', 'drv-1', Role.DRIVER, 'usr-driver-1'),
+      ).rejects.toThrow(ForbiddenException);
     });
   });
 });

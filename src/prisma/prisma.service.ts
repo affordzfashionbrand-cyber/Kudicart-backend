@@ -50,7 +50,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         id: 'usr-driver-1',
         firebaseUid: 'fb-driver-123',
         phone: '+91 98765 43210',
-        email: 'rajesh.driver@kudicart.in',
+        email: 'rajesh.driver@affordz.in',
         name: 'Rajesh Kumar',
         avatar:
           'https://lh3.googleusercontent.com/aida-public/AB6AXuB-9n0OJClXNM6d0TX37sDPYy2u14Q2urWrIDrGrcsqp-xeOqvJWO4kLCkJM2p4l8e4m4L2wDCHqTawwJ4RiTjZPrGzg0jToIbTJpMggV8VY-XM8NL1FIq9KmGLwPNEJ_9rmCB4K-W2qmOS5AXnWOrQVPZSlvSNve7Z3L9QAVxRKy5jXEY_LUYbxNPc7m3PZ877qBOS_WWQ8dabL-BBYfbKqFLHaaegb80kVZpY-Z_FPvHZPdgyE2SFDA',
@@ -62,7 +62,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         id: 'usr-vendor-1',
         firebaseUid: 'fb-vendor-123',
         phone: '+91 80 4123 9988',
-        email: 'vendor.avanya@kudicart.in',
+        email: 'vendor.avanya@affordz.in',
         name: 'Meera Deshmukh',
         avatar: null,
         role: 'VENDOR',
@@ -73,7 +73,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         id: 'usr-admin-1',
         firebaseUid: 'fb-admin-123',
         phone: '+91 99999 00000',
-        email: 'admin@kudicart.in',
+        email: 'admin@affordz.in',
         name: 'Operations Admin',
         avatar: null,
         role: 'ADMIN',
@@ -666,8 +666,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   };
 
   async onModuleInit() {
-    const isProduction =
-      process.env.APP_ENV === 'production' || process.env.NODE_ENV === 'production';
+    const isTest = process.env.NODE_ENV === 'test';
 
     if (process.env.DATABASE_URL) {
       try {
@@ -675,22 +674,22 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
         this.isConnectedToDb = true;
         this.logger.log('PrismaService: Successfully connected to PostgreSQL database.');
       } catch (err: any) {
-        if (isProduction) {
+        if (!isTest) {
           throw new Error(
-            `FATAL: PostgreSQL database connection failed in production mode: ${err.message}`,
+            `FATAL: PostgreSQL database connection failed: ${err.message}`,
           );
         }
         this.logger.warn(
-          `PrismaService: PostgreSQL connection failed (${err.message}). Operating with validated fallback store in development/test.`,
+          `PrismaService: PostgreSQL connection failed (${err.message}) in test mode.`,
         );
       }
     } else {
-      if (isProduction) {
+      if (!isTest) {
         throw new Error(
-          'FATAL: DATABASE_URL environment variable is strictly required in production mode',
+          'FATAL: DATABASE_URL environment variable is required outside test mode',
         );
       }
-      this.logger.log('PrismaService: Running in hybrid mode with authoritative in-memory store.');
+      this.logger.warn('PrismaService: DATABASE_URL unset in test mode; DB queries will fail closed unless mocked.');
     }
   }
 
@@ -707,7 +706,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     return this.store;
   }
 
-  recordAuditEvent(event: {
+  async recordAuditEvent(event: {
     actorId?: string;
     actorName?: string;
     actorRole?: string;
@@ -750,7 +749,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       entityType: event.entityType,
       ipAddress: event.ipAddress || '127.0.0.1',
       gatewayVpn: 'MUM-VPN-NODE-01',
-      userAgent: event.userAgent || 'KudiCart Admin Portal',
+      userAgent: event.userAgent || 'Affordz Admin Portal',
       sessionTokenHash: `sha256:${Date.now().toString(16)}`,
       summary: event.summary,
       targetDescription: event.targetDescription || `${event.entityType} ${event.entityId}`,
@@ -759,6 +758,31 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     };
 
     this.store.auditEvents.unshift(auditEntry);
+
+    if (this.isConnectedToDb) {
+      await this.auditLog
+        .create({
+          data: {
+            userId: event.actorId || 'ADM-001',
+            userEmail: actorName,
+            userRole: event.actorRole || 'ADMIN',
+            action: event.actionType,
+            entityType: event.entityType,
+            entityId: event.entityId,
+            details: JSON.stringify({
+              summary: event.summary,
+              entityName: event.entityName || event.entityId,
+              targetDescription:
+                event.targetDescription || `${event.entityType} ${event.entityId}`,
+              changePayload: event.changePayload || {},
+              entityLink: event.entityLink,
+            }),
+            ipAddress: event.ipAddress || '127.0.0.1',
+          },
+        })
+        .catch(() => {});
+    }
+
     return auditEntry;
   }
 }

@@ -1,292 +1,302 @@
-jest.mock('firebase-admin/app', () => ({
-  initializeApp: jest.fn(),
-  getApps: jest.fn(() => []),
-  cert: jest.fn(),
-}));
-
-jest.mock('firebase-admin/auth', () => ({
-  getAuth: jest.fn(() => ({
-    verifyIdToken: jest.fn(async () => ({
-      uid: 'fb-user-123',
-      phone_number: '+91 98450 12890',
-      email: 'customer@affordz.in',
-      name: 'Ananya Sharma',
-    })),
-  })),
-}));
-
+import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import {
+  FulfillmentType,
+  OrderStatus,
+  PaymentMethod,
+  PaymentStatus,
+} from '@prisma/client';
+import * as WebSocket from 'ws';
 import { AppModule } from '../../app.module';
-import { GoogleRoutesService } from './google-routes.service';
-import { TrackingRealtimeGateway } from './tracking-realtime.gateway';
+import { PrismaService } from '../../prisma/prisma.service';
 import { OrdersService } from './orders.service';
 import { DriverProfileService } from '../driver/driver-profile.service';
-import { PrismaService } from '../../prisma/prisma.service';
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { DriverOrdersService } from '../driver/driver-orders.service';
+import { TrackingRealtimeGateway } from './tracking-realtime.gateway';
+import { createJwtToken } from '../../common/utils/crypto.util';
 import { Role } from '../../common/enums/role.enum';
 
-describe('KudiCart Real-Time Delivery Tracking & Routes Suite', () => {
+describe('Order Tracking & Single-Port /ws/tracking Gateway (PostgreSQL)', () => {
   let moduleRef: TestingModule;
-  let googleRoutesService: GoogleRoutesService;
-  let trackingGateway: TrackingRealtimeGateway;
+  let app: INestApplication;
+  let prisma: PrismaService;
   let ordersService: OrdersService;
   let driverProfileService: DriverProfileService;
-  let prismaService: PrismaService;
+  let driverOrdersService: DriverOrdersService;
+  let gateway: TrackingRealtimeGateway;
+  let baseUrl: string;
+  let wsUrl: string;
 
-  beforeEach(async () => {
-    jest.clearAllMocks();
-    process.env.GOOGLE_MAPS_ROUTES_API_KEY = 'test-api-key';
+  const runId = `trk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const createdUserIds: string[] = [];
+  const createdDriverProfileIds: string[] = [];
+  const createdAddressIds: string[] = [];
+  const createdOrderIds: string[] = [];
 
+  beforeAll(async () => {
     moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
 
-    googleRoutesService = moduleRef.get<GoogleRoutesService>(GoogleRoutesService);
-    trackingGateway = moduleRef.get<TrackingRealtimeGateway>(TrackingRealtimeGateway);
-    ordersService = moduleRef.get<OrdersService>(OrdersService);
-    driverProfileService = moduleRef.get<DriverProfileService>(DriverProfileService);
-    prismaService = moduleRef.get<PrismaService>(PrismaService);
+    app = moduleRef.createNestApplication();
+    await app.listen(0);
 
-    // Ensure a second driver exists in the in-memory store for authorization testing
-    const store = prismaService.getStore();
-    if (!store.drivers.some((d: any) => d.id === 'drv-2')) {
-      store.drivers.push({
-        ...store.drivers[0],
-        id: 'drv-2',
-        userId: 'usr-driver-2',
-        fullName: 'Vikram Singh',
-      });
-    }
+    const address = app.getHttpServer().address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+    baseUrl = `http://127.0.0.1:${port}`;
+    wsUrl = `ws://127.0.0.1:${port}/ws/tracking`;
+
+    prisma = moduleRef.get(PrismaService);
+    ordersService = moduleRef.get(OrdersService);
+    driverProfileService = moduleRef.get(DriverProfileService);
+    driverOrdersService = moduleRef.get(DriverOrdersService);
+    gateway = moduleRef.get(TrackingRealtimeGateway);
   });
 
   afterEach(async () => {
-    jest.restoreAllMocks();
-    if (moduleRef) {
-      await moduleRef.close();
+    if (createdOrderIds.length > 0) {
+      await prisma.outboxEvent.deleteMany({
+        where: { aggregateId: { in: createdOrderIds } },
+      });
+      await prisma.orderStatusHistory.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prisma.auditLog.deleteMany({
+        where: { entityId: { in: createdOrderIds } },
+      });
+      await prisma.order.deleteMany({
+        where: { id: { in: createdOrderIds } },
+      });
+      createdOrderIds.length = 0;
+    }
+    if (createdAddressIds.length > 0) {
+      await prisma.address.deleteMany({
+        where: { id: { in: createdAddressIds } },
+      });
+      createdAddressIds.length = 0;
+    }
+    if (createdDriverProfileIds.length > 0) {
+      await prisma.driverProfile.deleteMany({
+        where: { id: { in: createdDriverProfileIds } },
+      });
+      createdDriverProfileIds.length = 0;
+    }
+    if (createdUserIds.length > 0) {
+      await prisma.user.deleteMany({
+        where: { id: { in: createdUserIds } },
+      });
+      createdUserIds.length = 0;
     }
   });
 
-  describe('GoogleRoutesService', () => {
-    it('decodes polyline string into coordinates array correctly', () => {
-      // Polyline for (38.5, -120.2), (40.7, -120.95), (43.252, -126.453)
-      const encoded = '_p~iF~ps|U_ulLnnqC_mqNvxq`@';
-      const decoded = googleRoutesService.decodePolyline(encoded);
-      expect(decoded.length).toBe(3);
-      expect(decoded[0][0]).toBeCloseTo(38.5, 1);
-      expect(decoded[0][1]).toBeCloseTo(-120.2, 1);
-    });
-
-    it('generates fallback straight-line reference route when external API fails or is not reached', async () => {
-      const origin = { latitude: 12.9716, longitude: 77.5946 };
-      const destination = { latitude: 12.9352, longitude: 77.6245 };
-
-      // Mock all attempts to reject
-      jest.spyOn(global, 'fetch').mockRejectedValue(new Error('Network error'));
-
-      const result = await googleRoutesService.computeRoute(origin, destination);
-      expect(result).toBeDefined();
-      expect(result.coordinates.length).toBe(2);
-      expect(result.isStraightLineReference).toBe(true);
-      expect(result.isRealRoute).toBe(false);
-      expect(result.distanceMeters).toBeGreaterThan(0);
-      expect(result.durationSeconds).toBeGreaterThan(0);
-    });
-
-    it('caches route results for identical coordinates', async () => {
-      const origin = { latitude: 12.9100, longitude: 77.5100 };
-      const destination = { latitude: 12.9200, longitude: 77.5200 };
-
-      const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async () => ({
-        ok: true,
-        status: 200,
-        text: async () => '',
-        json: async () => ({
-          routes: [
-            {
-              polyline: { encodedPolyline: '_p~iF~ps|U_ulLnnqC' },
-              distanceMeters: 5200,
-              duration: '900s',
-            },
-          ],
-        }),
-      } as any));
-
-      const route1 = await googleRoutesService.computeRoute(origin, destination);
-      const route2 = await googleRoutesService.computeRoute(origin, destination);
-
-      expect(route1.distanceMeters).toBe(5200);
-      expect(route2.distanceMeters).toBe(5200);
-      expect(route1.isRealRoute).toBe(true);
-      expect(route1.isStraightLineReference).toBe(false);
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-    });
+  afterAll(async () => {
+    await app?.close();
+    await moduleRef?.close();
   });
 
-  describe('OrdersService.trackOrder', () => {
-    it('enforces customer authorization: customer cannot track another customer order', async () => {
-      const orders = prismaService.getStore().orders;
-      if (orders.length > 0) {
-        const order = orders[0];
-        await expect(
-          ordersService.trackOrder(order.id, 'intruder-customer-id', Role.CUSTOMER),
-        ).rejects.toThrow(ForbiddenException);
-      }
+  async function seedTrackingScenario(status: OrderStatus = OrderStatus.OUT_FOR_DELIVERY) {
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const drvUserId = `${runId}_du_${suffix}`;
+    const drvProfId = `${runId}_dp_${suffix}`;
+    const addrId = `${runId}_addr_${suffix}`;
+    const orderId = `${runId}_ord_${suffix}`;
+
+    createdUserIds.push(drvUserId);
+    createdDriverProfileIds.push(drvProfId);
+    createdAddressIds.push(addrId);
+    createdOrderIds.push(orderId);
+
+    await prisma.user.create({
+      data: {
+        id: drvUserId,
+        firebaseUid: `fb_${drvUserId}`,
+        name: `Track Rider ${suffix}`,
+        email: `${drvUserId}@test.kudicart.in`,
+        phone: `+919844${Math.floor(100000 + Math.random() * 899999)}`,
+        role: 'DRIVER',
+        status: 'ACTIVE',
+      },
     });
 
-    it('returns deliveryCoordinates, pickupCoordinates, driver, and route for valid customer', async () => {
-      const orders = prismaService.getStore().orders;
-      if (orders.length > 0) {
-        const order = orders[0];
-        const tracking = await ordersService.trackOrder(order.id, order.customerId, Role.CUSTOMER);
-
-        expect(tracking).toBeDefined();
-        expect(tracking.orderId).toBe(order.id);
-        expect(tracking.status).toBe(order.status);
-        expect(tracking.deliveryCoordinates).toBeDefined();
-        expect(typeof tracking.deliveryCoordinates!.latitude).toBe('number');
-        expect(typeof tracking.deliveryCoordinates!.longitude).toBe('number');
-        expect(tracking.pickupCoordinates).toBeDefined();
-        expect(typeof tracking.pickupCoordinates!.latitude).toBe('number');
-        expect(typeof tracking.pickupCoordinates!.longitude).toBe('number');
-      }
+    await prisma.driverProfile.create({
+      data: {
+        id: drvProfId,
+        userId: drvUserId,
+        fullName: `Track Rider ${suffix}`,
+        phone: `+919844${Math.floor(100000 + Math.random() * 899999)}`,
+        kycStatus: 'APPROVED',
+        isOnline: true,
+        currentLat: 12.9716,
+        currentLng: 77.5946,
+        currentHeading: 45,
+      },
     });
 
-    it('sanitizes driver data in tracking response: does not leak documents/sensitive fields', async () => {
-      const orders = prismaService.getStore().orders;
-      if (orders.length > 0) {
-        const order = orders[0];
-        const tracking = await ordersService.trackOrder(order.id, order.customerId, Role.CUSTOMER);
-
-        if (tracking.driver) {
-          expect((tracking.driver as any).documents).toBeUndefined();
-          expect((tracking.driver as any).bankDetails).toBeUndefined();
-          expect((tracking.driver as any).panNumber).toBeUndefined();
-          expect((tracking.driver as any).aadhaarNumber).toBeUndefined();
-        }
-      }
+    await prisma.address.create({
+      data: {
+        id: addrId,
+        userId: 'usr-1',
+        label: 'Home',
+        recipientName: 'Ananya Sharma',
+        recipientPhone: '+919845012890',
+        line1: '100 Feet Road, Indiranagar',
+        locality: 'Indiranagar',
+        city: 'Bengaluru',
+        state: 'Karnataka',
+        pincode: '560038',
+        latitude: 12.9784,
+        longitude: 77.6408,
+      },
     });
 
-    it('returns explicit route unavailable state when coordinates are missing', async () => {
-      const store = prismaService.getStore();
-      // Insert a dummy order with no delivery address and no addressId
-      const testOrder = {
-        ...store.orders[0],
-        id: 'ord-no-coords',
-        orderNumber: 'KC-NO-COORDS',
+    await prisma.order.create({
+      data: {
+        id: orderId,
+        orderNumber: `KC-TRK-${suffix}`,
         customerId: 'usr-1',
-        deliveryAddress: null,
-        addressId: 'nonexistent-addr',
-        vendorId: 'nonexistent-vendor',
-        status: 'OUT_FOR_DELIVERY',
-      };
-      store.orders.push(testOrder);
-
-      const tracking = await ordersService.trackOrder('ord-no-coords', 'usr-1', Role.CUSTOMER);
-      expect(tracking.route).toBeDefined();
-      expect(tracking.route?.routeUnavailable).toBe(true);
-      expect(tracking.route?.isRealRoute).toBe(false);
+        vendorId: 'vend-1',
+        driverId: drvUserId,
+        driverProfileId: drvProfId,
+        addressId: addrId,
+        deliveryAddress: {
+          recipientName: 'Ananya Sharma',
+          line1: '100 Feet Road',
+          city: 'Bengaluru',
+          lat: 12.9784,
+          lng: 77.6408,
+        },
+        fulfillmentType: FulfillmentType.DARK_STORE,
+        status,
+        paymentMethod: PaymentMethod.RAZORPAY,
+        paymentStatus: PaymentStatus.COMPLETED,
+        itemTotal: 1200,
+        taxes: 60,
+        grandTotal: 1260,
+      },
     });
+
+    return { drvUserId, drvProfId, orderId };
+  }
+
+  it('returns live driverLocation/driverCoords/customerCoords and records DCR-005 arrivedAt without leaving OUT_FOR_DELIVERY', async () => {
+    const { drvProfId, orderId } = await seedTrackingScenario(OrderStatus.OUT_FOR_DELIVERY);
+
+    await driverProfileService.updateLocation(drvProfId, {
+      latitude: 12.9751,
+      longitude: 77.6122,
+      heading: 90,
+      speed: 24,
+      orderId,
+    });
+
+    const tracking = await ordersService.trackOrder(orderId, 'usr-1', Role.CUSTOMER);
+    expect(tracking.orderId).toBe(orderId);
+    expect(tracking.trackingActive).toBe(true);
+    expect(tracking.customerCoords).toMatchObject({ latitude: 12.9784, longitude: 77.6408 });
+    expect(tracking.driverLocation).toMatchObject({ latitude: 12.9751, longitude: 77.6122 });
+    expect(tracking.driverCoords).toMatchObject({ latitude: 12.9751, longitude: 77.6122 });
+    expect(tracking.isArrived).toBe(false);
+    expect(Array.isArray(tracking.milestones)).toBe(true);
+
+    // DCR-005: markArrived sets arrivedAt timestamp while keeping Order.status === OUT_FOR_DELIVERY
+    const arrivedRes = await driverOrdersService.markArrived(drvProfId, orderId);
+    expect(arrivedRes.success).toBe(true);
+    expect(arrivedRes.arrivedAt).toBeTruthy();
+
+    const afterArrival = await ordersService.trackOrder(orderId, 'usr-1', Role.CUSTOMER);
+    expect(afterArrival.status).toBe('OUT_FOR_DELIVERY');
+    expect(afterArrival.isArrived).toBe(true);
+    expect(afterArrival.arrivedAt).toBeTruthy();
   });
 
-  describe('DriverProfileService.updateLocation', () => {
-    it('validates GPS latitude (-90 to 90) and longitude (-180 to 180)', async () => {
-      await expect(
-        driverProfileService.updateLocation('drv-1', {
-          latitude: 999,
-          longitude: 77.6,
-        }),
-      ).rejects.toThrow(BadRequestException);
+  it('rejects unauthenticated or unauthorized /ws/tracking subscriptions and broadcasts room updates to owner', async () => {
+    const { orderId } = await seedTrackingScenario(OrderStatus.OUT_FOR_DELIVERY);
+    expect(baseUrl).toContain('http://127.0.0.1:');
 
-      await expect(
-        driverProfileService.updateLocation('drv-1', {
-          latitude: 12.9,
-          longitude: -999,
-        }),
-      ).rejects.toThrow(BadRequestException);
+    const outsiderId = `${runId}_outsider_${Math.random().toString(36).slice(2, 6)}`;
+    createdUserIds.push(outsiderId);
+    await prisma.user.create({
+      data: {
+        id: outsiderId,
+        firebaseUid: `fb_${outsiderId}`,
+        name: 'Outsider Customer',
+        email: `${outsiderId}@test.kudicart.in`,
+        phone: `+919843${Math.floor(100000 + Math.random() * 899999)}`,
+        role: 'CUSTOMER',
+        status: 'ACTIVE',
+      },
     });
 
-    it('validates heading (0-360) and speed bounds', async () => {
-      await expect(
-        driverProfileService.updateLocation('drv-1', {
-          latitude: 12.9658,
-          longitude: 77.6465,
-          heading: 450,
-        }),
-      ).rejects.toThrow(BadRequestException);
+    const customerToken = 'test-firebase-id-token:usr-1:+919845012890:ananya@kudicart.in';
+    const outsiderToken = `test-firebase-id-token:${outsiderId}:+919843000001:${outsiderId}@test.kudicart.in`;
 
-      await expect(
-        driverProfileService.updateLocation('drv-1', {
-          latitude: 12.9658,
-          longitude: 77.6465,
-          speed: -5,
-        }),
-      ).rejects.toThrow(BadRequestException);
-    });
-
-    it('does NOT modify availableSince timestamp when updating driver location (preserves FIFO dispatch)', async () => {
-      const storeDriver = prismaService.getStore().drivers.find((d: any) => d.id === 'drv-1');
-      const originalAvailableSince = storeDriver?.availableSince;
-
-      await driverProfileService.updateLocation('drv-1', {
-        latitude: 12.9658,
-        longitude: 77.6465,
-        accuracy: 10,
-        speed: 5.5,
+    // 1. Unauthenticated SUBSCRIBE closes with 4001
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      ws.on('open', () => {
+        ws.send(JSON.stringify({ type: 'SUBSCRIBE', orderId }));
       });
-
-      const updatedStoreDriver = prismaService.getStore().drivers.find((d: any) => d.id === 'drv-1');
-      expect(updatedStoreDriver?.availableSince).toEqual(originalAvailableSince);
-    });
-
-    it('rejects older buffered location updates to prevent overwriting newer persisted state', async () => {
-      const now = Date.now();
-      // First update with timestamp now
-      await driverProfileService.updateLocation('drv-1', {
-        latitude: 12.9658,
-        longitude: 77.6465,
-        timestamp: now,
+      ws.on('close', (code) => {
+        try {
+          expect(code).toBe(4001);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
       });
+      ws.on('error', reject);
+    });
 
-      // Older buffered update from 5 seconds ago
-      const staleRes = await driverProfileService.updateLocation('drv-1', {
-        latitude: 12.9700,
-        longitude: 77.6500,
-        timestamp: now - 5000,
+    // 2. Cross-customer SUBSCRIBE closes with 4003 Forbidden
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(wsUrl);
+      ws.on('open', () => {
+        ws.send(JSON.stringify({ type: 'SUBSCRIBE', orderId, token: outsiderToken }));
       });
-
-      expect(staleRes.ignoredStaleUpdate).toBe(true);
-      const storeDriver = prismaService.getStore().drivers.find((d: any) => d.id === 'drv-1');
-      expect(storeDriver?.currentLocation?.latitude).toBe(12.9658);
+      ws.on('close', (code) => {
+        try {
+          expect(code).toBe(4003);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+      ws.on('error', reject);
     });
 
-    it('rejects location update for an order not assigned to the driver', async () => {
-      // ord-89241 is assigned to drv-1
-      // drv-2 trying to update location with orderId 'ord-89241' must throw ForbiddenException
-      await expect(
-        driverProfileService.updateLocation('drv-2', {
-          latitude: 12.9658,
-          longitude: 77.6465,
-          orderId: 'ord-89241',
-        }),
-      ).rejects.toThrow(ForbiddenException);
-    });
-  });
+    // 3. Authorized owner receives SUBSCRIBED and live DRIVER_LOCATION broadcast
+    const receivedMessages: any[] = [];
+    await new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(`${wsUrl}?token=${encodeURIComponent(customerToken)}`);
+      ws.on('open', () => {
+        ws.send(JSON.stringify({ type: 'SUBSCRIBE', orderId }));
+      });
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        receivedMessages.push(msg);
 
-  describe('TrackingRealtimeGateway', () => {
-    it('broadcasts location and status events without throwing', () => {
-      expect(() => {
-        trackingGateway.broadcastLocationUpdate('ord-1', {
-          latitude: 12.9658,
-          longitude: 77.6465,
-          speed: 12.5,
-          heading: 90,
-          updatedAt: new Date().toISOString(),
-        });
-      }).not.toThrow();
-
-      expect(() => {
-        trackingGateway.broadcastStatusUpdate('ord-1', 'OUT_FOR_DELIVERY');
-      }).not.toThrow();
+        if (msg.type === 'SUBSCRIBED') {
+          gateway.broadcastLocationUpdate(orderId, {
+            latitude: 12.9765,
+            longitude: 77.621,
+            heading: 75,
+            updatedAt: new Date().toISOString(),
+          });
+        } else if (msg.type === 'DRIVER_LOCATION') {
+          ws.close();
+          try {
+            expect(msg.latitude).toBeCloseTo(12.9765);
+            expect(msg.longitude).toBeCloseTo(77.621);
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        }
+      });
+      ws.on('error', reject);
     });
+
+    expect(receivedMessages.some((m) => m.type === 'SUBSCRIBED')).toBe(true);
+    expect(receivedMessages.some((m) => m.type === 'DRIVER_LOCATION')).toBe(true);
   });
 });

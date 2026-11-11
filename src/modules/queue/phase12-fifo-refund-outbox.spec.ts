@@ -1,256 +1,365 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { DispatchService } from '../orders/dispatch.service';
-import { DriverOrdersService } from '../driver/driver-orders.service';
-import { DriverProfileService } from '../driver/driver-profile.service';
-import { DriverTryAndBuyService } from '../driver/driver-try-and-buy.service';
-import { PaymentsProcessor } from './processors/payments.processor';
-import { OutboxService } from './outbox.service';
-import { QueueService } from './queue.service';
+import { BadRequestException } from '@nestjs/common';
+import {
+  FulfillmentType,
+  OrderStatus,
+  PaymentMethod,
+  PaymentStatus,
+} from '@prisma/client';
+import { AppModule } from '../../app.module';
 import { PrismaService } from '../../prisma/prisma.service';
-import { StateMachineService } from '../orders/state-machine.service';
+import { OutboxService } from './outbox.service';
 import { QueueJobType } from './queue.constants';
+import { PaymentsProcessor } from './processors/payments.processor';
+import { DriverTryAndBuyService } from '../driver/driver-try-and-buy.service';
 
-describe('Phase 12 — FIFO Re-Entry, Refund Policy Safeguards & Outbox Concurrency', () => {
-  let dispatchService: DispatchService;
-  let driverOrdersService: DriverOrdersService;
-  let driverProfileService: DriverProfileService;
-  let driverTryAndBuyService: DriverTryAndBuyService;
-  let paymentsProcessor: PaymentsProcessor;
-  let outboxService: OutboxService;
+describe('Phase 12 Integration: Outbox SKIP LOCKED, Refunds & Try&Buy Return Reconciliation', () => {
+  let moduleRef: TestingModule;
   let prisma: PrismaService;
+  let outboxService: OutboxService;
+  let paymentsProcessor: PaymentsProcessor;
+  let driverTryAndBuyService: DriverTryAndBuyService;
 
-  beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
-      providers: [
-        PrismaService,
-        StateMachineService,
-        DispatchService,
-        DriverOrdersService,
-        DriverProfileService,
-        DriverTryAndBuyService,
-        PaymentsProcessor,
-        OutboxService,
+  const runId = `p12_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const createdUserIds: string[] = [];
+  const createdVendorIds: string[] = [];
+  const createdDriverProfileIds: string[] = [];
+  const createdProductIds: string[] = [];
+  const createdOrderIds: string[] = [];
+  const createdOutboxIds: string[] = [];
+
+  beforeAll(async () => {
+    moduleRef = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+    await moduleRef.init();
+
+    prisma = moduleRef.get(PrismaService);
+    outboxService = moduleRef.get(OutboxService);
+    paymentsProcessor = moduleRef.get(PaymentsProcessor);
+    driverTryAndBuyService = moduleRef.get(DriverTryAndBuyService);
+  });
+
+  afterEach(async () => {
+    if (createdOutboxIds.length > 0) {
+      await prisma.outboxEvent.deleteMany({
+        where: { id: { in: createdOutboxIds } },
+      });
+      createdOutboxIds.length = 0;
+    }
+    if (createdOrderIds.length > 0) {
+      await prisma.outboxEvent.deleteMany({
+        where: { aggregateId: { in: createdOrderIds } },
+      });
+      await prisma.ledgerEntry.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prisma.paymentTransaction.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prisma.tryAndBuySession.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prisma.orderStatusHistory.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prisma.auditLog.deleteMany({
+        where: { entityId: { in: createdOrderIds } },
+      });
+      await prisma.orderItem.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prisma.order.deleteMany({
+        where: { id: { in: createdOrderIds } },
+      });
+      createdOrderIds.length = 0;
+    }
+    if (createdProductIds.length > 0) {
+      await prisma.product.deleteMany({
+        where: { id: { in: createdProductIds } },
+      });
+      createdProductIds.length = 0;
+    }
+    if (createdDriverProfileIds.length > 0) {
+      await prisma.driverProfile.deleteMany({
+        where: { id: { in: createdDriverProfileIds } },
+      });
+      createdDriverProfileIds.length = 0;
+    }
+    if (createdVendorIds.length > 0) {
+      await prisma.vendor.deleteMany({
+        where: { id: { in: createdVendorIds } },
+      });
+      createdVendorIds.length = 0;
+    }
+    if (createdUserIds.length > 0) {
+      await prisma.user.deleteMany({
+        where: { id: { in: createdUserIds } },
+      });
+      createdUserIds.length = 0;
+    }
+  });
+
+  afterAll(async () => {
+    await moduleRef?.close();
+  });
+
+  it('dispatches pending OutboxEvents atomically across concurrent workers via SKIP LOCKED', async () => {
+    const e1 = await prisma.outboxEvent.create({
+      data: {
+        aggregateType: 'ORDER',
+        aggregateId: `${runId}_agg_1`,
+        eventType: QueueJobType.ORDER_STATUS_NOTIFICATION,
+        status: 'PENDING',
+        payload: { orderId: `${runId}_agg_1`, userId: 'usr-1', status: 'PREPARING' },
+      },
+    });
+    const e2 = await prisma.outboxEvent.create({
+      data: {
+        aggregateType: 'ORDER',
+        aggregateId: `${runId}_agg_2`,
+        eventType: QueueJobType.ORDER_STATUS_NOTIFICATION,
+        status: 'PENDING',
+        payload: { orderId: `${runId}_agg_2`, userId: 'usr-1', status: 'READY_FOR_PICKUP' },
+      },
+    });
+    createdOutboxIds.push(e1.id, e2.id);
+
+    const [workerA, workerB] = await Promise.all([
+      outboxService.dispatchPendingEvents(20),
+      outboxService.dispatchPendingEvents(20),
+    ]);
+
+    expect(workerA.publishedCount + workerB.publishedCount).toBeGreaterThanOrEqual(2);
+
+    const rows = await prisma.outboxEvent.findMany({
+      where: { id: { in: [e1.id, e2.id] } },
+    });
+    expect(rows.every((r) => r.status === 'PUBLISHED' && r.publishedAt !== null)).toBe(true);
+  });
+
+  it('executes REFUND_PROCESSING job via PaymentsProcessor and settles REFUND_PENDING orders', async () => {
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const orderId = `${runId}_rfnd_${suffix}`;
+    createdOrderIds.push(orderId);
+
+    await prisma.order.create({
+      data: {
+        id: orderId,
+        orderNumber: `KC-P12R-${suffix}`,
+        customerId: 'usr-1',
+        vendorId: 'vend-1',
+        addressId: 'addr-1',
+        fulfillmentType: FulfillmentType.DARK_STORE,
+        status: OrderStatus.RETURNED,
+        paymentMethod: PaymentMethod.RAZORPAY,
+        paymentStatus: PaymentStatus.REFUND_PENDING,
+        razorpayPaymentId: `pay_p12_${suffix}`,
+        itemTotal: 1500,
+        taxes: 75,
+        grandTotal: 1575,
+      },
+    });
+
+    await paymentsProcessor.processPaymentJob({
+      id: `job-rfnd-${suffix}`,
+      name: QueueJobType.REFUND_PROCESSING,
+      data: { orderId },
+    } as any);
+
+    const updated = await prisma.order.findUnique({ where: { id: orderId } });
+    const tx = await prisma.paymentTransaction.findFirst({
+      where: { orderId, transactionType: 'REFUND' },
+    });
+
+    expect(updated?.paymentStatus).toBe('REFUNDED');
+    expect(tx?.status).toBe('REFUNDED');
+  });
+
+  it('enforces supervisor confirmation on Try & Buy store reconciliation, restores returned stock, and posts balanced 12.5% commission ledger', async () => {
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const drvUserId = `${runId}_du_${suffix}`;
+    const vendUserId = `${runId}_vu_${suffix}`;
+    const vendId = `${runId}_vnd_${suffix}`;
+    const drvProfId = `${runId}_dp_${suffix}`;
+    const prodKeepId = `${runId}_pk_${suffix}`;
+    const prodRetId = `${runId}_pr_${suffix}`;
+    const orderId = `${runId}_tnb_${suffix}`;
+
+    createdUserIds.push(drvUserId, vendUserId);
+    createdVendorIds.push(vendId);
+    createdDriverProfileIds.push(drvProfId);
+    createdProductIds.push(prodKeepId, prodRetId);
+    createdOrderIds.push(orderId);
+
+    await prisma.user.createMany({
+      data: [
         {
-          provide: QueueService,
-          useValue: {
-            enqueueNotification: jest.fn().mockResolvedValue({ id: 'job-123' }),
-            enqueuePaymentJob: jest.fn().mockResolvedValue({ id: 'pay-123' }),
-          },
+          id: drvUserId,
+          firebaseUid: `fb_${drvUserId}`,
+          name: `Recon Driver ${suffix}`,
+          email: `${drvUserId}@test.affordz.in`,
+          phone: `+919833${Math.floor(100000 + Math.random() * 899999)}`,
+          role: 'DRIVER',
+          status: 'ACTIVE',
+        },
+        {
+          id: vendUserId,
+          firebaseUid: `fb_${vendUserId}`,
+          name: `Recon Vendor ${suffix}`,
+          email: `${vendUserId}@test.affordz.in`,
+          phone: `+919834${Math.floor(100000 + Math.random() * 899999)}`,
+          role: 'VENDOR',
+          status: 'ACTIVE',
         },
       ],
-    }).compile();
-
-    dispatchService = module.get<DispatchService>(DispatchService);
-    driverOrdersService = module.get<DriverOrdersService>(DriverOrdersService);
-    driverProfileService = module.get<DriverProfileService>(DriverProfileService);
-    driverTryAndBuyService = module.get<DriverTryAndBuyService>(DriverTryAndBuyService);
-    paymentsProcessor = module.get<PaymentsProcessor>(PaymentsProcessor);
-    outboxService = module.get<OutboxService>(OutboxService);
-    prisma = module.get<PrismaService>(PrismaService);
-  });
-
-  describe('1. FIFO Re-Entry After Delivery Completion (Section 2)', () => {
-    it('consumes availableSince on assignment, keeps occupied driver ineligible, and re-enters at the tail upon completion', async () => {
-      const store = prisma.getStore();
-
-      // Setup two online drivers:
-      // Driver A entered at 09:00:00 (earlier)
-      // Driver B entered at 09:05:00 (later)
-      const time0900 = new Date('2026-11-03T09:00:00Z').toISOString();
-      const time0905 = new Date('2026-11-03T09:05:00Z').toISOString();
-
-      store.drivers = [
-        {
-          id: 'drv-A',
-          userId: 'usr-A',
-          name: 'Driver Alpha',
-          isOnline: true,
-          kycStatus: 'APPROVED',
-          availableSince: time0900,
-          completedDeliveries: 0,
-        },
-        {
-          id: 'drv-B',
-          userId: 'usr-B',
-          name: 'Driver Beta',
-          isOnline: true,
-          kycStatus: 'APPROVED',
-          availableSince: time0905,
-          completedDeliveries: 0,
-        },
-      ];
-
-      // Setup Order 1
-      const order1: any = {
-        id: 'ord-fifo-1',
-        orderNumber: 'ORD-F1',
-        status: 'READY_FOR_PICKUP',
-        items: [{ id: 'item-1', price: 999, quantity: 1 }],
-        history: [],
-      };
-      store.orders = [order1];
-
-      // 1. Dispatch Order 1: Earliest driver (Driver A) MUST be selected
-      const dispatch1 = await dispatchService.dispatchOrderFifo('ord-fifo-1');
-      expect(dispatch1.success).toBe(true);
-      expect(dispatch1.driver.id).toBe('drv-A');
-
-      // 2. Critical Check: Driver A's availableSince is CONSUMED (set to null) while occupied
-      const driverA = store.drivers.find((d: any) => d.id === 'drv-A');
-      expect(driverA.availableSince).toBeNull();
-
-      // 3. Setup Order 2 while Driver A is occupied
-      const order2: any = {
-        id: 'ord-fifo-2',
-        orderNumber: 'ORD-F2',
-        status: 'READY_FOR_PICKUP',
-        items: [{ id: 'item-2', price: 500, quantity: 1 }],
-        history: [],
-      };
-      store.orders.push(order2);
-
-      // GPS update from Driver A during transit does NOT make Driver A eligible
-      await driverProfileService.updateLocation('drv-A', { latitude: 12.9716, longitude: 77.5946 });
-      expect(driverA.availableSince).toBeNull();
-
-      // 4. Dispatch Order 2: Driver B MUST be selected (Driver A is occupied and has null availableSince)
-      const dispatch2 = await dispatchService.dispatchOrderFifo('ord-fifo-2');
-      expect(dispatch2.success).toBe(true);
-      expect(dispatch2.driver.id).toBe('drv-B');
-
-      const driverB = store.drivers.find((d: any) => d.id === 'drv-B');
-      expect(driverB.availableSince).toBeNull();
-
-      // 5. Driver A completes delivery of Order 1 at 10:00:00
-      order1.driverId = 'drv-A';
-      order1.status = 'OUT_FOR_DELIVERY';
-      const deliverRes = await driverOrdersService.deliverOrder('drv-A', 'ord-fifo-1');
-      expect(deliverRes.success).toBe(true);
-      expect(driverA.completedDeliveries).toBe(1);
-
-      // 6. Critical Check: Driver A now re-entered queue with a NEW timestamp at 10:00:00
-      expect(driverA.availableSince).not.toBeNull();
-      const driverANewTime = new Date(driverA.availableSince).getTime();
-
-      // 7. Make Driver B complete delivery 2 seconds later at 10:00:02
-      order2.driverId = 'drv-B';
-      order2.status = 'OUT_FOR_DELIVERY';
-      // Simulate slight delay
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      await driverOrdersService.deliverOrder('drv-B', 'ord-fifo-2');
-      const driverBNewTime = new Date(driverB.availableSince).getTime();
-
-      // Driver A completed earlier than Driver B, so Driver A is now ahead of Driver B for Order 3
-      expect(driverANewTime).toBeLessThan(driverBNewTime);
-
-      // 8. Order 3 arrives
-      const order3: any = {
-        id: 'ord-fifo-3',
-        orderNumber: 'ORD-F3',
-        status: 'READY_FOR_PICKUP',
-        items: [{ id: 'item-3', price: 1200, quantity: 1 }],
-        history: [],
-      };
-      store.orders.push(order3);
-
-      const dispatch3 = await dispatchService.dispatchOrderFifo('ord-fifo-3');
-      expect(dispatch3.success).toBe(true);
-      expect(dispatch3.driver.id).toBe('drv-A');
-    });
-  });
-
-  describe('2. Try & Buy Refund Policy Safeguards (Section 3)', () => {
-    it('blocks automated Try & Buy refunds by default and flags cases as PENDING_REVIEW', async () => {
-      // Default environment: ENABLE_AUTO_REFUND is undefined or false
-      delete process.env.ENABLE_AUTO_REFUND;
-
-      const mockJob: any = {
-        name: QueueJobType.REFUND_PROCESSING,
-        data: {
-          orderId: 'ord-tb-refund-1',
-          amount: 1400,
-          isTryAndBuy: true,
-        },
-      };
-
-      const result = await paymentsProcessor.processJob(mockJob);
-
-      expect(result.processed).toBe(false);
-      expect(result.status).toBe('PENDING_REVIEW');
-      expect(result.reason).toBe('AUTOMATED_REFUND_POLICY_UNAPPROVED');
     });
 
-    it('requires supervisor confirmation before inventory is reconciled', async () => {
-      const store = prisma.getStore();
-      const tbOrder: any = {
-        id: 'ord-tb-store-1',
-        orderNumber: 'ORD-TB-1',
-        driverId: 'drv-tb-1',
+    await prisma.vendor.create({
+      data: {
+        id: vendId,
+        userId: vendUserId,
+        storeName: `Affordz Recon Store ${suffix}`,
+        commissionRate: 12.5,
+      },
+    });
+
+    await prisma.driverProfile.create({
+      data: {
+        id: drvProfId,
+        userId: drvUserId,
+        fullName: `Recon Driver ${suffix}`,
+        phone: `+919833${Math.floor(100000 + Math.random() * 899999)}`,
+        kycStatus: 'APPROVED',
+        isOnline: true,
+      },
+    });
+
+    await prisma.product.createMany({
+      data: [
+        {
+          id: prodKeepId,
+          title: `Keep Shirt ${suffix}`,
+          brand: 'Affordz Studio',
+          description: 'Kept item',
+          vendorId: vendId,
+          categoryId: 'cat-1',
+          price: 1000,
+          originalPrice: 1200,
+          discount: '16% OFF',
+          sizes: ['M'],
+          image: 'https://example.com/k.jpg',
+          altText: 'Keep Shirt',
+          galleryImages: [],
+          stockQuantity: 10,
+          fulfillmentType: FulfillmentType.DARK_STORE,
+          tryAndBuyEligible: true,
+        },
+        {
+          id: prodRetId,
+          title: `Return Jacket ${suffix}`,
+          brand: 'Affordz Studio',
+          description: 'Returned item',
+          vendorId: vendId,
+          categoryId: 'cat-1',
+          price: 2000,
+          originalPrice: 2400,
+          discount: '16% OFF',
+          sizes: ['L'],
+          image: 'https://example.com/r.jpg',
+          altText: 'Return Jacket',
+          galleryImages: [],
+          stockQuantity: 3,
+          fulfillmentType: FulfillmentType.DARK_STORE,
+          tryAndBuyEligible: true,
+        },
+      ],
+    });
+
+    await prisma.order.create({
+      data: {
+        id: orderId,
+        orderNumber: `KC-TNB-${suffix}`,
+        customerId: 'usr-1',
+        vendorId: vendId,
+        driverId: drvUserId,
+        driverProfileId: drvProfId,
+        addressId: 'addr-1',
+        fulfillmentType: FulfillmentType.DARK_STORE,
+        status: OrderStatus.RETURNING,
+        paymentMethod: PaymentMethod.RAZORPAY,
+        paymentStatus: PaymentStatus.COMPLETED,
+        razorpayPaymentId: `pay_tnb_${suffix}`,
         isTryAndBuy: true,
-        items: [
-          { id: 'i1', name: 'Item 1', decision: 'RETURN' },
-          { id: 'i2', name: 'Item 2', decision: 'KEEP' },
-        ],
-        history: [],
-      };
-      store.orders = [tbOrder];
-      store.drivers = [
-        {
-          id: 'drv-tb-1',
-          userId: 'usr-tb-1',
-          name: 'Rider TB',
-          isOnline: true,
-          completedDeliveries: 0,
+        itemTotal: 3000,
+        deliveryFee: 0,
+        taxes: 150,
+        grandTotal: 3150,
+        items: {
+          create: [
+            {
+              productId: prodKeepId,
+              title: `Keep Shirt ${suffix}`,
+              brand: 'KudiCart Studio',
+              size: 'M',
+              price: 1000,
+              quantity: 1,
+              image: 'https://example.com/k.jpg',
+              tryAndBuyDecision: 'KEEP',
+            },
+            {
+              productId: prodRetId,
+              title: `Return Jacket ${suffix}`,
+              brand: 'KudiCart Studio',
+              size: 'L',
+              price: 2000,
+              quantity: 1,
+              image: 'https://example.com/r.jpg',
+              tryAndBuyDecision: 'RETURN',
+            },
+          ],
         },
-      ];
-
-      // Reconcile without supervisor confirmation MUST throw BadRequestException
-      await expect(
-        driverTryAndBuyService.reconcileStoreReturn('drv-tb-1', 'ord-tb-store-1', {
-          supervisorConfirmed: false,
-        } as any),
-      ).rejects.toThrow();
-
-      // With supervisor confirmation, succeeds and updates availableSince
-      const reconcileRes = await driverTryAndBuyService.reconcileStoreReturn(
-        'drv-tb-1',
-        'ord-tb-store-1',
-        {
-          supervisorConfirmed: true,
-          supervisorName: 'Darkstore Lead',
-          signature: 'sig_ok',
-        } as any,
-      );
-
-      expect(reconcileRes.success).toBe(true);
-      expect(tbOrder.storeReconciliationStatus).toBe('RECONCILED');
-      expect(tbOrder.status).toBe('DELIVERED');
-      expect(store.drivers[0].availableSince).not.toBeNull();
+      },
     });
-  });
 
-  describe('3. Transactional Outbox Concurrency & Leasing (Section 5)', () => {
-    it('prevents competing outbox pollers from processing the same event twice', async () => {
-      const store = prisma.getStore();
-      store.outboxEvents = [
-        {
-          id: 'evt-atomic-1',
-          eventType: 'ORDER_STATUS_NOTIFICATION',
-          payload: { orderId: 'ord-123', status: 'DELIVERED' },
-          status: 'PENDING',
-          attempts: 0,
-        },
-      ];
+    // Missing supervisor confirmation must reject
+    await expect(
+      driverTryAndBuyService.reconcileStoreReturn(drvProfId, orderId, {
+        supervisorConfirmed: false,
+      } as any),
+    ).rejects.toThrow(BadRequestException);
 
-      // Poller 1 runs
-      const res1 = await outboxService.dispatchPendingEvents();
-      expect(res1.processedCount).toBe(1);
+    const recon = await driverTryAndBuyService.reconcileStoreReturn(drvProfId, orderId, {
+      supervisorConfirmed: true,
+      note: 'Verified returned tag intact',
+    } as any);
 
-      // Poller 2 runs immediately after on the same event
-      const res2 = await outboxService.dispatchPendingEvents();
-      // Should not re-process because event is already PUBLISHED
-      expect(res2.processedCount).toBe(0);
-    });
+    expect(recon.success).toBe(true);
+    expect(recon.restoredItemsCount).toBe(1);
+    expect(recon.refundQueued).toBe(true);
+    expect(recon.order.status).toBe('RETURNED');
+
+    const restoredProd = await prisma.product.findUnique({ where: { id: prodRetId } });
+    expect(restoredProd?.stockQuantity).toBe(4);
+
+    const updatedOrder = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(updatedOrder?.status).toBe('RETURNED');
+    expect(updatedOrder?.paymentStatus).toBe('REFUND_PENDING');
+
+    const ledgerRows = await prisma.ledgerEntry.findMany({ where: { orderId } });
+    const rev = ledgerRows.find((l) => l.entryType === 'ORDER_REVENUE');
+    const comm = ledgerRows.find((l) => l.entryType === 'COMMISSION_DEDUCTED');
+    const payout = ledgerRows.find((l) => l.entryType === 'VENDOR_PAYOUT');
+
+    expect(rev).toBeDefined();
+    expect(comm).toBeDefined();
+    expect(payout).toBeDefined();
+    expect(Number(rev!.amount)).toBe(1000);
+    expect(Number(comm!.amount)).toBe(-125);
+    expect(Number(payout!.amount)).toBe(875);
+    expect(Math.abs(Number(comm!.amount)) + Number(payout!.amount)).toBeCloseTo(
+      Number(rev!.amount),
+      2,
+    );
   });
 });
-

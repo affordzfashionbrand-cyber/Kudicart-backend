@@ -1,38 +1,47 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
 
 @Injectable()
 export class AdminReportsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  async generateReport(category: string, query: AdminQueryDto) {
-    const store = this.prisma.getStore();
+  async generateReport(category: string, _query: AdminQueryDto) {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('Database connection unavailable');
+    }
+
     const cat = (category || 'ORDERS').toUpperCase();
 
     if (cat === 'ORDERS') {
-      const rows = store.orders.map((o: any) => {
-        const customer = (store.users || []).find((u: any) => u.id === o.customerId) || {
-          name: o.customerName || 'Ananya Sharma',
-        };
-        const vendor = (store.adminVendors || []).find((v: any) => v.id === o.vendorId) || {
-          storeName: o.vendorName || 'Avanya Ethnic Boutique',
-        };
-        const driver = (store.adminDrivers || []).find((d: any) => d.id === o.driverId) || {
-          fullName: 'Deepak Solanki',
-        };
+      const orders = await this.prisma.order.findMany({
+        include: {
+          customer: true,
+          vendor: true,
+          driver: true,
+          driverProfile: true,
+          items: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
 
-        const commission = Number((o.grandTotal * 0.12).toFixed(2));
-
+      const rows = orders.map((o) => {
+        const rate = o.vendor?.commissionRate ?? 12.5;
+        const commission = Number((o.grandTotal * (rate / 100)).toFixed(2));
         return {
           orderId: o.orderNumber,
-          dateTime: o.createdAt || '24 Oct 2024, 14:15 IST',
-          customerName: customer.name,
-          vendorName: vendor.storeName,
-          itemsCount: o.items ? o.items.length : 1,
+          dateTime: o.createdAt.toISOString(),
+          customerName: o.customer?.name || 'Customer',
+          vendorName: o.vendor?.storeName || 'Affordz Official Store',
+          itemsCount: o.items.length,
           grossGmv: o.grandTotal,
           commission,
-          deliveryPartner: o.driverId ? driver.fullName : 'Unassigned',
+          deliveryPartner:
+            o.driverProfile?.fullName || o.driver?.name || 'Unassigned',
           status: o.status,
         };
       });
@@ -45,26 +54,32 @@ export class AdminReportsService {
     }
 
     if (cat === 'VENDORS') {
-      const rows = (store.adminVendors || []).map((v: any) => {
-        const ledger = (store.vendorLedger || []).find((l: any) => l.vendorName === v.storeName) || {
-          totalOrders: v.productCount || 42,
-          grossGmv: 148200,
-          commissionRate: 12.5,
-          commissionRetained: 18525,
-          netPayable: 129675,
-          status: 'CYCLE_ACCRUING',
-        };
+      const vendors = await this.prisma.vendor.findMany({
+        include: {
+          orders: true,
+          payouts: { orderBy: { createdAt: 'desc' }, take: 1 },
+        },
+        orderBy: { storeName: 'asc' },
+      });
 
+      const rows = vendors.map((v) => {
+        const deliveredOrders = v.orders.filter((o) => o.status === 'DELIVERED');
+        const grossSales = Number(
+          deliveredOrders.reduce((sum, o) => sum + (o.grandTotal || 0), 0).toFixed(2),
+        );
+        const commissionRate = v.commissionRate ?? 12.5;
+        const commissionRetained = Number((grossSales * (commissionRate / 100)).toFixed(2));
+        const netPayable = Number((grossSales - commissionRetained).toFixed(2));
         return {
-          vendorId: v.vendorNumber || v.id,
+          vendorId: v.id,
           boutiqueName: v.storeName,
-          operatingHub: v.operatingHub || 'Bandra West Terminal Hub',
-          deliveredOrders: ledger.totalOrders,
-          grossSales: ledger.grossGmv,
-          commissionRate: ledger.commissionRate,
-          commissionRetained: ledger.commissionRetained,
-          netPayable: ledger.netPayable,
-          settlementStatus: ledger.status,
+          operatingHub: v.operatingHub || 'Affordz Official Dark Store',
+          deliveredOrders: deliveredOrders.length,
+          grossSales,
+          commissionRate,
+          commissionRetained,
+          netPayable,
+          settlementStatus: v.payouts[0]?.status || 'CYCLE_ACCRUING',
         };
       });
 
@@ -76,14 +91,16 @@ export class AdminReportsService {
     }
 
     if (cat === 'DRIVERS') {
-      const rows = (store.adminDrivers || []).map((d: any) => ({
-        partnerId: d.driverCode || d.id,
+      const drivers = await this.prisma.driverProfile.findMany({
+        orderBy: { fullName: 'asc' },
+      });
+
+      const rows = drivers.map((d) => ({
+        partnerId: d.id,
         name: d.fullName,
-        vehicleType: d.vehicleType,
-        activeHours: 8.5,
+        vehicleType: d.vehicleType || 'Two-Wheeler',
         completedRuns: d.completedDeliveries || 0,
-        avgDeliveryMinutes: 16,
-        payoutTotal: (d.completedDeliveries || 10) * 85,
+        payoutTotal: (d.completedDeliveries || 0) * 55,
         status: d.isOnline ? 'Active' : 'Standby',
       }));
 
@@ -95,24 +112,26 @@ export class AdminReportsService {
     }
 
     if (cat === 'CATALOG') {
-      const rows = store.products.map((p: any) => {
-        const vendor = (store.adminVendors || []).find((v: any) => v.id === p.vendorId) || {
-          storeName: 'Avanya Ethnic Boutique',
-        };
-
-        return {
-          sku: p.sku || `SKU-${p.id.toUpperCase()}`,
-          title: p.title,
-          brand: p.brand,
-          vendor: vendor.storeName,
-          nodeHub: p.hubAssignment || 'Bandra West Terminal Hub',
-          stockQty: p.stockQuantity,
-          lowStockAlert: p.stockQuantity <= 5,
-          mrp: p.originalPrice || p.price * 1.5,
-          sellingPrice: p.price,
-          status: p.listingStatus || 'ACTIVE',
-        };
+      const products = await this.prisma.product.findMany({
+        include: {
+          vendor: true,
+          darkStoreHub: true,
+        },
+        orderBy: { createdAt: 'desc' },
       });
+
+      const rows = products.map((p) => ({
+        sku: p.sku || `SKU-${p.id.toUpperCase()}`,
+        title: p.title,
+        brand: p.brand,
+        vendor: p.vendor?.storeName || 'Affordz Official Store',
+        nodeHub: p.darkStoreHub?.name || 'Unassigned',
+        stockQty: p.stockQuantity,
+        lowStockAlert: p.stockQuantity <= 5,
+        mrp: p.originalPrice || p.price,
+        sellingPrice: p.price,
+        status: p.listingStatus || 'ACTIVE',
+      }));
 
       return {
         category: 'CATALOG',
@@ -121,7 +140,9 @@ export class AdminReportsService {
       };
     }
 
-    throw new BadRequestException(`Unknown report category '${category}'. Valid categories: ORDERS, VENDORS, DRIVERS, CATALOG.`);
+    throw new BadRequestException(
+      `Unknown report category '${category}'. Valid categories: ORDERS, VENDORS, DRIVERS, CATALOG.`,
+    );
   }
 }
 

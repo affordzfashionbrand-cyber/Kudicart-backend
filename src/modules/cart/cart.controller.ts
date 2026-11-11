@@ -14,6 +14,7 @@ import { CartService } from './cart.service';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
 import { ApplyCouponDto } from './dto/apply-coupon.dto';
+import { UpdateCartPreferencesDto } from './dto/update-cart-preferences.dto';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
@@ -67,6 +68,14 @@ export class CartController {
     @Body() body: ApplyCouponDto,
   ) {
     return this.cartService.applyCoupon(user.id, body.code);
+  }
+
+  @Patch('preferences')
+  async updatePreferences(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: UpdateCartPreferencesDto,
+  ) {
+    return this.cartService.updatePreferences(user.id, body);
   }
 
   @Delete('coupons/remove')

@@ -7,6 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import * as Sentry from '@sentry/nestjs';
 
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
@@ -84,8 +85,18 @@ export class HttpExceptionFilter implements ExceptionFilter {
     };
 
     if (this.sentryDsn) {
-      // When user provisions SENTRY_DSN in .env, remote delivery is enabled
-      this.logger.log(`[Sentry] Event transmitted to Sentry DSN: ${event.url} (${status})`);
+      Sentry.withScope((scope) => {
+        scope.setTag('statusCode', String(status));
+        if (request?.method) scope.setTag('method', request.method);
+        if (request?.url) scope.setExtra('url', request.url);
+        if ((request as any)?.user?.id) {
+          scope.setUser({ id: (request as any).user.id });
+        }
+        Sentry.captureException(
+          exception instanceof Error ? exception : new Error(errObj.message),
+        );
+      });
+      this.logger.log(`[Sentry] Event transmitted to Sentry: ${event.url} (${status})`);
     } else {
       // Graceful local telemetry fallback
       this.logger.warn(

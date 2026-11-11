@@ -1,13 +1,16 @@
 import {
+  BadRequestException,
   Injectable,
   NotFoundException,
-  BadRequestException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
 import {
   CreateCategoryDto,
+  CreateCouponDto,
   UpdateCategoryDto,
+  UpdateCouponDto,
   UpdateProductStatusDto,
   UpdateProductStockDto,
 } from '../dto/admin-domain.dto';
@@ -15,35 +18,136 @@ import { CreateDarkStoreProductDto } from '../dto/create-dark-store-product.dto'
 
 @Injectable()
 export class AdminCatalogService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
+
+  private ensureDb() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('Database connection unavailable');
+    }
+  }
+
+  private async writeAudit(
+    txOrPrisma: any,
+    actorId: string | undefined,
+    actorName: string | undefined,
+    action: string,
+    entityType: string,
+    entityId: string,
+    details: Record<string, unknown>,
+  ) {
+    await txOrPrisma.auditLog.create({
+      data: {
+        userId: actorId || 'ADMIN',
+        userEmail: actorName || null,
+        userRole: 'ADMIN',
+        action,
+        entityType,
+        entityId,
+        details: JSON.stringify(details),
+      },
+    });
+  }
+
+  private formatProduct(p: any) {
+    const stockStatus =
+      p.stockQuantity <= 0
+        ? 'OUT_OF_STOCK'
+        : p.stockQuantity <= 5
+          ? 'LOW_STOCK'
+          : 'IN_STOCK';
+
+    const vendorName =
+      p.vendor?.storeName ||
+      (p.fulfillmentType === 'DARK_STORE' ? 'Affordz Official Store' : 'Partner Store');
+
+    const rawGallery = Array.isArray(p.galleryImages) && p.galleryImages.length > 0
+      ? p.galleryImages
+      : [p.image];
+
+    const galleryImages = rawGallery.map((url: string, idx: number) => ({
+      url,
+      label: idx === 0 ? 'Primary Asset' : `Angle ${idx + 1}`,
+      tag: idx === 0 ? 'Primary' : undefined,
+    }));
+
+    const specifications =
+      Array.isArray(p.specifications) && p.specifications.length > 0
+        ? p.specifications
+        : [
+            { label: 'Fabric Weave', value: p.fabric || 'Pure Silk / Cotton blend' },
+            { label: 'Origin Atelier', value: p.origin || 'Mumbai Studio' },
+            {
+              label: 'Available Sizes',
+              value: Array.isArray(p.sizes) && p.sizes.length > 0 ? p.sizes.join(', ') : 'S, M, L, XL',
+            },
+            {
+              label: 'Fulfillment Class',
+              value: p.fulfillmentType === 'DARK_STORE' ? 'Dark Store Express' : 'Vendor Dispatch',
+            },
+          ];
+
+    return {
+      ...p,
+      sku: p.sku || `SKU-${p.id.toUpperCase()}`,
+      category: p.category?.name || p.categoryId,
+      vendorName,
+      vendorId: p.vendorId,
+      vendor: p.vendor
+        ? {
+            id: p.vendor.id,
+            storeName: p.vendor.storeName,
+            contactPerson: p.vendor.contactPerson || 'Affordz Concierge',
+          }
+        : {
+            id: p.vendorId || 'vend-affordz-official',
+            storeName: vendorName,
+            contactPerson: 'Affordz Concierge',
+          },
+      sellingPrice: p.price,
+      originalPrice: p.originalPrice || p.price,
+      stockStatus,
+      listingStatus: p.listingStatus || 'ACTIVE',
+      hubAssignment: p.darkStoreHub?.name || 'Indiranagar Express Pod',
+      primaryImageUrl: p.image,
+      galleryImages,
+      specifications,
+      createdAt: p.createdAt instanceof Date ? p.createdAt.toISOString() : p.createdAt,
+      updatedAt: p.updatedAt instanceof Date ? p.updatedAt.toISOString() : p.updatedAt,
+    };
+  }
 
   // ================= CATEGORIES =================
 
   async listCategories(query: AdminQueryDto) {
-    const store = this.prisma.getStore();
-    let categories = (store.categories || []).map((c: any) => {
-      const productCount = store.products.filter(
-        (p: any) => p.categoryId === c.id || p.category?.toLowerCase() === c.name?.toLowerCase(),
-      ).length;
+    this.ensureDb();
 
-      return {
-        id: c.id,
-        code: c.code || `CAT-${c.id.toUpperCase()}`,
-        name: c.name,
-        slug: c.slug || c.id,
-        description: c.description || `${c.name} apparel category and curated collections.`,
-        productCount: c.productCount || productCount,
-        status: (c.isActive === false ? 'INACTIVE' : c.status || 'ACTIVE') as 'ACTIVE' | 'INACTIVE',
-        parentCategory: c.parentCategory || (c.parent ? c.parent.name : undefined),
-        displayOrder: c.displayOrder || 1,
-        createdAt: c.createdAt || new Date('2026-01-01').toISOString(),
-      };
+    const rows = await this.prisma.category.findMany({
+      include: {
+        parent: true,
+        _count: { select: { products: true } },
+      },
+      orderBy: [{ displayOrder: 'asc' }, { name: 'asc' }],
     });
+
+    let categories = rows.map((c) => ({
+      id: c.id,
+      code: c.code || `CAT-${c.id.toUpperCase()}`,
+      name: c.name,
+      slug: c.slug || c.id,
+      description: c.description || `${c.name} apparel category and curated collections.`,
+      productCount: c._count?.products ?? 0,
+      status: (c.isActive ? 'ACTIVE' : 'INACTIVE') as 'ACTIVE' | 'INACTIVE',
+      parentCategory: c.parent?.name || undefined,
+      parentId: c.parentId || null,
+      level: c.level,
+      displayOrder: c.displayOrder || 0,
+      createdAt: c.createdAt.toISOString(),
+    }));
 
     if (query.search && query.search.trim()) {
       const q = query.search.toLowerCase().trim();
       categories = categories.filter(
-        (c: any) =>
+        (c) =>
           c.name.toLowerCase().includes(q) ||
           c.code.toLowerCase().includes(q) ||
           c.slug.toLowerCase().includes(q) ||
@@ -52,7 +156,7 @@ export class AdminCatalogService {
     }
 
     if (query.status && query.status !== 'ALL') {
-      categories = categories.filter((c: any) => c.status === query.status);
+      categories = categories.filter((c) => c.status === query.status);
     }
 
     return {
@@ -62,201 +166,225 @@ export class AdminCatalogService {
   }
 
   async createCategory(dto: CreateCategoryDto, actorId?: string, actorName?: string) {
-    const store = this.prisma.getStore();
+    this.ensureDb();
+
     const cleanCode = dto.code.trim().toUpperCase();
     const cleanSlug = (dto.slug || dto.name.toLowerCase().replace(/\s+/g, '-')).trim();
 
-    // Check duplicate code or slug
-    const existing = (store.categories || []).find(
-      (c: any) => (c.code && c.code.toUpperCase() === cleanCode) || c.slug === cleanSlug,
-    );
+    const existing = await this.prisma.category.findFirst({
+      where: {
+        OR: [
+          { code: { equals: cleanCode, mode: 'insensitive' } },
+          { slug: cleanSlug },
+        ],
+      },
+    });
     if (existing) {
-      throw new BadRequestException(`Category with code '${cleanCode}' or slug '${cleanSlug}' already exists.`);
+      throw new BadRequestException(
+        `Category with code '${cleanCode}' or slug '${cleanSlug}' already exists.`,
+      );
     }
 
-    const newCategory = {
-      id: `cat-${Date.now()}`,
-      code: cleanCode,
-      name: dto.name.trim(),
-      slug: cleanSlug,
-      description: dto.description || '',
-      parentCategory: dto.parentCategory || null,
-      status: dto.status || 'ACTIVE',
-      isActive: dto.status !== 'INACTIVE',
-      displayOrder: dto.displayOrder || 0,
-      productCount: 0,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+    let parentCategoryRecord: any = null;
+    if (dto.parentCategory && dto.parentCategory.trim()) {
+      const pTerm = dto.parentCategory.trim();
+      parentCategoryRecord = await this.prisma.category.findFirst({
+        where: {
+          OR: [
+            { id: pTerm },
+            { code: { equals: pTerm, mode: 'insensitive' } },
+            { name: { equals: pTerm, mode: 'insensitive' } },
+            { slug: pTerm },
+          ],
+        },
+      });
+    }
 
-    store.categories.push(newCategory);
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.category.create({
+        data: {
+          code: cleanCode,
+          name: dto.name.trim(),
+          slug: cleanSlug,
+          description: dto.description || '',
+          parentId: parentCategoryRecord?.id || null,
+          level: parentCategoryRecord ? (parentCategoryRecord.level || 1) + 1 : 1,
+          isActive: dto.status !== 'INACTIVE',
+          displayOrder: dto.displayOrder ?? 0,
+        },
+        include: { parent: true, _count: { select: { products: true } } },
+      });
 
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'CATEGORY_CREATED' as any,
-      entityId: newCategory.id,
-      entityName: newCategory.name,
-      entityType: 'Product' as any,
-      summary: `Created apparel category '${newCategory.name}' (${newCategory.code})`,
-      targetDescription: `Catalog Category Tree`,
-      changePayload: {
-        code: newCategory.code,
-        name: newCategory.name,
-        slug: newCategory.slug,
-        parentCategory: newCategory.parentCategory,
-      },
-      entityLink: `/admin/categories`,
+      await this.writeAudit(tx, actorId, actorName, 'CATEGORY_CREATED', 'Category', row.id, {
+        code: row.code,
+        name: row.name,
+        slug: row.slug,
+        parentCategory: row.parent?.name || null,
+      });
+
+      return row;
     });
+
+    const formatted = {
+      id: created.id,
+      code: created.code,
+      name: created.name,
+      slug: created.slug,
+      description: created.description || '',
+      productCount: created._count?.products ?? 0,
+      status: created.isActive ? 'ACTIVE' : 'INACTIVE',
+      parentCategory: created.parent?.name || null,
+      displayOrder: created.displayOrder,
+      createdAt: created.createdAt.toISOString(),
+      updatedAt: created.updatedAt.toISOString(),
+    };
 
     return {
       success: true,
-      message: `Category '${newCategory.name}' created successfully.`,
-      category: newCategory,
+      message: `Category '${created.name}' created successfully.`,
+      category: formatted,
     };
   }
 
   async updateCategory(id: string, dto: UpdateCategoryDto, actorId?: string, actorName?: string) {
-    const store = this.prisma.getStore();
-    const category = (store.categories || []).find((c: any) => c.id === id || c.code === id);
+    this.ensureDb();
 
-    if (!category) {
+    const existing = await this.prisma.category.findFirst({
+      where: {
+        OR: [{ id }, { code: id }, { slug: id }],
+      },
+      include: { parent: true },
+    });
+
+    if (!existing) {
       throw new NotFoundException(`Category record '${id}' was not found.`);
     }
 
-    const previousState = { ...category };
-
-    if (dto.name) category.name = dto.name.trim();
-    if (dto.slug) category.slug = dto.slug.trim();
-    if (dto.description !== undefined) category.description = dto.description;
-    if (dto.parentCategory !== undefined) category.parentCategory = dto.parentCategory;
-    if (dto.status) {
-      category.status = dto.status;
-      category.isActive = dto.status !== 'INACTIVE';
+    let parentId = existing.parentId;
+    let level = existing.level;
+    if (dto.parentCategory !== undefined) {
+      if (!dto.parentCategory || !dto.parentCategory.trim()) {
+        parentId = null;
+        level = 1;
+      } else {
+        const pTerm = dto.parentCategory.trim();
+        const pRec = await this.prisma.category.findFirst({
+          where: {
+            OR: [
+              { id: pTerm },
+              { code: { equals: pTerm, mode: 'insensitive' } },
+              { name: { equals: pTerm, mode: 'insensitive' } },
+            ],
+          },
+        });
+        if (pRec) {
+          parentId = pRec.id;
+          level = (pRec.level || 1) + 1;
+        }
+      }
     }
-    if (dto.displayOrder !== undefined) category.displayOrder = dto.displayOrder;
-    category.updatedAt = new Date().toISOString();
 
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'CATEGORY_UPDATED' as any,
-      entityId: category.id,
-      entityName: category.name,
-      entityType: 'Product' as any,
-      summary: `Updated apparel category '${category.name}' details and status`,
-      targetDescription: `Catalog Category Tree`,
-      changePayload: {
-        previous: previousState,
-        updated: category,
-      },
-      entityLink: `/admin/categories`,
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.category.update({
+        where: { id: existing.id },
+        data: {
+          ...(dto.name ? { name: dto.name.trim() } : {}),
+          ...(dto.slug ? { slug: dto.slug.trim() } : {}),
+          ...(dto.description !== undefined ? { description: dto.description } : {}),
+          ...(dto.status ? { isActive: dto.status !== 'INACTIVE' } : {}),
+          ...(dto.displayOrder !== undefined ? { displayOrder: dto.displayOrder } : {}),
+          parentId,
+          level,
+        },
+        include: { parent: true, _count: { select: { products: true } } },
+      });
+
+      await this.writeAudit(tx, actorId, actorName, 'CATEGORY_UPDATED', 'Category', row.id, {
+        previousName: existing.name,
+        name: row.name,
+        isActive: row.isActive,
+      });
+
+      return row;
     });
+
+    const formatted = {
+      id: updated.id,
+      code: updated.code,
+      name: updated.name,
+      slug: updated.slug,
+      description: updated.description || '',
+      productCount: updated._count?.products ?? 0,
+      status: updated.isActive ? 'ACTIVE' : 'INACTIVE',
+      parentCategory: updated.parent?.name || null,
+      displayOrder: updated.displayOrder,
+      createdAt: updated.createdAt.toISOString(),
+      updatedAt: updated.updatedAt.toISOString(),
+    };
 
     return {
       success: true,
-      message: `Category '${category.name}' updated successfully.`,
-      category,
+      message: `Category '${updated.name}' updated successfully.`,
+      category: formatted,
     };
   }
 
   async deleteCategory(id: string, actorId?: string, actorName?: string) {
-    const store = this.prisma.getStore();
-    const index = (store.categories || []).findIndex((c: any) => c.id === id || c.code === id);
+    this.ensureDb();
 
-    if (index === -1) {
+    const existing = await this.prisma.category.findFirst({
+      where: {
+        OR: [{ id }, { code: id }, { slug: id }],
+      },
+    });
+
+    if (!existing) {
       throw new NotFoundException(`Category record '${id}' was not found.`);
     }
 
-    const category = store.categories[index];
-
-    // Check dependent products
-    const dependentProducts = store.products.filter(
-      (p: any) => p.categoryId === category.id || p.category?.toLowerCase() === category.name?.toLowerCase(),
-    );
-    if (dependentProducts.length > 0) {
+    const dependentCount = await this.prisma.product.count({
+      where: { categoryId: existing.id },
+    });
+    if (dependentCount > 0) {
       throw new BadRequestException(
-        `Cannot delete category '${category.name}' because ${dependentProducts.length} product(s) are assigned to it.`,
+        `Cannot delete category '${existing.name}' because ${dependentCount} product(s) are assigned to it.`,
       );
     }
 
-    store.categories.splice(index, 1);
-
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'CATEGORY_DELETED' as any,
-      entityId: category.id,
-      entityName: category.name,
-      entityType: 'Product' as any,
-      summary: `Deleted category '${category.name}' from catalog tree`,
-      targetDescription: `Catalog Category Tree`,
-      entityLink: `/admin/categories`,
+    await this.prisma.$transaction(async (tx) => {
+      await tx.category.delete({ where: { id: existing.id } });
+      await this.writeAudit(tx, actorId, actorName, 'CATEGORY_DELETED', 'Category', existing.id, {
+        name: existing.name,
+        code: existing.code,
+      });
     });
 
     return {
       success: true,
-      message: `Category '${category.name}' deleted successfully.`,
+      message: `Category '${existing.name}' deleted successfully.`,
     };
   }
 
   // ================= PRODUCTS =================
 
   async listProducts(query: AdminQueryDto) {
-    const store = this.prisma.getStore();
-    let products = store.products.map((p: any) => {
-      const vendor =
-        (store.adminVendors || []).find((v: any) => v.id === p.vendorId) ||
-        (store.vendors || []).find((v: any) => v.id === p.vendorId) || {
-          storeName: p.fulfillmentType === 'DARK_STORE' ? 'Affordz Official Store' : 'Avanya Ethnic Boutique',
-        };
+    this.ensureDb();
 
-      const stockStatus =
-        p.stockQuantity <= 0
-          ? 'OUT_OF_STOCK'
-          : p.stockQuantity <= 5
-          ? 'LOW_STOCK'
-          : 'IN_STOCK';
-
-      return {
-        id: p.id,
-        sku: p.sku || `SKU-${p.id.toUpperCase()}`,
-        title: p.title,
-        brand: p.brand,
-        category: p.category || (typeof p.categoryId === 'string' ? p.categoryId : 'Kurtis'),
-        vendorName: p.vendorName || vendor.storeName,
-        vendorId: p.vendorId || vendor.id,
-        sellingPrice: p.price,
-        originalPrice: p.originalPrice || p.price * 1.5,
-        stockQuantity: p.stockQuantity,
-        stockStatus,
-        fulfillmentType: p.fulfillmentType || 'DARK_STORE',
-        listingStatus: p.listingStatus || 'ACTIVE',
-        tryAndBuyEligible: p.tryAndBuyEligible !== false,
-        hubAssignment: p.hubAssignment || 'Indiranagar Express Pod',
-        primaryImageUrl: p.image,
-        galleryImages: (p.galleryImages || []).map((url: string, idx: number) => ({
-          url,
-          label: idx === 0 ? 'Primary Asset' : `Angle ${idx + 1}`,
-          tag: idx === 0 ? 'Primary' : undefined,
-        })),
-        description: p.description,
-        specifications: [
-          { label: 'Fabric Weave', value: p.fabric || 'Pure Silk / Cotton blend' },
-          { label: 'Origin Atelier', value: p.origin || 'Mumbai Studio' },
-          { label: 'Available Sizes', value: Array.isArray(p.sizes) ? p.sizes.join(', ') : 'S, M, L, XL' },
-          { label: 'Fulfillment Class', value: p.fulfillmentType === 'DARK_STORE' ? 'Dark Store Express' : 'Vendor Dispatch' },
-        ],
-        createdAt: p.createdAt || new Date('2026-01-10').toISOString(),
-        updatedAt: p.updatedAt || new Date('2026-01-15').toISOString(),
-      };
+    const rows = await this.prisma.product.findMany({
+      include: {
+        vendor: true,
+        category: true,
+        darkStoreHub: true,
+      },
+      orderBy: { createdAt: 'desc' },
     });
 
-    // Filter by search
+    let products = rows.map((p) => this.formatProduct(p));
+
     if (query.search && query.search.trim()) {
       const q = query.search.toLowerCase().trim();
       products = products.filter(
-        (p: any) =>
+        (p) =>
           p.title.toLowerCase().includes(q) ||
           p.brand.toLowerCase().includes(q) ||
           p.sku.toLowerCase().includes(q) ||
@@ -265,38 +393,41 @@ export class AdminCatalogService {
       );
     }
 
-    // Filter by category
     if (query.category && query.category !== 'ALL') {
+      const catQ = query.category.toLowerCase();
       products = products.filter(
-        (p: any) => p.category.toLowerCase() === query.category.toLowerCase(),
+        (p) =>
+          p.category.toLowerCase() === catQ ||
+          (p.categoryId && p.categoryId.toLowerCase() === catQ),
       );
     }
 
-    // Filter by vendor
     if (query.vendor && query.vendor !== 'ALL') {
       products = products.filter(
-        (p: any) =>
-          p.vendorName.toLowerCase() === query.vendor.toLowerCase() ||
+        (p) =>
+          p.vendorName.toLowerCase() === query.vendor!.toLowerCase() ||
           p.vendorId === query.vendor,
       );
     }
 
-    // Filter by fulfillment
     const fulfillmentFilter = query.fulfillmentType || (query as any).fulfillment;
     if (fulfillmentFilter && fulfillmentFilter !== 'ALL') {
-      products = products.filter((p: any) => p.fulfillmentType === fulfillmentFilter);
+      products = products.filter((p) => p.fulfillmentType === fulfillmentFilter);
     }
 
-    // Filter by status tab
     if (query.status && query.status !== 'ALL') {
       if (query.status === 'LOW_STOCK') {
-        products = products.filter((p: any) => p.stockStatus === 'LOW_STOCK');
+        products = products.filter((p) => p.stockStatus === 'LOW_STOCK');
       } else if (query.status === 'OUT_OF_STOCK') {
-        products = products.filter((p: any) => p.stockStatus === 'OUT_OF_STOCK');
+        products = products.filter((p) => p.stockStatus === 'OUT_OF_STOCK');
       } else if (query.status === 'ACTIVE') {
-        products = products.filter((p: any) => p.listingStatus === 'ACTIVE');
+        products = products.filter((p) => p.listingStatus === 'ACTIVE');
       } else if (query.status === 'DRAFT') {
-        products = products.filter((p: any) => p.listingStatus === 'DRAFT' || p.listingStatus === 'REVIEW');
+        products = products.filter(
+          (p) => p.listingStatus === 'DRAFT' || p.listingStatus === 'REVIEW',
+        );
+      } else {
+        products = products.filter((p) => p.listingStatus === query.status);
       }
     }
 
@@ -315,118 +446,133 @@ export class AdminCatalogService {
   }
 
   async getProductById(id: string) {
-    const store = this.prisma.getStore();
-    const product = store.products.find(
-      (p: any) => p.id === id || p.id.replace('prod-', '') === id,
-    );
+    this.ensureDb();
+
+    const product = await this.prisma.product.findFirst({
+      where: {
+        OR: [{ id }, { id: `prod-${id}` }],
+      },
+      include: {
+        vendor: true,
+        category: true,
+        darkStoreHub: true,
+      },
+    });
 
     if (!product) {
       throw new NotFoundException(`Product record '${id}' was not found in catalog.`);
     }
 
-    const vendor =
-      (store.adminVendors || []).find((v: any) => v.id === product.vendorId) ||
-      (store.vendors || []).find((v: any) => v.id === product.vendorId) || {
-        id: product.vendorId || 'vend-affordz-official',
-        storeName: product.fulfillmentType === 'DARK_STORE' ? 'Affordz Official Store' : 'Avanya Ethnic Boutique',
-        rating: 4.8,
-        contactPerson: 'Meera Deshmukh',
-      };
-
-    const specifications = [
-      { label: 'Fabric Weave', value: product.fabric || 'Pure Silk / Cotton blend' },
-      { label: 'Origin Atelier', value: product.origin || 'Mumbai Studio' },
-      { label: 'Available Sizes', value: Array.isArray(product.sizes) ? product.sizes.join(', ') : 'S, M, L, XL' },
-      { label: 'Fulfillment Class', value: product.fulfillmentType === 'DARK_STORE' ? 'Dark Store Express' : 'Vendor Dispatch' },
-    ];
-
-    const galleryImages = (product.galleryImages || [product.image]).map((url: string, idx: number) => ({
-      url,
-      label: idx === 0 ? 'Primary Asset' : `Angle ${idx + 1}`,
-      tag: idx === 0 ? 'Primary' : undefined,
-    }));
-
-    return {
-      ...product,
-      specifications,
-      galleryImages,
-      vendor,
-    };
+    return this.formatProduct(product);
   }
 
-  async updateProductStatus(id: string, dto: UpdateProductStatusDto, actorId?: string, actorName?: string) {
-    const store = this.prisma.getStore();
-    const product = store.products.find(
-      (p: any) => p.id === id || p.id.replace('prod-', '') === id,
-    );
+  async updateProductStatus(
+    id: string,
+    dto: UpdateProductStatusDto,
+    actorId?: string,
+    actorName?: string,
+  ) {
+    this.ensureDb();
 
-    if (!product) {
+    const nextStatus = dto.listingStatus || dto.status;
+    if (!nextStatus) {
+      throw new BadRequestException('Listing status is required');
+    }
+
+    const existing = await this.prisma.product.findFirst({
+      where: { OR: [{ id }, { id: `prod-${id}` }] },
+    });
+
+    if (!existing) {
       throw new NotFoundException(`Product record '${id}' was not found.`);
     }
 
-    const previousStatus = (product as any).listingStatus || 'ACTIVE';
-    (product as any).listingStatus = dto.listingStatus;
-    (product as any).updatedAt = new Date().toISOString();
+    const previousStatus = existing.listingStatus || 'ACTIVE';
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.product.update({
+        where: { id: existing.id },
+        data: { listingStatus: nextStatus },
+        include: { vendor: true, category: true, darkStoreHub: true },
+      });
 
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'PRODUCT_STATUS_UPDATED' as any,
-      entityId: product.id,
-      entityName: product.title,
-      entityType: 'Product' as any,
-      summary: `Product '${product.title}' listing status changed: ${previousStatus} -> ${dto.listingStatus}`,
-      targetDescription: `Catalog SKU #${product.id}`,
-      changePayload: {
-        previousStatus,
-        newStatus: dto.listingStatus,
-      },
-      entityLink: `/admin/products/${product.id}`,
+      await this.writeAudit(
+        tx,
+        actorId,
+        actorName,
+        'PRODUCT_STATUS_UPDATED',
+        'Product',
+        row.id,
+        {
+          title: row.title,
+          previousStatus,
+          newStatus: nextStatus,
+        },
+      );
+
+      return row;
     });
 
     return {
       success: true,
-      message: `Product listing status updated to ${dto.listingStatus}.`,
-      product,
+      message: `Product listing status updated to ${nextStatus}.`,
+      product: this.formatProduct(updated),
     };
   }
 
-  async updateProductStock(id: string, dto: UpdateProductStockDto, actorId?: string, actorName?: string) {
-    const store = this.prisma.getStore();
-    const product = store.products.find(
-      (p: any) => p.id === id || p.id.replace('prod-', '') === id,
-    );
+  async updateProductStock(
+    id: string,
+    dto: UpdateProductStockDto,
+    actorId?: string,
+    actorName?: string,
+  ) {
+    this.ensureDb();
 
-    if (!product) {
+    const rawQty = dto.stockQuantity ?? dto.stock;
+    if (rawQty === undefined || rawQty === null || Number.isNaN(Number(rawQty))) {
+      throw new BadRequestException('Stock quantity is required');
+    }
+    const nextQty = Number(rawQty);
+
+    const existing = await this.prisma.product.findFirst({
+      where: { OR: [{ id }, { id: `prod-${id}` }] },
+    });
+
+    if (!existing) {
       throw new NotFoundException(`Product record '${id}' was not found.`);
     }
 
-    const previousStock = product.stockQuantity;
-    product.stockQuantity = dto.stockQuantity;
-    (product as any).stockStatus =
-      dto.stockQuantity <= 0 ? 'OUT_OF_STOCK' : dto.stockQuantity <= 5 ? 'LOW_STOCK' : 'IN_STOCK';
-    (product as any).updatedAt = new Date().toISOString();
+    const previousStock = existing.stockQuantity;
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.product.update({
+        where: { id: existing.id },
+        data: {
+          stockQuantity: nextQty,
+          ...(dto.stockBadge !== undefined ? { stockBadge: dto.stockBadge } : {}),
+        },
+        include: { vendor: true, category: true, darkStoreHub: true },
+      });
 
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'PRODUCT_STOCK_UPDATED' as any,
-      entityId: product.id,
-      entityName: product.title,
-      entityType: 'Product' as any,
-      summary: `Product '${product.title}' inventory stock adjusted: ${previousStock} -> ${dto.stockQuantity} units`,
-      targetDescription: `Catalog SKU #${product.id}`,
-      changePayload: {
-        previousStock,
-        newStock: dto.stockQuantity,
-      },
-      entityLink: `/admin/products/${product.id}`,
+      await this.writeAudit(
+        tx,
+        actorId,
+        actorName,
+        'PRODUCT_STOCK_UPDATED',
+        'Product',
+        row.id,
+        {
+          title: row.title,
+          previousStock,
+          newStock: nextQty,
+        },
+      );
+
+      return row;
     });
 
     return {
       success: true,
-      message: `Product stock updated to ${dto.stockQuantity} units.`,
-      product,
+      message: `Product stock updated to ${nextQty} units.`,
+      product: this.formatProduct(updated),
     };
   }
 
@@ -435,6 +581,8 @@ export class AdminCatalogService {
     actorId?: string,
     actorName?: string,
   ) {
+    this.ensureDb();
+
     if (dto.fulfillmentType && dto.fulfillmentType !== 'DARK_STORE') {
       throw new BadRequestException(
         'Admin product creation strictly supports DARK_STORE fulfillment. Vendor products must be submitted via the Vendor Portal.',
@@ -447,60 +595,81 @@ export class AdminCatalogService {
       );
     }
 
-    const store = this.prisma.getStore();
-
-    // 1. Validate Category
-    let category = (store.categories || []).find(
-      (c: any) =>
-        c.id === dto.categoryId ||
-        c.slug === dto.categoryId ||
-        c.name?.toLowerCase() === dto.categoryId.toLowerCase(),
-    );
-    if (!category && this.prisma.isConnectedToDb) {
-      try {
-        category = await this.prisma.category.findUnique({ where: { id: dto.categoryId } });
-      } catch (e) {}
-    }
+    const category = await this.prisma.category.findFirst({
+      where: {
+        OR: [
+          { id: dto.categoryId },
+          { slug: dto.categoryId },
+          { code: dto.categoryId },
+          { name: { equals: dto.categoryId, mode: 'insensitive' } },
+        ],
+      },
+    });
     if (!category) {
-      throw new BadRequestException(`Selected Category '${dto.categoryId}' does not exist or is inactive.`);
+      throw new BadRequestException(
+        `Selected Category '${dto.categoryId}' does not exist or is inactive.`,
+      );
     }
 
-    // 2. Validate Dark Store Hub
-    let hub = (store.darkStores || []).find(
-      (h: any) =>
-        h.id === dto.darkStoreHubId ||
-        h.id?.replace('hub-', '') === dto.darkStoreHubId,
-    );
-    if (!hub && this.prisma.isConnectedToDb) {
-      try {
-        hub = await this.prisma.darkStoreHub.findUnique({ where: { id: dto.darkStoreHubId } });
-      } catch (e) {}
-    }
+    const hub = await this.prisma.darkStoreHub.findFirst({
+      where: {
+        OR: [
+          { id: dto.darkStoreHubId },
+          { id: `hub-${dto.darkStoreHubId}` },
+        ],
+      },
+    });
     if (!hub) {
-      throw new BadRequestException(`Selected Dark Store Hub '${dto.darkStoreHubId}' does not exist or is inactive.`);
+      throw new BadRequestException(
+        `Selected Dark Store Hub '${dto.darkStoreHubId}' does not exist or is inactive.`,
+      );
     }
 
-    // 3. Derive discount percentage
     const discountPct = Math.round(((dto.originalPrice - dto.price) / dto.originalPrice) * 100);
     const discount = discountPct > 0 ? `${discountPct}% OFF` : '0% OFF';
 
-    // 4. Reserve Affordz Official Store Vendor
     const officialVendorId = 'vend-affordz-official';
     const officialStoreName = 'Affordz Official Store';
+
+    let officialVendor = await this.prisma.vendor.findUnique({
+      where: { id: officialVendorId },
+    });
+    if (!officialVendor) {
+      const adminOwner =
+        (actorId
+          ? await this.prisma.user.findUnique({ where: { id: actorId } })
+          : null) ||
+        (await this.prisma.user.findFirst({
+          where: { role: 'ADMIN' },
+          orderBy: { createdAt: 'asc' },
+        }));
+
+      if (!adminOwner) {
+        throw new BadRequestException('Official Store vendor owner account not found');
+      }
+
+      officialVendor = await this.prisma.vendor.create({
+        data: {
+          id: officialVendorId,
+          userId: adminOwner.id,
+          storeName: officialStoreName,
+          commissionRate: 12.5,
+          status: 'ACTIVE',
+        },
+      });
+    }
 
     const cleanBrand = dto.brand?.trim() || officialStoreName;
     const baseTimestamp = Date.now();
     const colorGroupId = `grp-${baseTimestamp}`;
-
-    // Resolve colorways and generate distinct separate products per colorway
     const rawColors = Array.isArray(dto.colors) && dto.colors.length > 0 ? dto.colors : null;
 
-    // Cross-link sibling variants so each product references all color products
     const siblingColors = rawColors
       ? rawColors.map((c, idx) => ({
           name: c.name,
           hex: c.hex,
-          productId: c.productId || (idx === 0 ? `prod-${baseTimestamp}` : `prod-${baseTimestamp}-${idx + 1}`),
+          productId:
+            c.productId || (idx === 0 ? `prod-${baseTimestamp}` : `prod-${baseTimestamp}-${idx + 1}`),
           image: c.image?.trim() || dto.image.trim(),
         }))
       : [
@@ -512,156 +681,270 @@ export class AdminCatalogService {
           },
         ];
 
-    // Build the separate product entities for each colorway
-    const createdProducts = siblingColors.map((colorItem, idx) => {
-      const specificColor = rawColors ? rawColors[idx] : null;
-      const productSpecificImage = specificColor?.image?.trim() || dto.image.trim();
-      const rawGallery =
-        Array.isArray(specificColor?.galleryImages) && specificColor.galleryImages.length > 0
-          ? specificColor.galleryImages.map((u: string) => u.trim()).filter(Boolean)
-          : Array.isArray(dto.galleryImages) && dto.galleryImages.length > 0
-            ? dto.galleryImages.map((u: string) => u.trim()).filter(Boolean)
-            : [productSpecificImage];
+    const createdDbProducts = await this.prisma.$transaction(async (tx) => {
+      const rows = [];
+      for (let idx = 0; idx < siblingColors.length; idx++) {
+        const colorItem = siblingColors[idx];
+        const specificColor = rawColors ? rawColors[idx] : null;
+        const productSpecificImage = specificColor?.image?.trim() || dto.image.trim();
+        const rawGallery =
+          Array.isArray(specificColor?.galleryImages) && specificColor.galleryImages.length > 0
+            ? specificColor.galleryImages.map((u: string) => u.trim()).filter(Boolean)
+            : Array.isArray(dto.galleryImages) && dto.galleryImages.length > 0
+              ? dto.galleryImages.map((u: string) => u.trim()).filter(Boolean)
+              : [productSpecificImage];
 
-      const productSpecificGallery = rawGallery.includes(productSpecificImage)
-        ? rawGallery
-        : [productSpecificImage, ...rawGallery];
+        const productSpecificGallery = rawGallery.includes(productSpecificImage)
+          ? rawGallery
+          : [productSpecificImage, ...rawGallery];
 
-      const productSpecificStock =
-        specificColor?.stockQuantity != null
-          ? Number(specificColor.stockQuantity)
-          : Number(dto.stockQuantity);
+        const productSpecificStock =
+          specificColor?.stockQuantity != null
+            ? Number(specificColor.stockQuantity)
+            : Number(dto.stockQuantity);
 
-      return {
-        id: colorItem.productId,
-        colorGroupId,
-        colorName: colorItem.name,
-        colorHex: colorItem.hex,
-        vendorId: officialVendorId,
-        categoryId: category.id,
-        brand: cleanBrand,
-        title: rawColors && rawColors.length > 1 ? `${dto.title.trim()} - ${colorItem.name}` : dto.title.trim(),
-        description: dto.description.trim(),
-        price: Number(dto.price),
-        originalPrice: Number(dto.originalPrice),
-        discount,
-        rating: 4.8,
-        reviewsCount: 0,
-        stockQuantity: productSpecificStock,
-        stockBadge: 'DARK STORE STOCK',
-        readyToShip: dto.readyToShip !== false,
-        gender: 'Women',
-        sizes: dto.sizes,
-        fabric: dto.fabric?.trim() || null,
-        origin: dto.origin?.trim() || null,
-        colors: siblingColors,
-        specifications: dto.specifications || undefined,
-        certification: dto.certification?.trim() || 'Silk Mark Certified',
-        tags: ['dark-store', 'official-store', 'fast-delivery', colorItem.name.toLowerCase()],
-        image: productSpecificImage,
-        altText: `${dto.altText.trim()} in ${colorItem.name}`,
-        galleryImages: productSpecificGallery,
-        fulfillmentType: 'DARK_STORE',
-        darkStoreHubId: hub.id,
-        hubAssignment: hub.name || hub.locality || 'Indiranagar Express Pod',
-        tryAndBuyEligible: true,
-        category: category.name,
-        vendorName: officialStoreName,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-    });
-
-    const primaryProduct = createdProducts[0];
-
-    // 5. Persist to PostgreSQL if connected
-    if (this.prisma.isConnectedToDb) {
-      try {
-        await this.prisma.vendor.upsert({
-          where: { id: officialVendorId },
-          update: { storeName: officialStoreName },
-          create: {
-            id: officialVendorId,
-            userId: actorId || 'usr-admin-1',
-            storeName: officialStoreName,
+        const row = await tx.product.create({
+          data: {
+            id: colorItem.productId,
+            colorGroupId,
+            colorName: colorItem.name,
+            colorHex: colorItem.hex,
+            vendorId: officialVendor!.id,
+            categoryId: category.id,
+            brand: cleanBrand,
+            title:
+              rawColors && rawColors.length > 1
+                ? `${dto.title.trim()} - ${colorItem.name}`
+                : dto.title.trim(),
+            description: dto.description.trim(),
+            price: Number(dto.price),
+            originalPrice: Number(dto.originalPrice),
+            discount,
+            rating: 4.8,
+            reviewsCount: 0,
+            stockQuantity: productSpecificStock,
+            stockBadge: 'DARK STORE STOCK',
+            listingStatus: 'ACTIVE',
+            readyToShip: dto.readyToShip !== false,
+            gender: category.gender || 'Women',
+            sizes: dto.sizes,
+            fabric: dto.fabric?.trim() || null,
+            origin: dto.origin?.trim() || null,
+            colors: siblingColors as any,
+            specifications: dto.specifications ? (dto.specifications as any) : undefined,
+            certification: dto.certification?.trim() || 'Silk Mark Certified',
+            tags: ['dark-store', 'official-store', 'fast-delivery', colorItem.name.toLowerCase()],
+            image: productSpecificImage,
+            altText: `${dto.altText.trim()} in ${colorItem.name}`,
+            galleryImages: productSpecificGallery,
+            fulfillmentType: 'DARK_STORE',
+            darkStoreHubId: hub.id,
+            tryAndBuyEligible: true,
+          },
+          include: {
+            vendor: true,
+            category: true,
+            darkStoreHub: true,
           },
         });
-
-        for (const prod of createdProducts) {
-          try {
-            await this.prisma.product.create({
-              data: {
-                id: prod.id,
-                colorGroupId: prod.colorGroupId,
-                colorName: prod.colorName,
-                colorHex: prod.colorHex,
-                vendorId: officialVendorId,
-                categoryId: category.id,
-                brand: prod.brand,
-                title: prod.title,
-                description: prod.description,
-                price: prod.price,
-                originalPrice: prod.originalPrice,
-                discount: prod.discount,
-                rating: prod.rating,
-                reviewsCount: prod.reviewsCount,
-                stockQuantity: prod.stockQuantity,
-                stockBadge: prod.stockBadge,
-                readyToShip: prod.readyToShip,
-                sizes: prod.sizes,
-                fabric: prod.fabric,
-                origin: prod.origin,
-                image: prod.image,
-                altText: prod.altText,
-                galleryImages: prod.galleryImages,
-                fulfillmentType: 'DARK_STORE' as any,
-                darkStoreHubId: hub.id,
-                tryAndBuyEligible: true,
-              } as any,
-            });
-          } catch (e) {}
-        }
-      } catch (err: any) {
-        // Fallback store handles in-memory presentation
+        rows.push(row);
       }
-    }
 
-    // 6. Update authoritative in-memory store with each separate product
-    for (const prod of createdProducts) {
-      (store.products as any[]).unshift(prod as any);
-    }
+      const primary = rows[0];
+      await this.writeAudit(
+        tx,
+        actorId || 'ADM-001',
+        actorName || 'Operations Admin',
+        'PRODUCT_CREATED',
+        'Product',
+        primary.id,
+        {
+          id: primary.id,
+          title: primary.title,
+          group: colorGroupId,
+          colorwaysCount: rows.length,
+          colors: siblingColors.map((c) => c.name),
+          price: primary.price,
+          originalPrice: primary.originalPrice,
+          hubId: hub.id,
+          stock: primary.stockQuantity,
+        },
+      );
 
-    // 7. Audit log event
-    this.prisma.recordAuditEvent({
-      actorId: actorId || 'ADM-001',
-      actorName: actorName || 'Operations Admin',
-      actionType: 'PRODUCT_CREATED' as any,
-      entityId: primaryProduct.id,
-      entityName: primaryProduct.title,
-      entityType: 'Product' as any,
-      summary: `Created ${createdProducts.length} separate Dark Store color products for '${dto.title}' (Hub: ${hub.name || hub.id}, Group: ${colorGroupId})`,
-      targetDescription: `Catalog Group #${colorGroupId}`,
-      changePayload: {
-        id: primaryProduct.id,
-        group: colorGroupId,
-        colorwaysCount: createdProducts.length,
-        colors: siblingColors.map((c) => c.name),
-        price: primaryProduct.price,
-        originalPrice: primaryProduct.originalPrice,
-        hubId: hub.id,
-        stock: primaryProduct.stockQuantity,
-      },
-      entityLink: `/admin/products/${primaryProduct.id}`,
+      return rows;
     });
+
+    const formattedColorways = createdDbProducts.map((p) => ({
+      ...this.formatProduct(p),
+      vendorName: officialStoreName,
+    }));
+    const primaryProduct = formattedColorways[0];
 
     return {
       success: true,
       message:
-        createdProducts.length > 1
-          ? `Created ${createdProducts.length} separate Dark Store colorway products for '${dto.title}'.`
+        formattedColorways.length > 1
+          ? `Created ${formattedColorways.length} separate Dark Store colorway products for '${dto.title}'.`
           : `Dark Store product '${primaryProduct.title}' created and assigned to Affordz Official Store.`,
       product: primaryProduct,
-      colorways: createdProducts,
+      colorways: formattedColorways,
+    };
+  }
+
+  // ================= COUPONS =================
+
+  async listCoupons(query: AdminQueryDto) {
+    this.ensureDb();
+
+    const rows = await this.prisma.coupon.findMany({
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const now = new Date();
+    let coupons = rows.map((c) => {
+      const isExpired = c.endDate < now;
+      return {
+        ...c,
+        status: !c.isActive ? 'INACTIVE' : isExpired ? 'EXPIRED' : 'ACTIVE',
+      };
+    });
+
+    if (query.search && query.search.trim()) {
+      const q = query.search.toLowerCase().trim();
+      coupons = coupons.filter((c) => c.code.toLowerCase().includes(q));
+    }
+
+    if (query.status && query.status !== 'ALL') {
+      coupons = coupons.filter((c) => c.status === query.status);
+    }
+
+    return {
+      data: coupons,
+      total: coupons.length,
+    };
+  }
+
+  async createCoupon(dto: CreateCouponDto, actorId?: string, actorName?: string) {
+    this.ensureDb();
+
+    const code = dto.code.trim().toUpperCase();
+    const existing = await this.prisma.coupon.findUnique({ where: { code } });
+    if (existing) {
+      throw new BadRequestException(`Coupon code '${code}' already exists.`);
+    }
+
+    const startDate = dto.startDate ? new Date(dto.startDate) : new Date();
+    const endDate = new Date(dto.endDate);
+    if (Number.isNaN(endDate.getTime()) || endDate <= startDate) {
+      throw new BadRequestException('Coupon endDate must be a valid date after startDate');
+    }
+
+    const coupon = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.coupon.create({
+        data: {
+          code,
+          discountType: (dto.discountType || 'PERCENTAGE') as any,
+          discountValue: Number(dto.discountValue),
+          minOrderValue: Number(dto.minOrderValue ?? 0),
+          maxDiscount: dto.maxDiscount !== undefined ? Number(dto.maxDiscount) : null,
+          usageLimit: dto.usageLimit !== undefined ? Number(dto.usageLimit) : null,
+          startDate,
+          endDate,
+          isActive: dto.isActive !== false,
+        },
+      });
+
+      await this.writeAudit(tx, actorId, actorName, 'COUPON_CREATED', 'Coupon', row.id, {
+        code: row.code,
+        discountType: row.discountType,
+        discountValue: row.discountValue,
+      });
+
+      return row;
+    });
+
+    return {
+      success: true,
+      message: `Coupon '${coupon.code}' created successfully.`,
+      coupon,
+    };
+  }
+
+  async updateCoupon(id: string, dto: UpdateCouponDto, actorId?: string, actorName?: string) {
+    this.ensureDb();
+
+    const existing = await this.prisma.coupon.findFirst({
+      where: { OR: [{ id }, { code: id.trim().toUpperCase() }] },
+    });
+    if (!existing) {
+      throw new NotFoundException(`Coupon '${id}' was not found.`);
+    }
+
+    const nextCode = dto.code ? dto.code.trim().toUpperCase() : existing.code;
+    if (nextCode !== existing.code) {
+      const conflict = await this.prisma.coupon.findUnique({ where: { code: nextCode } });
+      if (conflict) {
+        throw new BadRequestException(`Coupon code '${nextCode}' already exists.`);
+      }
+    }
+
+    const startDate = dto.startDate ? new Date(dto.startDate) : existing.startDate;
+    const endDate = dto.endDate ? new Date(dto.endDate) : existing.endDate;
+    if (endDate <= startDate) {
+      throw new BadRequestException('Coupon endDate must be after startDate');
+    }
+
+    const coupon = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.coupon.update({
+        where: { id: existing.id },
+        data: {
+          code: nextCode,
+          ...(dto.discountType ? { discountType: dto.discountType as any } : {}),
+          ...(dto.discountValue !== undefined ? { discountValue: Number(dto.discountValue) } : {}),
+          ...(dto.minOrderValue !== undefined ? { minOrderValue: Number(dto.minOrderValue) } : {}),
+          ...(dto.maxDiscount !== undefined ? { maxDiscount: dto.maxDiscount } : {}),
+          ...(dto.usageLimit !== undefined ? { usageLimit: dto.usageLimit } : {}),
+          startDate,
+          endDate,
+          ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
+        },
+      });
+
+      await this.writeAudit(tx, actorId, actorName, 'COUPON_UPDATED', 'Coupon', row.id, {
+        code: row.code,
+        isActive: row.isActive,
+      });
+
+      return row;
+    });
+
+    return {
+      success: true,
+      message: `Coupon '${coupon.code}' updated successfully.`,
+      coupon,
+    };
+  }
+
+  async deleteCoupon(id: string, actorId?: string, actorName?: string) {
+    this.ensureDb();
+
+    const existing = await this.prisma.coupon.findFirst({
+      where: { OR: [{ id }, { code: id.trim().toUpperCase() }] },
+    });
+    if (!existing) {
+      throw new NotFoundException(`Coupon '${id}' was not found.`);
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.coupon.delete({ where: { id: existing.id } });
+      await this.writeAudit(tx, actorId, actorName, 'COUPON_DELETED', 'Coupon', existing.id, {
+        code: existing.code,
+      });
+    });
+
+    return {
+      success: true,
+      message: `Coupon '${existing.code}' deleted successfully.`,
     };
   }
 }

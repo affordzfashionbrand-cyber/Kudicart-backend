@@ -1,6 +1,7 @@
 import {
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
@@ -8,16 +9,70 @@ import { ModerateReviewDto } from '../dto/admin-domain.dto';
 
 @Injectable()
 export class AdminReviewsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
+
+  private ensureDb() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('Database connection unavailable');
+    }
+  }
+
+  private formatReview(r: any) {
+    return {
+      id: r.id,
+      userId: r.userId,
+      productId: r.productId,
+      orderId: r.orderId,
+      productTitle: r.product?.title || 'Product',
+      productSku: r.product?.sku || `SKU-${String(r.productId).toUpperCase()}`,
+      customerName: r.user?.name || 'Customer',
+      customerEmail: r.user?.email || '',
+      vendorName: r.product?.vendor?.storeName || 'Affordz Official Store',
+      rating: r.rating,
+      comment: r.comment,
+      status: r.status,
+      flagReason: r.flagReason || null,
+      createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt,
+      updatedAt: r.updatedAt instanceof Date ? r.updatedAt.toISOString() : r.updatedAt,
+    };
+  }
+
+  private async syncProductRating(tx: any, productId: string) {
+    const published = await tx.review.findMany({
+      where: { productId, status: 'PUBLISHED' },
+      select: { rating: true },
+    });
+    const reviewsCount = published.length;
+    const avg =
+      reviewsCount > 0
+        ? Number((published.reduce((sum: number, item: any) => sum + item.rating, 0) / reviewsCount).toFixed(1))
+        : 0;
+    await tx.product.update({
+      where: { id: productId },
+      data: { rating: avg, reviewsCount },
+    });
+  }
 
   async listReviews(query: AdminQueryDto) {
-    const store = this.prisma.getStore();
-    let reviews = store.adminReviews || [];
+    this.ensureDb();
+
+    const page = Math.max(Number(query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(query.limit) || 10, 1), 100);
+
+    const rows = await this.prisma.review.findMany({
+      include: {
+        user: true,
+        product: { include: { vendor: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    let reviews = rows.map((r) => this.formatReview(r));
 
     if (query.search && query.search.trim()) {
       const q = query.search.toLowerCase().trim();
       reviews = reviews.filter(
-        (r: any) =>
+        (r) =>
           r.productTitle.toLowerCase().includes(q) ||
           r.productSku.toLowerCase().includes(q) ||
           r.customerName.toLowerCase().includes(q) ||
@@ -27,20 +82,18 @@ export class AdminReviewsService {
     }
 
     if (query.rating && query.rating !== 'ALL') {
-      reviews = reviews.filter((r: any) => r.rating === Number(query.rating));
+      reviews = reviews.filter((r) => r.rating === Number(query.rating));
     }
 
     if (query.status && query.status !== 'ALL') {
-      reviews = reviews.filter((r: any) => r.status === query.status);
+      reviews = reviews.filter((r) => r.status === query.status);
     }
 
     if (query.vendor && query.vendor !== 'ALL') {
-      reviews = reviews.filter((r: any) => r.vendorName === query.vendor);
+      reviews = reviews.filter((r) => r.vendorName === query.vendor);
     }
 
     const total = reviews.length;
-    const page = Number(query.page) || 1;
-    const limit = Number(query.limit) || 10;
     const startIndex = (page - 1) * limit;
     const paginated = reviews.slice(startIndex, startIndex + limit);
 
@@ -54,28 +107,35 @@ export class AdminReviewsService {
   }
 
   async getReviewMetrics() {
-    const store = this.prisma.getStore();
-    const reviews = store.adminReviews || [];
+    this.ensureDb();
 
-    const totalReviews = reviews.length || 1;
+    const reviews = await this.prisma.review.findMany({
+      select: { rating: true, status: true },
+    });
+
+    const totalReviews = reviews.length;
+    const denom = totalReviews || 1;
     const avgRating =
-      reviews.reduce((sum: number, r: any) => sum + (r.rating || 5), 0) / totalReviews;
-    const positiveReviews = reviews.filter((r: any) => r.rating >= 4).length;
-    const flaggedReviews = reviews.filter((r: any) => r.status === 'FLAGGED').length;
+      totalReviews > 0
+        ? reviews.reduce((sum, r) => sum + (r.rating || 5), 0) / denom
+        : 0;
+    const positiveReviews = reviews.filter((r) => r.rating >= 4).length;
+    const flaggedReviews = reviews.filter((r) => r.status === 'FLAGGED').length;
 
     const ratingDistribution = [5, 4, 3, 2, 1].map((stars) => {
-      const count = reviews.filter((r: any) => r.rating === stars).length;
+      const count = reviews.filter((r) => r.rating === stars).length;
       return {
         stars,
         count,
-        percentage: Number(((count / totalReviews) * 100).toFixed(0)),
+        percentage: totalReviews > 0 ? Number(((count / denom) * 100).toFixed(0)) : 0,
       };
     });
 
     return {
-      averageRating: Number(avgRating.toFixed(1)) || 4.9,
+      averageRating: Number(avgRating.toFixed(1)),
       totalReviews,
-      positivePercentage: Number(((positiveReviews / totalReviews) * 100).toFixed(0)) || 96,
+      positivePercentage:
+        totalReviews > 0 ? Number(((positiveReviews / denom) * 100).toFixed(0)) : 0,
       ratingDistribution,
       flaggedCount: flaggedReviews,
     };
@@ -87,75 +147,101 @@ export class AdminReviewsService {
     actorId?: string,
     actorName?: string,
   ) {
-    const store = this.prisma.getStore();
+    this.ensureDb();
+
     const cleanId = id.trim().replace(/^#/, '');
+    const existing = await this.prisma.review.findFirst({
+      where: {
+        OR: [{ id }, { id: cleanId }],
+      },
+      include: {
+        user: true,
+        product: { include: { vendor: true } },
+      },
+    });
 
-    const review = (store.adminReviews || []).find(
-      (r: any) => r.id === cleanId || r.id.replace(/^#/, '') === cleanId,
-    );
-
-    if (!review) {
+    if (!existing) {
       throw new NotFoundException(`Review record '${id}' was not found.`);
     }
 
-    const previousStatus = review.status;
-    review.status = dto.status;
-    if (dto.flagReason) review.flagReason = dto.flagReason;
-
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'REVIEW_MODERATED' as any,
-      entityId: review.id,
-      entityName: review.productTitle,
-      entityType: 'Product' as any,
-      summary: `Garment review #${review.id} moderated: ${previousStatus} -> ${dto.status}`,
-      targetDescription: `Review for ${review.productTitle}`,
-      changePayload: {
-        previousStatus,
-        newStatus: dto.status,
-        flagReason: dto.flagReason,
-      },
-      entityLink: `/admin/reviews`,
+    const previousStatus = existing.status;
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.review.update({
+        where: { id: existing.id },
+        data: {
+          status: dto.status,
+          ...(dto.flagReason !== undefined ? { flagReason: dto.flagReason } : {}),
+        },
+        include: {
+          user: true,
+          product: { include: { vendor: true } },
+        },
+      });
+      await this.syncProductRating(tx, existing.productId);
+      await tx.auditLog.create({
+        data: {
+          userId: actorId || 'ADMIN',
+          userEmail: actorName || null,
+          userRole: 'ADMIN',
+          action: 'REVIEW_MODERATED',
+          entityType: 'Review',
+          entityId: existing.id,
+          details: JSON.stringify({
+            previousStatus,
+            newStatus: dto.status,
+            flagReason: dto.flagReason,
+            productTitle: existing.product?.title,
+          }),
+        },
+      });
+      return row;
     });
 
+    const formatted = this.formatReview(updated);
     return {
       success: true,
-      message: `Review #${review.id} status updated to ${dto.status}.`,
-      review,
+      message: `Review #${updated.id} status updated to ${dto.status}.`,
+      review: formatted,
     };
   }
 
   async deleteReview(id: string, actorId?: string, actorName?: string) {
-    const store = this.prisma.getStore();
+    this.ensureDb();
+
     const cleanId = id.trim().replace(/^#/, '');
+    const existing = await this.prisma.review.findFirst({
+      where: {
+        OR: [{ id }, { id: cleanId }],
+      },
+      include: { product: true },
+    });
 
-    const index = (store.adminReviews || []).findIndex(
-      (r: any) => r.id === cleanId || r.id.replace(/^#/, '') === cleanId,
-    );
-
-    if (index === -1) {
+    if (!existing) {
       throw new NotFoundException(`Review record '${id}' was not found.`);
     }
 
-    const review = store.adminReviews[index];
-    store.adminReviews.splice(index, 1);
-
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'REVIEW_DELETED' as any,
-      entityId: review.id,
-      entityName: review.productTitle,
-      entityType: 'Product' as any,
-      summary: `Removed customer review #${review.id} for product '${review.productTitle}'`,
-      targetDescription: `Review for ${review.productTitle}`,
-      entityLink: `/admin/reviews`,
+    await this.prisma.$transaction(async (tx) => {
+      await tx.review.delete({ where: { id: existing.id } });
+      await this.syncProductRating(tx, existing.productId);
+      await tx.auditLog.create({
+        data: {
+          userId: actorId || 'ADMIN',
+          userEmail: actorName || null,
+          userRole: 'ADMIN',
+          action: 'REVIEW_DELETED',
+          entityType: 'Review',
+          entityId: existing.id,
+          details: JSON.stringify({
+            productId: existing.productId,
+            productTitle: existing.product?.title,
+          }),
+        },
+      });
     });
 
     return {
       success: true,
-      message: `Review #${review.id} removed successfully.`,
+      message: `Review #${existing.id} removed successfully.`,
     };
   }
 }

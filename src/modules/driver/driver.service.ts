@@ -8,8 +8,8 @@ import { OrderPickupDto, OrderDeliverDto } from './dto/order-action.dto';
 @Injectable()
 export class DriverService {
   constructor(
-    private profileService: DriverProfileService,
-    private ordersService: DriverOrdersService,
+    private readonly profileService: DriverProfileService,
+    private readonly driverOrdersService: DriverOrdersService,
   ) {}
 
   async getProfile(driverId?: string) {
@@ -29,27 +29,27 @@ export class DriverService {
   }
 
   async getAssignedOrders(driverId?: string, statusFilter?: string) {
-    return this.ordersService.getAssignedOrders(driverId, statusFilter);
+    return this.driverOrdersService.getAssignedOrders(driverId, statusFilter);
   }
 
   async getOrderDetails(driverId: string | undefined, orderId: string) {
-    return this.ordersService.getOrderDetails(driverId, orderId);
+    return this.driverOrdersService.getOrderDetails(driverId, orderId);
   }
 
   async acceptOrder(driverId: string | undefined, orderId: string) {
-    return this.ordersService.acceptOrder(driverId, orderId);
+    return this.driverOrdersService.acceptOrder(driverId, orderId);
   }
 
   async pickupOrder(driverId: string | undefined, orderId: string, dto?: OrderPickupDto) {
-    return this.ordersService.pickupOrder(driverId, orderId, dto);
+    return this.driverOrdersService.pickupOrder(driverId, orderId, dto);
   }
 
   async outForDeliveryOrder(driverId: string | undefined, orderId: string) {
-    return this.ordersService.outForDelivery(driverId, orderId);
+    return this.driverOrdersService.outForDelivery(driverId, orderId);
   }
 
   async deliverOrder(driverId: string | undefined, orderId: string, dto?: OrderDeliverDto) {
-    return this.ordersService.deliverOrder(driverId, orderId, dto);
+    return this.driverOrdersService.deliverOrder(driverId, orderId, dto);
   }
 
   async updateLocation(driverId: string | undefined, dto: UpdateLocationDto) {

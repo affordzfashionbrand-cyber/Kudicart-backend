@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { PrismaModule } from '../../prisma/prisma.module';
-import { PaymentReconciliationService } from '../payments/payment-reconciliation.service';
 import { FirebaseAdminService } from '../auth/firebase-admin.service';
 
 // Controllers
@@ -10,6 +9,7 @@ import { AdminUsersController } from './controllers/admin-users.controller';
 import { AdminVendorsController } from './controllers/admin-vendors.controller';
 import { AdminCategoriesController } from './controllers/admin-categories.controller';
 import { AdminProductsController } from './controllers/admin-products.controller';
+import { AdminCouponsController } from './controllers/admin-coupons.controller';
 import { AdminHubsController } from './controllers/admin-hubs.controller';
 import { AdminOrdersController } from './controllers/admin-orders.controller';
 import { AdminDeliveryPartnersController } from './controllers/admin-delivery-partners.controller';
@@ -41,8 +41,10 @@ import { AdminAuditService } from './services/admin-audit.service';
 import { AdminNotificationsService } from './services/admin-notifications.service';
 import { AdminSettingsService } from './services/admin-settings.service';
 
+import { OrdersDomainModule } from '../orders/orders-domain.module';
+
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, OrdersDomainModule],
   controllers: [
     AdminAuthController,
     AdminDashboardController,
@@ -50,6 +52,7 @@ import { AdminSettingsService } from './services/admin-settings.service';
     AdminVendorsController,
     AdminCategoriesController,
     AdminProductsController,
+    AdminCouponsController,
     AdminHubsController,
     AdminOrdersController,
     AdminDeliveryPartnersController,
@@ -66,7 +69,6 @@ import { AdminSettingsService } from './services/admin-settings.service';
   ],
   providers: [
     FirebaseAdminService,
-    PaymentReconciliationService,
     AdminAuthService,
     AdminDashboardService,
     AdminUsersService,
@@ -84,7 +86,6 @@ import { AdminSettingsService } from './services/admin-settings.service';
     AdminSettingsService,
   ],
   exports: [
-    PaymentReconciliationService,
     AdminAuthService,
     AdminDashboardService,
     AdminUsersService,

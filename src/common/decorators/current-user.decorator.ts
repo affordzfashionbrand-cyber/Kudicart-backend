@@ -2,12 +2,13 @@ import { createParamDecorator, ExecutionContext } from '@nestjs/common';
 
 export interface AuthenticatedUser {
   id: string;
-  firebaseUid: string;
+  firebaseUid?: string;
   phone?: string;
   email?: string;
   name: string;
   avatar?: string;
   role: string;
+  adminRole?: string;
   driverId?: string;
   vendorId?: string;
 }

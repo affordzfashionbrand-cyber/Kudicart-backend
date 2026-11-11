@@ -1,178 +1,237 @@
-jest.mock('firebase-admin/app', () => ({
-  initializeApp: jest.fn(),
-  getApps: jest.fn(() => []),
-  cert: jest.fn(),
-}));
-
-jest.mock('firebase-admin/auth', () => ({
-  getAuth: jest.fn(() => ({
-    verifyIdToken: jest.fn(async () => ({
-      uid: 'fb-user-123',
-      phone_number: '+91 98450 12890',
-      email: 'customer@affordz.in',
-      name: 'Ananya Sharma',
-    })),
-  })),
-}));
-
+import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { FulfillmentType, PaymentMethod } from '@prisma/client';
+import request = require('supertest');
 import { AppModule } from '../../app.module';
-import { GoogleRoutesService } from './google-routes.service';
-import { TrackingRealtimeGateway } from './tracking-realtime.gateway';
-import { OrdersService } from './orders.service';
-import { DriverProfileService } from '../driver/driver-profile.service';
 import { PrismaService } from '../../prisma/prisma.service';
+import { OrdersService } from './orders.service';
+import { AdminOrdersService } from '../admin/services/admin-orders.service';
+import { DriverOrdersService } from '../driver/driver-orders.service';
+import { DriverProfileService } from '../driver/driver-profile.service';
 import { Role } from '../../common/enums/role.enum';
-import { OrderStatus } from '@prisma/client';
+import { createJwtToken } from '../../common/utils/crypto.util';
 
-describe('KudiCart End-to-End Real Delivery Tracking Lifecycle (Phase 2)', () => {
+describe('E2E Delivery & Tracking Workflow (Real HTTP + PostgreSQL)', () => {
   let moduleRef: TestingModule;
-  let googleRoutesService: GoogleRoutesService;
-  let trackingGateway: TrackingRealtimeGateway;
+  let app: INestApplication;
+  let prisma: PrismaService;
   let ordersService: OrdersService;
+  let adminOrdersService: AdminOrdersService;
+  let driverOrdersService: DriverOrdersService;
   let driverProfileService: DriverProfileService;
-  let prismaService: PrismaService;
 
-  beforeEach(async () => {
-    jest.clearAllMocks();
-    process.env.GOOGLE_MAPS_ROUTES_API_KEY = 'test-api-key';
+  const runId = `e2et_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const createdProductIds: string[] = [];
+  const createdUserIds: string[] = [];
+  const createdDriverProfileIds: string[] = [];
+  const createdOrderIds: string[] = [];
+  const createdGroupIds: string[] = [];
 
+  beforeAll(async () => {
     moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
 
-    googleRoutesService = moduleRef.get<GoogleRoutesService>(GoogleRoutesService);
-    trackingGateway = moduleRef.get<TrackingRealtimeGateway>(TrackingRealtimeGateway);
-    ordersService = moduleRef.get<OrdersService>(OrdersService);
-    driverProfileService = moduleRef.get<DriverProfileService>(DriverProfileService);
-    prismaService = moduleRef.get<PrismaService>(PrismaService);
+    app = moduleRef.createNestApplication();
+    await app.init();
+
+    prisma = moduleRef.get(PrismaService);
+    ordersService = moduleRef.get(OrdersService);
+    adminOrdersService = moduleRef.get(AdminOrdersService);
+    driverOrdersService = moduleRef.get(DriverOrdersService);
+    driverProfileService = moduleRef.get(DriverProfileService);
   });
 
   afterEach(async () => {
-    jest.restoreAllMocks();
-    if (moduleRef) {
-      await moduleRef.close();
+    if (createdOrderIds.length > 0) {
+      await prisma.outboxEvent.deleteMany({
+        where: { aggregateId: { in: createdOrderIds } },
+      });
+      await prisma.ledgerEntry.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prisma.paymentTransaction.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prisma.orderStatusHistory.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prisma.auditLog.deleteMany({
+        where: { entityId: { in: [...createdOrderIds, ...createdGroupIds] } },
+      });
+      await prisma.orderItem.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prisma.order.deleteMany({
+        where: { id: { in: createdOrderIds } },
+      });
+      createdOrderIds.length = 0;
+    }
+    if (createdGroupIds.length > 0) {
+      await prisma.checkoutGroup.deleteMany({
+        where: { id: { in: createdGroupIds } },
+      });
+      createdGroupIds.length = 0;
+    }
+    if (createdProductIds.length > 0) {
+      await prisma.product.deleteMany({
+        where: { id: { in: createdProductIds } },
+      });
+      createdProductIds.length = 0;
+    }
+    if (createdDriverProfileIds.length > 0) {
+      await prisma.driverProfile.deleteMany({
+        where: { id: { in: createdDriverProfileIds } },
+      });
+      createdDriverProfileIds.length = 0;
+    }
+    if (createdUserIds.length > 0) {
+      await prisma.user.deleteMany({
+        where: { id: { in: createdUserIds } },
+      });
+      createdUserIds.length = 0;
     }
   });
 
-  it('executes full 17-step staging delivery tracking lifecycle with real coordinates and WebSocket broadcasts', async () => {
-    const store = prismaService.getStore();
+  afterAll(async () => {
+    await app?.close();
+    await moduleRef?.close();
+  });
 
-    // 1. Customer creates an order with persisted address snapshot
-    const stagingOrder: any = {
-      id: 'ord-e2e-test',
-      orderNumber: 'KC-E2E-999',
-      customerId: 'usr-1',
-      driverId: null,
-      addressId: 'addr-1',
-      vendorId: 'vend-1',
-      status: OrderStatus.PLACED,
-      paymentMethod: 'RAZORPAY',
-      paymentStatus: 'COMPLETED',
-      razorpayOrderId: 'rzp_e2e_1',
-      razorpayPaymentId: 'pay_e2e_1',
-      isTryAndBuy: false,
-      couponCode: null,
-      discountAmount: 0,
-      itemTotal: 1299,
-      deliveryFee: 40,
-      taxes: 65,
-      grandTotal: 1404,
-      etaMinutes: 18,
-      deliveryAddress: {
-        id: 'addr-1',
-        line1: 'Apartment 4B, Sunrise Heights',
-        locality: 'Indiranagar',
-        city: 'Bengaluru',
-        pincode: '560038',
-        latitude: 12.9658,
-        longitude: 77.6465,
+  it('runs complete PLACED -> READY_FOR_PICKUP -> Manual ASSIGN -> GPS tracking -> arrivedAt -> DELIVERED lifecycle', async () => {
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const prodId = `${runId}_prd_${suffix}`;
+    const drvUserId = `${runId}_du_${suffix}`;
+    const drvProfId = `${runId}_dp_${suffix}`;
+
+    createdProductIds.push(prodId);
+    createdUserIds.push(drvUserId);
+    createdDriverProfileIds.push(drvProfId);
+
+    await prisma.product.create({
+      data: {
+        id: prodId,
+        title: `Tracking Silk Dress ${suffix}`,
+        brand: 'KudiCart Atelier',
+        description: 'Temp product for delivery tracking e2e',
+        vendorId: 'vend-1',
+        categoryId: 'cat-1',
+        price: 1600,
+        originalPrice: 2000,
+        discount: '20% OFF',
+        sizes: ['M'],
+        image: 'https://example.com/dress.jpg',
+        altText: 'Silk Dress',
+        galleryImages: [],
+        stockQuantity: 5,
+        fulfillmentType: FulfillmentType.DARK_STORE,
       },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      items: [],
-      history: [],
-    };
-    store.orders.unshift(stagingOrder);
-
-    // 2. Vendor accepts and prepares it
-    await ordersService.updateStatus(stagingOrder.id, OrderStatus.ACCEPTED, Role.VENDOR);
-    expect(store.orders[0].status).toBe(OrderStatus.ACCEPTED);
-
-    await ordersService.updateStatus(stagingOrder.id, OrderStatus.PREPARING, Role.VENDOR);
-    expect(store.orders[0].status).toBe(OrderStatus.PREPARING);
-
-    // 3. Vendor marks it ready for pickup
-    await ordersService.updateStatus(stagingOrder.id, OrderStatus.READY_FOR_PICKUP, Role.VENDOR);
-    expect(store.orders[0].status).toBe(OrderStatus.READY_FOR_PICKUP);
-
-    // 4. Backend assigns an eligible Driver (drv-1)
-    await ordersService.assignDriver(stagingOrder.id, 'drv-1', Role.ADMIN);
-    expect(store.orders[0].status).toBe(OrderStatus.ASSIGNED);
-    expect(store.orders[0].driverId).toBe('drv-1');
-
-    // 5. Customer tracks order during ASSIGNED: sees pickup coordinates & driver
-    const trackingAssigned = await ordersService.trackOrder(stagingOrder.id, 'usr-1', Role.CUSTOMER);
-    expect(trackingAssigned.pickupCoordinates).toEqual({ latitude: 12.9718, longitude: 77.6410 });
-    expect(trackingAssigned.deliveryCoordinates).toEqual({ latitude: 12.9658, longitude: 77.6465 });
-
-    // 6. Driver confirms pickup
-    await ordersService.updateStatus(stagingOrder.id, OrderStatus.PICKED_UP, Role.DRIVER);
-    expect(store.orders[0].status).toBe(OrderStatus.PICKED_UP);
-
-    // 7. Driver starts delivery (OUT_FOR_DELIVERY)
-    await ordersService.updateStatus(stagingOrder.id, OrderStatus.OUT_FOR_DELIVERY, Role.DRIVER);
-    expect(store.orders[0].status).toBe(OrderStatus.OUT_FOR_DELIVERY);
-
-    // 8. Driver sends GPS location update to backend
-    const driverBefore = store.drivers.find((d: any) => d.id === 'drv-1');
-    const availableSinceBefore = driverBefore?.availableSince;
-    const nowTime = Date.now();
-
-    const locUpdateRes = await driverProfileService.updateLocation('drv-1', {
-      latitude: 12.9690,
-      longitude: 77.6440,
-      heading: 95,
-      accuracy: 12,
-      speed: 25.5,
-      timestamp: nowTime,
-      orderId: stagingOrder.id,
     });
-    expect(locUpdateRes.success).toBe(true);
 
-    // 9. Verify driver.availableSince is strictly unchanged (FIFO dispatch queue safety)
-    const driverAfter = store.drivers.find((d: any) => d.id === 'drv-1');
-    expect(driverAfter?.availableSince).toEqual(availableSinceBefore);
-    expect(driverAfter?.currentLocation?.latitude).toBe(12.9690);
-    expect(driverAfter?.currentLocation?.longitude).toBe(77.6440);
-
-    // 10. Verify stale buffered update is rejected without overwriting newer state
-    const staleBufferedUpdate = await driverProfileService.updateLocation('drv-1', {
-      latitude: 12.9600,
-      longitude: 77.6300,
-      timestamp: nowTime - 10000,
-      orderId: stagingOrder.id,
+    await prisma.user.create({
+      data: {
+        id: drvUserId,
+        firebaseUid: `fb_${drvUserId}`,
+        name: `E2E Rider ${suffix}`,
+        email: `${drvUserId}@test.kudicart.in`,
+        phone: `+919855${Math.floor(100000 + Math.random() * 899999)}`,
+        role: 'DRIVER',
+        status: 'ACTIVE',
+      },
     });
-    expect(staleBufferedUpdate.ignoredStaleUpdate).toBe(true);
-    expect(driverAfter?.currentLocation?.latitude).toBe(12.9690);
 
-    // 11. Customer tracks order during OUT_FOR_DELIVERY: driver location is live & un-stale
-    const trackingLive = await ordersService.trackOrder(stagingOrder.id, 'usr-1', Role.CUSTOMER);
-    expect(trackingLive.driver?.currentLocation?.latitude).toBe(12.9690);
-    expect(trackingLive.driver?.currentLocation?.longitude).toBe(77.6440);
-    expect(trackingLive.driver?.isStale).toBe(false);
+    await prisma.driverProfile.create({
+      data: {
+        id: drvProfId,
+        userId: drvUserId,
+        fullName: `E2E Rider ${suffix}`,
+        phone: `+919855${Math.floor(100000 + Math.random() * 899999)}`,
+        kycStatus: 'APPROVED',
+        isOnline: true,
+        currentLat: 12.9352,
+        currentLng: 77.6245,
+      },
+    });
 
-    // 12. Complete delivery
-    await ordersService.updateStatus(stagingOrder.id, OrderStatus.DELIVERED, Role.DRIVER);
-    expect(store.orders[0].status).toBe(OrderStatus.DELIVERED);
+    const checkoutRes = await ordersService.checkout('usr-1', {
+      addressId: 'addr-1',
+      paymentMethod: PaymentMethod.COD,
+      isBuyNow: true,
+      items: [{ productId: prodId, size: 'M', quantity: 1 }],
+    } as any);
 
-    // 13. Location update after order completion must be rejected
-    await expect(
-      driverProfileService.updateLocation('drv-1', {
-        latitude: 12.9658,
-        longitude: 77.6465,
-        orderId: stagingOrder.id,
-      }),
-    ).rejects.toThrow();
+    expect(checkoutRes.orders).toHaveLength(1);
+    const order = checkoutRes.orders[0];
+    createdOrderIds.push(order.id);
+    if (order.checkoutGroupId) {
+      createdGroupIds.push(order.checkoutGroupId);
+    }
+
+    // Vendor prepares order
+    await ordersService.vendorAccept(order.id, Role.VENDOR, 'usr-vendor-1');
+    await ordersService.vendorPrepare(order.id, Role.VENDOR, 'usr-vendor-1');
+    await ordersService.vendorReadyForPickup(order.id, Role.VENDOR, 'usr-vendor-1');
+
+    // Manual admin driver assignment (D-006)
+    const assigned = await adminOrdersService.assignDriver(
+      order.id,
+      { driverId: drvProfId },
+      'usr-admin-1',
+      'Amara',
+    );
+    expect(assigned.order.status).toBe('ASSIGNED');
+
+    // Driver picks up & starts delivery
+    await driverOrdersService.pickupOrder(drvProfId, order.id);
+    await driverOrdersService.outForDelivery(drvProfId, order.id);
+
+    await driverProfileService.updateLocation(drvProfId, {
+      latitude: 12.95,
+      longitude: 77.63,
+      heading: 120,
+      orderId: order.id,
+    });
+
+    const outsiderId = `${runId}_outsider_${suffix}`;
+    createdUserIds.push(outsiderId);
+    await prisma.user.create({
+      data: {
+        id: outsiderId,
+        firebaseUid: `fb_${outsiderId}`,
+        name: `Outsider Customer ${suffix}`,
+        email: `${outsiderId}@test.kudicart.in`,
+        phone: `+919854${Math.floor(100000 + Math.random() * 899999)}`,
+        role: 'CUSTOMER',
+        status: 'ACTIVE',
+      },
+    });
+
+    const customerToken = createJwtToken({ uid: 'usr-1', role: Role.CUSTOMER });
+    const outsiderToken = createJwtToken({ uid: outsiderId, role: Role.CUSTOMER });
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/orders/${order.id}/track`)
+      .set('Authorization', `Bearer ${outsiderToken}`)
+      .expect(403);
+
+    const httpTrack = await request(app.getHttpServer())
+      .get(`/api/v1/orders/${order.id}/track`)
+      .set('Authorization', `Bearer ${customerToken}`)
+      .expect(200);
+
+    expect(httpTrack.body.trackingActive).toBe(true);
+    expect(httpTrack.body.driverLocation).toMatchObject({ latitude: 12.95, longitude: 77.63 });
+
+    await driverOrdersService.markArrived(drvProfId, order.id);
+    const arrivedTracking = await ordersService.trackOrder(order.id, 'usr-1', Role.CUSTOMER);
+    expect(arrivedTracking.status).toBe('OUT_FOR_DELIVERY');
+    expect(arrivedTracking.isArrived).toBe(true);
+
+    const delivered = await driverOrdersService.deliverOrder(drvProfId, order.id, {
+      cashCollected: true,
+    });
+    expect(delivered.success).toBe(true);
+    expect(delivered.order.status).toBe('DELIVERED');
+    expect(delivered.order.paymentStatus).toBe('COMPLETED');
   });
 });

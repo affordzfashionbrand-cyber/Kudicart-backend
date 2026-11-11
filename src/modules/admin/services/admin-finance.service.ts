@@ -1,46 +1,99 @@
 import {
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
 import { UpdateSettlementStatusDto } from '../dto/admin-domain.dto';
+import { DEFAULT_COMMISSION_RATE } from '../../orders/order-pricing.util';
 
 @Injectable()
 export class AdminFinanceService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
 
-  // ================= PAYMENTS =================
+  private ensureDbConnected() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
+    }
+  }
 
   async listPayments(query: AdminQueryDto) {
-    const store = this.prisma.getStore();
-    let payments = store.adminPayments || [];
+    this.ensureDbConnected();
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 20;
 
-    if (query.search && query.search.trim()) {
-      const q = query.search.toLowerCase().trim();
-      payments = payments.filter(
-        (p: any) =>
-          p.id.toLowerCase().includes(q) ||
-          p.orderId.toLowerCase().includes(q) ||
-          p.customerName.toLowerCase().includes(q) ||
-          p.gatewayPaymentId.toLowerCase().includes(q) ||
-          p.bankRrn.toLowerCase().includes(q),
+    const where: any = {};
+    if (query.status && query.status !== 'ALL') {
+      where.status = query.status;
+    }
+
+    const txns = await this.prisma.paymentTransaction.findMany({
+      where,
+      include: {
+        order: {
+          include: {
+            customer: { select: { id: true, name: true, email: true } },
+          },
+        },
+        checkoutGroup: {
+          include: {
+            customer: { select: { id: true, name: true, email: true } },
+            orders: { select: { id: true, orderNumber: true, paymentMethod: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    let mapped = txns.map((t) => {
+      const customerName =
+        t.order?.customer?.name || t.checkoutGroup?.customer?.name || 'Customer';
+      const orderRef =
+        t.order?.orderNumber ||
+        t.checkoutGroup?.groupNumber ||
+        t.orderId ||
+        t.checkoutGroupId ||
+        t.id;
+      return {
+        id: t.id,
+        orderId: t.orderId,
+        checkoutGroupId: t.checkoutGroupId,
+        orderNumber: orderRef,
+        paymentId: t.paymentId,
+        refundId: t.refundId,
+        transactionType: t.transactionType,
+        razorpayOrderId: t.razorpayOrderId,
+        customerName,
+        amount: Math.round((Number(t.amount) || 0) * 100) / 100,
+        currency: t.currency,
+        status: t.status,
+        method: t.method || t.order?.paymentMethod || t.checkoutGroup?.paymentMethod || 'Razorpay',
+        failureReason: t.failureReason,
+        createdAt: t.createdAt.toISOString(),
+        updatedAt: t.updatedAt.toISOString(),
+      };
+    });
+
+    if (query.method && query.method !== 'ALL') {
+      mapped = mapped.filter((p) =>
+        p.method.toLowerCase().includes(query.method!.toLowerCase()),
       );
     }
 
-    if (query.method && query.method !== 'ALL') {
-      payments = payments.filter((p: any) => p.method === query.method);
+    if (query.search && query.search.trim()) {
+      const q = query.search.toLowerCase().trim();
+      mapped = mapped.filter(
+        (p) =>
+          p.paymentId.toLowerCase().includes(q) ||
+          (p.razorpayOrderId || '').toLowerCase().includes(q) ||
+          p.customerName.toLowerCase().includes(q) ||
+          String(p.orderNumber).toLowerCase().includes(q),
+      );
     }
 
-    if (query.status && query.status !== 'ALL') {
-      payments = payments.filter((p: any) => p.status === query.status);
-    }
-
-    const total = payments.length;
-    const page = Number(query.page) || 1;
-    const limit = Number(query.limit) || 8;
-    const startIndex = (page - 1) * limit;
-    const paginated = payments.slice(startIndex, startIndex + limit);
+    const total = mapped.length;
+    const paginated = mapped.slice((page - 1) * limit, page * limit);
 
     return {
       data: paginated,
@@ -52,96 +105,185 @@ export class AdminFinanceService {
   }
 
   async getPaymentMetrics() {
-    const store = this.prisma.getStore();
-    const payments = store.adminPayments || [];
+    this.ensureDbConnected();
+    const payments = await this.prisma.paymentTransaction.findMany();
 
-    const settled = payments.filter((p: any) => p.status === 'COMPLETED');
-    const failed = payments.filter((p: any) => p.status === 'FAILED');
-    const rzp = settled.filter((p: any) => p.method.includes('Razorpay'));
-    const cod = settled.filter((p: any) => p.method.includes('Cash'));
+    const settled = payments.filter(
+      (p) => p.status === 'COMPLETED' && p.transactionType === 'CAPTURE',
+    );
+    const failed = payments.filter((p) => p.status === 'FAILED');
+    const refunds = payments.filter((p) => p.transactionType === 'REFUND');
+    const rzp = settled.filter((p) => (p.method || 'Razorpay').toLowerCase() !== 'cod');
+    const cod = settled.filter((p) => (p.method || '').toLowerCase() === 'cod');
 
-    const settledToday = settled.reduce((sum: number, p: any) => sum + (p.amount || 0), 0);
-    const failedAmount = failed.reduce((sum: number, p: any) => sum + (p.amount || 0), 0);
+    const settledAmount = settled.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    const failedAmount = failed.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+    const refundedAmount = refunds.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
 
     return {
-      settledToday: settledToday || 454460,
-      settledOrdersCount: settled.length || 139,
-      captureRate: payments.length > 0 ? Number(((settled.length / payments.length) * 100).toFixed(1)) : 94.2,
-      razorpayOnline: rzp.reduce((sum: number, p: any) => sum + (p.amount || 0), 0) || 412350,
-      razorpayOrdersCount: rzp.length || 124,
-      cashOnDelivery: cod.reduce((sum: number, p: any) => sum + (p.amount || 0), 0) || 42110,
-      codOrdersCount: cod.length || 15,
-      failedAmount: failedAmount || 8210,
-      failureRate: payments.length > 0 ? Number(((failed.length / payments.length) * 100).toFixed(1)) : 1.7,
-      failedCount: failed.length || 3,
+      settledToday: Math.round(settledAmount),
+      settledOrdersCount: settled.length,
+      captureRate:
+        payments.length > 0
+          ? Number(((settled.length / payments.length) * 100).toFixed(1))
+          : 0,
+      razorpayOnline: Math.round(
+        rzp.reduce((sum, p) => sum + (Number(p.amount) || 0), 0),
+      ),
+      razorpayOrdersCount: rzp.length,
+      cashOnDelivery: Math.round(
+        cod.reduce((sum, p) => sum + (Number(p.amount) || 0), 0),
+      ),
+      codOrdersCount: cod.length,
+      failedAmount: Math.round(failedAmount),
+      failureRate:
+        payments.length > 0
+          ? Number(((failed.length / payments.length) * 100).toFixed(1))
+          : 0,
+      failedCount: failed.length,
+      refundedAmount: Math.round(refundedAmount),
+      refundCount: refunds.length,
     };
   }
 
   async getPaymentById(id: string) {
-    const store = this.prisma.getStore();
-    const cleanId = id.trim().replace(/^#/, '');
-
-    const payment = (store.adminPayments || []).find(
-      (p: any) => p.id === cleanId || p.id.replace(/^#/, '') === cleanId,
-    );
-
+    this.ensureDbConnected();
+    const payment = await this.prisma.paymentTransaction.findFirst({
+      where: { OR: [{ id }, { paymentId: id }, { razorpayOrderId: id }] },
+      include: {
+        order: true,
+        checkoutGroup: true,
+      },
+    });
     if (!payment) {
-      throw new NotFoundException(`Payment record '${id}' was not found.`);
+      throw new NotFoundException(`Payment transaction '${id}' not found.`);
     }
-
     return payment;
   }
 
-  // ================= LEDGER =================
-
   async listLedger(query: AdminQueryDto) {
-    const store = this.prisma.getStore();
-    let entries = store.vendorLedger || [];
+    this.ensureDbConnected();
+    const [entries, payouts] = await Promise.all([
+      this.prisma.ledgerEntry.findMany({
+        include: {
+          vendor: true,
+          order: { select: { id: true, orderNumber: true, status: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.vendorPayout.findMany({
+        include: { vendor: true },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    const byVendor = new Map<
+      string,
+      {
+        id: string;
+        vendorId: string;
+        vendorName: string;
+        commissionRate: number;
+        ordersCount: number;
+        orderIds: Set<string>;
+        grossGmv: number;
+        commissionRetained: number;
+        netPayable: number;
+        status: string;
+        latestEntryAt: string;
+      }
+    >();
+
+    for (const e of entries) {
+      const vId = e.vendorId || 'platform';
+      let row = byVendor.get(vId);
+      if (!row) {
+        row = {
+          id: vId,
+          vendorId: vId,
+          vendorName: e.vendor?.storeName || 'Affordz Official Store',
+          commissionRate: e.vendor?.commissionRate ?? DEFAULT_COMMISSION_RATE,
+          ordersCount: 0,
+          orderIds: new Set<string>(),
+          grossGmv: 0,
+          commissionRetained: 0,
+          netPayable: 0,
+          status: 'READY_FOR_TRANSFER',
+          latestEntryAt: e.createdAt.toISOString(),
+        };
+        byVendor.set(vId, row);
+      }
+      if (e.orderId) row.orderIds.add(e.orderId);
+      if (e.entryType === 'ORDER_REVENUE') row.grossGmv += Number(e.amount) || 0;
+      if (e.entryType === 'COMMISSION_DEDUCTED') {
+        row.commissionRetained += Math.abs(Number(e.amount) || 0);
+      }
+      if (e.entryType === 'VENDOR_PAYOUT') row.netPayable += Number(e.amount) || 0;
+    }
+
+    for (const row of byVendor.values()) {
+      row.ordersCount = row.orderIds.size;
+      const latestPayout = payouts.find((p) => p.vendorId === row.vendorId);
+      if (latestPayout) {
+        row.status = latestPayout.status;
+      }
+    }
+
+    let result = Array.from(byVendor.values()).map(({ orderIds, ...rest }) => ({
+      ...rest,
+      grossGmv: Math.round(rest.grossGmv * 100) / 100,
+      commissionRetained: Math.round(rest.commissionRetained * 100) / 100,
+      netPayable: Math.round(rest.netPayable * 100) / 100,
+    }));
 
     if (query.search && query.search.trim()) {
       const q = query.search.toLowerCase().trim();
-      entries = entries.filter(
-        (e: any) =>
-          e.vendorName.toLowerCase().includes(q) ||
-          e.id.toLowerCase().includes(q) ||
-          e.hub.toLowerCase().includes(q),
+      result = result.filter(
+        (r) =>
+          r.vendorName.toLowerCase().includes(q) ||
+          r.vendorId.toLowerCase().includes(q),
       );
     }
 
-    if (query.category && query.category !== 'ALL') {
-      entries = entries.filter((e: any) => e.category === query.category);
-    }
-
     if (query.status && query.status !== 'ALL') {
-      entries = entries.filter((e: any) => e.status === query.status);
+      result = result.filter((r) => r.status === query.status);
     }
 
     return {
-      data: entries,
-      total: entries.length,
+      data: result,
+      rawEntries: entries.slice(0, 100),
+      total: result.length,
     };
   }
 
   async getLedgerMetrics() {
-    const store = this.prisma.getStore();
-    const entries = store.vendorLedger || [];
+    this.ensureDbConnected();
+    const entries = await this.prisma.ledgerEntry.findMany();
 
-    const grossMarketplaceVolume = entries.reduce((sum: number, e: any) => sum + (e.grossGmv || 0), 0);
-    const platformCommissionEarned = entries.reduce((sum: number, e: any) => sum + (e.commissionRetained || 0), 0);
-    const netVendorPayoutsDue = entries.reduce((sum: number, e: any) => sum + (e.netPayable || 0), 0);
+    const grossMarketplaceVolume = entries
+      .filter((e) => e.entryType === 'ORDER_REVENUE')
+      .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+    const platformCommissionEarned = entries
+      .filter((e) => e.entryType === 'COMMISSION_DEDUCTED')
+      .reduce((sum, e) => sum + Math.abs(Number(e.amount) || 0), 0);
+    const netVendorPayoutsDue = entries
+      .filter((e) => e.entryType === 'VENDOR_PAYOUT')
+      .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+
     const avgTakeRate =
       grossMarketplaceVolume > 0
-        ? Number(((platformCommissionEarned / grossMarketplaceVolume) * 100).toFixed(1))
-        : 12.5;
+        ? Number(((platformCommissionEarned / grossMarketplaceVolume) * 100).toFixed(2))
+        : DEFAULT_COMMISSION_RATE;
+
+    const activeVendorsCount = new Set(entries.map((e) => e.vendorId).filter(Boolean)).size;
 
     return {
-      grossMarketplaceVolume: grossMarketplaceVolume || 482450.0,
-      platformCommissionEarned: platformCommissionEarned || 60306.25,
+      grossMarketplaceVolume: Math.round(grossMarketplaceVolume * 100) / 100,
+      platformCommissionEarned: Math.round(platformCommissionEarned * 100) / 100,
       averageTakeRate: avgTakeRate,
-      netVendorPayoutsDue: netVendorPayoutsDue || 422143.75,
-      activeVendorsCount: entries.length || 42,
-      fleetLogisticsCosts: 14280.0,
-      currentCycle: '16–31 Oct 2024',
+      netVendorPayoutsDue: Math.round(netVendorPayoutsDue * 100) / 100,
+      activeVendorsCount,
+      entriesCount: entries.length,
     };
   }
 
@@ -151,42 +293,87 @@ export class AdminFinanceService {
     actorId?: string,
     actorName?: string,
   ) {
-    const store = this.prisma.getStore();
-    const cleanId = id.trim().replace(/^#/, '');
+    this.ensureDbConnected();
 
-    const entry = (store.vendorLedger || []).find(
-      (e: any) => e.id === cleanId || e.id.replace(/^#/, '') === cleanId,
-    );
+    const payout = await this.prisma.vendorPayout.findFirst({
+      where: { OR: [{ id }, { vendorId: id }] },
+      include: { vendor: true },
+    });
 
-    if (!entry) {
-      throw new NotFoundException(`Ledger settlement entry '${id}' was not found.`);
+    if (payout) {
+      const updated = await this.prisma.vendorPayout.update({
+        where: { id: payout.id },
+        data: {
+          status: dto.status,
+          notes: dto.notes ?? payout.notes,
+        },
+        include: { vendor: true },
+      });
+
+      await this.prisma.auditLog.create({
+        data: {
+          userId: actorId || null,
+          userRole: 'ADMIN',
+          action: 'SETTLEMENT_STATUS_UPDATED',
+          entityType: 'VendorPayout',
+          entityId: updated.id,
+          details: JSON.stringify({
+            vendorId: updated.vendorId,
+            previousStatus: payout.status,
+            newStatus: dto.status,
+            notes: dto.notes || null,
+            actorName: actorName || null,
+          }),
+        },
+      });
+
+      return {
+        success: true,
+        message: `Ledger settlement status updated to ${dto.status}.`,
+        entry: updated,
+      };
     }
 
-    const previousStatus = entry.status;
-    entry.status = dto.status;
+    const vendor = await this.prisma.vendor.findUnique({ where: { id } });
+    if (!vendor) {
+      throw new NotFoundException(`Vendor settlement '${id}' not found.`);
+    }
 
-    this.prisma.recordAuditEvent({
-      actorId,
-      actorName,
-      actionType: 'PAYOUT_HOLD_UPDATED' as any,
-      entityId: entry.id,
-      entityName: entry.vendorName,
-      entityType: 'Payment' as any,
-      summary: `Settlement payout status for ${entry.vendorName} updated: ${previousStatus} -> ${dto.status}`,
-      targetDescription: `Ledger Payout Entry #${entry.id}`,
-      changePayload: {
-        vendorId: entry.id,
-        previousStatus,
-        newStatus: dto.status,
+    const payoutAmountAgg = await this.prisma.ledgerEntry.aggregate({
+      where: { vendorId: vendor.id, entryType: 'VENDOR_PAYOUT' },
+      _sum: { amount: true },
+    });
+
+    const createdPayout = await this.prisma.vendorPayout.create({
+      data: {
+        vendorId: vendor.id,
+        amount: Math.max(0, payoutAmountAgg._sum.amount || 0),
+        status: dto.status,
+        notes: dto.notes || 'Created settlement record',
       },
-      entityLink: `/admin/ledger`,
+      include: { vendor: true },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId: actorId || null,
+        userRole: 'ADMIN',
+        action: 'SETTLEMENT_STATUS_UPDATED',
+        entityType: 'VendorPayout',
+        entityId: createdPayout.id,
+        details: JSON.stringify({
+          vendorId: vendor.id,
+          newStatus: dto.status,
+          amount: createdPayout.amount,
+          actorName: actorName || null,
+        }),
+      },
     });
 
     return {
       success: true,
       message: `Ledger settlement status updated to ${dto.status}.`,
-      entry,
+      entry: createdPayout,
     };
   }
 }
-

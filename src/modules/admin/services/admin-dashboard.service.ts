@@ -1,114 +1,129 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
+import { CANONICAL_ORDER_STATUSES } from '../../../common/contracts/order-contracts';
 
 @Injectable()
 export class AdminDashboardService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async getSummary() {
-    const store = this.prisma.getStore();
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
+    }
 
-    // 1. Action Required counts
-    const unassignedCount = store.orders.filter(
-      (o: any) => o.status === 'READY_FOR_PICKUP' || (o.status === 'ASSIGNED' && !o.driverId),
-    ).length;
+    const [
+      orders,
+      vendorCount,
+      driverProfiles,
+      pendingDrivers,
+      paymentTransactions,
+      supportTicketsOpen,
+    ] = await Promise.all([
+      this.prisma.order.findMany({
+        include: {
+          customer: { select: { id: true, name: true } },
+          vendor: { select: { id: true, storeName: true } },
+          driverProfile: { select: { id: true, fullName: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.vendor.count(),
+      this.prisma.driverProfile.findMany({
+        include: { user: { select: { id: true, email: true, status: true } } },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.driverProfile.findMany({
+        where: { kycStatus: 'PENDING' },
+        take: 5,
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.paymentTransaction.findMany({
+        where: { status: 'COMPLETED', transactionType: 'CAPTURE' },
+      }),
+      this.prisma.supportTicket.count({
+        where: { status: { in: ['OPEN', 'IN_PROGRESS'] } },
+      }),
+    ]);
 
-    const pendingBoutiquesCount = (store.adminVendors || []).filter(
-      (v: any) =>
-        v.status === 'PENDING_REVIEW' ||
-        v.status === 'DOCS_SUBMITTED' ||
-        v.status === 'KYC_PENDING',
-    ).length;
+    const statusCountMap: Record<string, number> = {};
+    for (const s of CANONICAL_ORDER_STATUSES) {
+      statusCountMap[s] = 0;
+    }
+    for (const ord of orders) {
+      statusCountMap[ord.status] = (statusCountMap[ord.status] || 0) + 1;
+    }
 
-    const driverKycCount = (store.adminDrivers || []).filter(
-      (d: any) => d.kycStatus === 'PENDING',
-    ).length;
+    const unassignedCount = statusCountMap.READY_FOR_PICKUP || 0;
+    const totalOrders = orders.length;
+    const nonCancelledOrders = orders.filter(
+      (o) => o.status !== 'CANCELLED' && o.status !== 'FAILED',
+    );
+    const gov = Math.round(
+      nonCancelledOrders.reduce((sum, o) => sum + (Number(o.grandTotal) || 0), 0),
+    );
 
-    // 2. Marketplace Metrics
-    const totalOrders = store.orders.length;
-    const gov = store.orders.reduce((acc: number, o: any) => acc + (o.grandTotal || 0), 0);
-    const allVendors = store.adminVendors || [];
-    const activeVendors = allVendors.filter((v: any) => v.status === 'ACTIVE').length;
-    const totalVendors = allVendors.length;
-    const deliveryFleetCount = (store.adminDrivers || []).length;
-
-    // 3. Pipeline Counts
     const pipelineCounts = {
-      placed: store.orders.filter((o: any) => o.status === 'PLACED').length,
-      accepted: store.orders.filter((o: any) => o.status === 'ACCEPTED').length,
-      preparing: store.orders.filter((o: any) => o.status === 'PREPARING').length,
-      readyForPickup: store.orders.filter((o: any) => o.status === 'READY_FOR_PICKUP').length,
-      assigned: store.orders.filter((o: any) => o.status === 'ASSIGNED').length,
-      pickedUp: store.orders.filter((o: any) => o.status === 'PICKED_UP').length,
-      inTransit: store.orders.filter((o: any) => o.status === 'OUT_FOR_DELIVERY').length,
-      delivered: store.orders.filter((o: any) => o.status === 'DELIVERED').length,
+      placed: statusCountMap.PLACED,
+      accepted: statusCountMap.ACCEPTED,
+      preparing: statusCountMap.PREPARING,
+      readyForPickup: statusCountMap.READY_FOR_PICKUP,
+      assigned: statusCountMap.ASSIGNED,
+      pickedUp: statusCountMap.PICKED_UP,
+      inTransit: statusCountMap.OUT_FOR_DELIVERY,
+      outForDelivery: statusCountMap.OUT_FOR_DELIVERY,
+      delivered: statusCountMap.DELIVERED,
+      returning: statusCountMap.RETURNING,
+      returned: statusCountMap.RETURNED,
+      cancelled: statusCountMap.CANCELLED,
+      failed: statusCountMap.FAILED,
     };
 
-    // 4. Queues
-    const pendingBoutiques = allVendors
-      .filter(
-        (v: any) =>
-          v.status === 'PENDING_REVIEW' ||
-          v.status === 'DOCS_SUBMITTED' ||
-          v.status === 'KYC_PENDING',
-      )
-      .slice(0, 5);
-
-    const driverKycQueue = (store.adminDrivers || [])
-      .filter((d: any) => d.kycStatus === 'PENDING')
-      .slice(0, 5);
-
-    // 5. Recent Orders
-    const recentOrders = store.orders.slice(0, 8).map((o: any) => {
-      const vendor = allVendors.find((v: any) => v.id === o.vendorId) || {
-        storeName: 'Avanya Ethnic Boutique',
-      };
-      const customer = (store.users || []).find((u: any) => u.id === o.customerId) || {
-        name: 'Ananya Sharma',
-      };
-
-      return {
-        id: o.id,
-        orderNumber: o.orderNumber,
-        customerName: o.customerName || customer.name,
-        vendorName: o.vendorName || vendor.storeName,
-        fulfillmentType: o.isTryAndBuy ? 'Try & Buy' : 'Express (60m)',
-        grandTotal: o.grandTotal,
-        status: o.status,
-        createdAt: o.createdAt,
-      };
-    });
+    const recentOrders = orders.slice(0, 8).map((o) => ({
+      id: o.id,
+      orderNumber: o.orderNumber,
+      version: o.version,
+      customerName: o.customer?.name || (o.deliveryAddress as any)?.recipientName || 'Customer',
+      vendorName: o.vendor?.storeName || 'Affordz Official Store',
+      driverName: o.driverProfile?.fullName || null,
+      fulfillmentType: o.isTryAndBuy ? 'Try & Buy' : o.fulfillmentType,
+      grandTotal: Math.round(o.grandTotal || 0),
+      status: o.status,
+      paymentMethod: o.paymentMethod,
+      paymentStatus: o.paymentStatus,
+      createdAt: o.createdAt.toISOString(),
+    }));
 
     return {
       actionRequired: {
         unassignedCount,
-        pendingBoutiquesCount,
-        driverKycCount,
+        pendingBoutiquesCount: 0,
+        driverKycCount: pendingDrivers.length,
+        openTicketsCount: supportTicketsOpen,
       },
       operationalQueues: {
-        unassignedOrders: unassignedCount,
-        pendingBoutiques: pendingBoutiquesCount,
-        driverKyc: driverKycCount,
+        readyForPickup: statusCountMap.READY_FOR_PICKUP,
+        pendingDrivers: pendingDrivers.length,
+        onlineDrivers: driverProfiles.filter((d) => d.isOnline).length,
       },
       metrics: {
         totalOrders,
         gov,
         grossVolume: gov,
-        activeVendors,
-        totalVendors,
-        deliveryFleetCount,
-        activeDeliveryFleet: deliveryFleetCount,
+        activeVendors: vendorCount,
+        totalVendors: vendorCount,
+        deliveryFleetCount: driverProfiles.length,
+        onlineDrivers: driverProfiles.filter((d) => d.isOnline).length,
       },
       pipelineCounts,
       lifecyclePipeline: pipelineCounts,
       queues: {
-        pendingBoutiques,
-        driverKycQueue,
+        pendingBoutiques: [],
+        driverKycQueue: pendingDrivers,
       },
       recentOrders,
       financialHealth: {
         grossVolume: gov,
-        recordedTransactions: totalOrders,
+        recordedTransactions: paymentTransactions.length,
       },
     };
   }

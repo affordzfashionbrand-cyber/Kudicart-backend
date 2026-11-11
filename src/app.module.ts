@@ -13,8 +13,7 @@ import { AddressController } from './modules/address/address.controller';
 import { AddressService } from './modules/address/address.service';
 import { OrdersController } from './modules/orders/orders.controller';
 import { OrdersService } from './modules/orders/orders.service';
-import { StateMachineService } from './modules/orders/state-machine.service';
-import { DispatchService } from './modules/orders/dispatch.service';
+import { OrdersDomainModule } from './modules/orders/orders-domain.module';
 import { PaymentsController } from './modules/payments/payments.controller';
 import { PaymentsService } from './modules/payments/payments.service';
 import { ReviewsController } from './modules/reviews/reviews.controller';
@@ -33,7 +32,17 @@ import { VendorService } from './modules/vendor/vendor.service';
 import { TrackingModule } from './modules/orders/tracking.module';
 
 @Module({
-  imports: [PrismaModule, DriverModule, AdminModule, HealthModule, QueueModule, MediaModule, NotificationsModule, TrackingModule],
+  imports: [
+    PrismaModule,
+    OrdersDomainModule,
+    DriverModule,
+    AdminModule,
+    HealthModule,
+    QueueModule,
+    MediaModule,
+    NotificationsModule,
+    TrackingModule,
+  ],
   controllers: [
     AuthController,
     UsersController,
@@ -55,13 +64,19 @@ import { TrackingModule } from './modules/orders/tracking.module';
     CartService,
     AddressService,
     OrdersService,
-    StateMachineService,
     PaymentsService,
     ReviewsService,
     SupportService,
     VendorService,
-    DispatchService,
   ],
-  exports: [PrismaModule, StateMachineService, DispatchService, DriverModule, AdminModule, QueueModule, MediaModule, TrackingModule],
+  exports: [
+    PrismaModule,
+    OrdersDomainModule,
+    DriverModule,
+    AdminModule,
+    QueueModule,
+    MediaModule,
+    TrackingModule,
+  ],
 })
 export class AppModule {}

@@ -1,121 +1,217 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import {
-  KUDICART_NOTIFICATIONS_QUEUE,
-  KUDICART_PAYMENTS_QUEUE,
+  AFFORDZ_NOTIFICATIONS_QUEUE,
+  AFFORDZ_PAYMENTS_QUEUE,
   QueueJobType,
+  getRedisConnectionOptions,
 } from './queue.constants';
+
+export type InProcessJobHandler = (job: {
+  id?: string;
+  name: string;
+  data: any;
+}) => Promise<any>;
 
 @Injectable()
 export class QueueService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(QueueService.name);
-  private notificationsQueue: Queue | null = null;
-  private paymentsQueue: Queue | null = null;
+  private notificationsQueue?: Queue;
+  private paymentsQueue?: Queue;
   private isRedisConnected = false;
+  private isDestroyed = false;
 
-  onModuleInit() {
-    const redisHost = process.env.REDIS_HOST;
-    const redisPort = Number(process.env.REDIS_PORT) || 6379;
-    const redisPassword = process.env.REDIS_PASSWORD || undefined;
+  private notificationHandler?: InProcessJobHandler;
+  private paymentHandler?: InProcessJobHandler;
+  private readonly pendingTimers = new Set<NodeJS.Timeout>();
 
-    // Only attempt live BullMQ queue connection if REDIS_HOST or REDIS_ENABLED is explicitly configured
-    if (redisHost || process.env.REDIS_ENABLED === 'true') {
-      try {
-        const connection = {
-          host: redisHost || '127.0.0.1',
-          port: redisPort,
-          password: redisPassword,
-          maxRetriesPerRequest: null,
-          enableOfflineQueue: false,
-          connectTimeout: 2000,
-        };
+  registerNotificationHandler(handler: InProcessJobHandler) {
+    this.notificationHandler = handler;
+  }
 
-        this.notificationsQueue = new Queue(KUDICART_NOTIFICATIONS_QUEUE, { connection });
-        this.paymentsQueue = new Queue(KUDICART_PAYMENTS_QUEUE, { connection });
-        this.isRedisConnected = true;
-        this.logger.log(`BullMQ connected to Redis at ${connection.host}:${connection.port} (Pillar 8 / D-027 active)`);
-      } catch (err: any) {
-        this.logger.warn(`Redis connection standby: ${err?.message}. Using resilient in-process async queue.`);
-        this.isRedisConnected = false;
-      }
-    } else {
-      this.logger.log('Redis queue in standby mode (REDIS_HOST not set). In-process async fallback active.');
+  registerPaymentHandler(handler: InProcessJobHandler) {
+    this.paymentHandler = handler;
+  }
+
+  async onModuleInit() {
+    this.isDestroyed = false;
+    const connection = getRedisConnectionOptions();
+    if (!connection) {
+      this.logger.warn(
+        'REDIS_HOST/REDIS_URL not configured. Using in-process async queue fallback.',
+      );
+      return;
+    }
+
+    try {
+      this.notificationsQueue = new Queue(AFFORDZ_NOTIFICATIONS_QUEUE, {
+        connection,
+      });
+      this.paymentsQueue = new Queue(AFFORDZ_PAYMENTS_QUEUE, {
+        connection,
+      });
+      this.isRedisConnected = true;
+      this.logger.log(
+        `BullMQ queues initialized (${AFFORDZ_NOTIFICATIONS_QUEUE}, ${AFFORDZ_PAYMENTS_QUEUE})`,
+      );
+    } catch (err: any) {
+      this.isRedisConnected = false;
+      this.logger.warn(
+        `Failed to initialize BullMQ queues (${err?.message}); falling back to in-process dispatch.`,
+      );
     }
   }
 
   async onModuleDestroy() {
-    if (this.notificationsQueue) {
-      await this.notificationsQueue.close().catch(() => {});
+    this.isDestroyed = true;
+    for (const timer of this.pendingTimers) {
+      clearTimeout(timer);
     }
-    if (this.paymentsQueue) {
-      await this.paymentsQueue.close().catch(() => {});
-    }
-  }
+    this.pendingTimers.clear();
 
-  /**
-   * Enqueues an asynchronous notification job with retries
-   */
-  async enqueueNotification(jobType: QueueJobType, payload: any) {
-    if (this.isRedisConnected && this.notificationsQueue) {
-      try {
-        const job = await this.notificationsQueue.add(jobType, payload, {
-          attempts: 3,
-          backoff: {
-            type: 'exponential',
-            delay: 2000,
-          },
-          removeOnComplete: 100,
-          removeOnFail: 500,
-        });
-        return { queued: true, jobId: job.id, type: jobType };
-      } catch (err: any) {
-        this.logger.warn(`Failed to push to BullMQ: ${err?.message}. Executing async fallback.`);
-      }
-    }
-
-    // In-process fallback execution
-    setImmediate(() => {
-      this.logger.log(`[AsyncJob:Notification] Handled ${jobType} for user ${payload.userId || 'broadcast'}`);
-    });
-
-    return { queued: true, jobId: `fallback-${Date.now()}`, type: jobType };
-  }
-
-  /**
-   * Enqueues an asynchronous payment reconciliation check
-   */
-  async enqueuePaymentReconciliation(orderId: string, delayMs = 120000) {
-    if (this.isRedisConnected && this.paymentsQueue) {
-      try {
-        const job = await this.paymentsQueue.add(
-          QueueJobType.PAYMENT_RECONCILIATION_CHECK,
-          { orderId },
-          {
-            delay: delayMs, // Check after 2 minutes
-            attempts: 5,
-            backoff: {
-              type: 'exponential',
-              delay: 5000,
-            },
-            removeOnComplete: 100,
-            removeOnFail: 500,
-          },
-        );
-        return { queued: true, jobId: job.id };
-      } catch (err: any) {
-        this.logger.warn(`Failed to push reconciliation to BullMQ: ${err?.message}. Executing async fallback.`);
-      }
-    }
-
-    return { queued: true, jobId: `fallback-${Date.now()}` };
+    await Promise.allSettled([
+      this.notificationsQueue?.close(),
+      this.paymentsQueue?.close(),
+    ]);
+    this.notificationsQueue = undefined;
+    this.paymentsQueue = undefined;
+    this.isRedisConnected = false;
   }
 
   getQueueStatus() {
+    const activeQueues = [AFFORDZ_NOTIFICATIONS_QUEUE, AFFORDZ_PAYMENTS_QUEUE];
     return {
-      provider: 'BullMQ',
-      redisConfigured: Boolean(process.env.REDIS_HOST),
+      redisConfigured: Boolean(getRedisConnectionOptions()),
       isRedisConnected: this.isRedisConnected,
-      activeQueues: [KUDICART_NOTIFICATIONS_QUEUE, KUDICART_PAYMENTS_QUEUE],
+      activeQueues,
     };
+  }
+
+  async enqueueNotification(jobType: QueueJobType | string, payload: any) {
+    if (this.notificationsQueue && this.isRedisConnected) {
+      const job = await this.notificationsQueue.add(String(jobType), payload, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 2000 },
+        removeOnComplete: true,
+        removeOnFail: 100,
+      });
+      return {
+        id: job.id,
+        type: String(jobType),
+        status: 'queued-bullmq',
+        queue: AFFORDZ_NOTIFICATIONS_QUEUE,
+      };
+    }
+
+    const fallbackId = `local-notif-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    if (this.notificationHandler) {
+      try {
+        await this.notificationHandler({
+          id: fallbackId,
+          name: String(jobType),
+          data: payload,
+        });
+      } catch (err: any) {
+        this.logger.warn(
+          `In-process notification handler error for ${jobType}: ${err?.message}`,
+        );
+      }
+    }
+
+    return {
+      id: fallbackId,
+      type: String(jobType),
+      status: 'queued-in-process',
+      queue: AFFORDZ_NOTIFICATIONS_QUEUE,
+    };
+  }
+
+  async enqueuePaymentJob(
+    jobType: QueueJobType | string,
+    payload: any,
+    options?: { delayMs?: number; jobId?: string },
+  ) {
+    const delay = Math.max(0, Number(options?.delayMs || 0));
+
+    if (this.paymentsQueue && this.isRedisConnected) {
+      const job = await this.paymentsQueue.add(String(jobType), payload, {
+        delay: delay || undefined,
+        jobId: options?.jobId || undefined,
+        attempts: 5,
+        backoff: { type: 'exponential', delay: 3000 },
+        removeOnComplete: true,
+        removeOnFail: 100,
+      });
+      return {
+        id: job.id,
+        type: String(jobType),
+        status: 'queued-bullmq',
+        queue: AFFORDZ_PAYMENTS_QUEUE,
+        scheduledDelayMs: delay,
+      };
+    }
+
+    const fallbackId =
+      options?.jobId ||
+      `local-pay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    if (this.paymentHandler && !this.isDestroyed) {
+      if (delay > 0) {
+        const timer = setTimeout(() => {
+          this.pendingTimers.delete(timer);
+          if (this.isDestroyed || !this.paymentHandler) return;
+          void this.paymentHandler({
+            id: fallbackId,
+            name: String(jobType),
+            data: payload,
+          }).catch((err: any) => {
+            this.logger.warn(
+              `In-process delayed payment job ${jobType} failed: ${err?.message}`,
+            );
+          });
+        }, delay);
+        timer.unref();
+        this.pendingTimers.add(timer);
+      } else {
+        try {
+          await this.paymentHandler({
+            id: fallbackId,
+            name: String(jobType),
+            data: payload,
+          });
+        } catch (err: any) {
+          this.logger.warn(
+            `In-process payment handler error for ${jobType}: ${err?.message}`,
+          );
+        }
+      }
+    }
+
+    return {
+      id: fallbackId,
+      type: String(jobType),
+      status: 'queued-in-process',
+      queue: AFFORDZ_PAYMENTS_QUEUE,
+      scheduledDelayMs: delay,
+    };
+  }
+
+  async enqueuePaymentReconciliation(orderId: string, delayMs = 120000) {
+    return this.enqueuePaymentJob(
+      QueueJobType.PAYMENT_RECONCILIATION_CHECK,
+      { orderId },
+      { delayMs },
+    );
+  }
+
+  async enqueueOrderExpiryCheck(checkoutGroupId: string, delayMs = 15 * 60 * 1000) {
+    return this.enqueuePaymentJob(
+      QueueJobType.ORDER_EXPIRY_CHECK,
+      { checkoutGroupId },
+      {
+        delayMs,
+        jobId: `order-expiry:${checkoutGroupId}`,
+      },
+    );
   }
 }

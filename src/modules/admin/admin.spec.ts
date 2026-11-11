@@ -47,6 +47,7 @@ import { Role } from '../../common/enums/role.enum';
 import { createJwtToken } from '../../common/utils/crypto.util';
 
 describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite', () => {
+  let moduleRef: TestingModule;
   let authService: AdminAuthService;
   let dashboardService: AdminDashboardService;
   let usersService: AdminUsersService;
@@ -67,10 +68,21 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
   let rolesGuard: RolesGuard;
   let reflector: Reflector;
 
-  beforeEach(async () => {
-    const moduleRef: TestingModule = await Test.createTestingModule({
+  const runStartedAt = new Date();
+  const runId = `admspec_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const createdUserIds: string[] = [];
+  const createdDriverProfileIds: string[] = [];
+  const createdAddressIds: string[] = [];
+  const createdOrderIds: string[] = [];
+  const createdVendorPayoutIds: string[] = [];
+  const createdNotificationIds: string[] = [];
+
+  beforeAll(async () => {
+    moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
+
+    await moduleRef.init();
 
     authService = moduleRef.get<AdminAuthService>(AdminAuthService);
     dashboardService = moduleRef.get<AdminDashboardService>(AdminDashboardService);
@@ -90,16 +102,98 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
     prismaService = moduleRef.get<PrismaService>(PrismaService);
 
     reflector = moduleRef.get<Reflector>(Reflector);
-    authGuard = new FirebaseAuthGuard();
+    authGuard = new FirebaseAuthGuard(undefined, prismaService);
     rolesGuard = new RolesGuard(reflector);
+  });
+
+  afterEach(async () => {
+    if (createdNotificationIds.length > 0) {
+      await prismaService.auditLog.deleteMany({
+        where: { entityId: { in: createdNotificationIds } },
+      });
+      await prismaService.notification.deleteMany({
+        where: { id: { in: createdNotificationIds } },
+      });
+      createdNotificationIds.length = 0;
+    }
+    if (createdVendorPayoutIds.length > 0) {
+      await prismaService.auditLog.deleteMany({
+        where: { entityId: { in: createdVendorPayoutIds } },
+      });
+      await prismaService.vendorPayout.deleteMany({
+        where: { id: { in: createdVendorPayoutIds } },
+      });
+      createdVendorPayoutIds.length = 0;
+    }
+    if (createdOrderIds.length > 0) {
+      await prismaService.tryAndBuySession.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prismaService.outboxEvent.deleteMany({
+        where: { aggregateId: { in: createdOrderIds } },
+      });
+      await prismaService.ledgerEntry.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prismaService.paymentTransaction.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prismaService.orderStatusHistory.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prismaService.auditLog.deleteMany({
+        where: { entityId: { in: createdOrderIds } },
+      });
+      await prismaService.orderItem.deleteMany({
+        where: { orderId: { in: createdOrderIds } },
+      });
+      await prismaService.order.deleteMany({
+        where: { id: { in: createdOrderIds } },
+      });
+      createdOrderIds.length = 0;
+    }
+    if (createdAddressIds.length > 0) {
+      await prismaService.address.deleteMany({
+        where: { id: { in: createdAddressIds } },
+      });
+      createdAddressIds.length = 0;
+    }
+    if (createdDriverProfileIds.length > 0) {
+      await prismaService.auditLog.deleteMany({
+        where: { entityId: { in: createdDriverProfileIds } },
+      });
+      await prismaService.driverDocument.deleteMany({
+        where: { driverId: { in: createdDriverProfileIds } },
+      });
+      await prismaService.driverProfile.deleteMany({
+        where: { id: { in: createdDriverProfileIds } },
+      });
+      createdDriverProfileIds.length = 0;
+    }
+    if (createdUserIds.length > 0) {
+      await prismaService.user.deleteMany({
+        where: { id: { in: createdUserIds } },
+      });
+      createdUserIds.length = 0;
+    }
+    await prismaService.auditLog.deleteMany({
+      where: {
+        entityId: { in: ['usr-1', 'ven_7821', 'ven_7814'] },
+        createdAt: { gte: runStartedAt },
+      },
+    });
+  });
+
+  afterAll(async () => {
+    await moduleRef?.close();
   });
 
   // ================= 1. AUTHENTICATION & SESSION HANDLING =================
   describe('1. Admin Authentication & Session Handling', () => {
     it('Admin Login: authenticates with valid credentials, returns signed token and profile', async () => {
       const res = await authService.login({
-        email: 'amara@kudicart.com',
-        password: 'KudiCart#Admin2026!',
+        email: 'amara@affordz.in',
+        password: 'Affordz#Admin2026!',
       });
 
       expect(res.success).toBe(true);
@@ -112,7 +206,7 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
     it('Admin Login: rejects incorrect password with 401 Unauthorized', async () => {
       await expect(
         authService.login({
-          email: 'amara@kudicart.com',
+          email: 'amara@affordz.in',
           password: 'WrongPassword123!',
         }),
       ).rejects.toThrow(UnauthorizedException);
@@ -121,49 +215,70 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
     it('Admin Login: rejects non-existent admin email with 401 Unauthorized', async () => {
       await expect(
         authService.login({
-          email: 'nonexistent@kudicart.com',
-          password: 'KudiCart#Admin2026!',
+          email: 'nonexistent@affordz.in',
+          password: 'Affordz#Admin2026!',
         }),
       ).rejects.toThrow(UnauthorizedException);
     });
 
     it('Admin Login: rejects deactivated/inactive admin accounts with 403 Forbidden', async () => {
-      const store = prismaService.getStore();
-      const inactiveUser = store.adminUsers.find((u: any) => u.email === 'tunde@kudicart.com');
-      if (inactiveUser) inactiveUser.status = 'INACTIVE';
+      const setting = await prismaService.workspaceSetting.findUnique({
+        where: { key: 'adminCredentials' },
+      });
+      const prevCreds = Array.isArray(setting?.value)
+        ? JSON.parse(JSON.stringify(setting!.value))
+        : [];
+      const mutatedCreds = prevCreds.map((u: any) =>
+        u.email === 'tunde@affordz.in' ? { ...u, status: 'INACTIVE' } : u,
+      );
+      await prismaService.workspaceSetting.update({
+        where: { key: 'adminCredentials' },
+        data: { value: mutatedCreds },
+      });
 
-      await expect(
-        authService.login({
-          email: 'tunde@kudicart.com',
-          password: 'KudiCart#Admin2026!',
-        }),
-      ).rejects.toThrow(ForbiddenException);
-
-      if (inactiveUser) inactiveUser.status = 'ACTIVE';
+      try {
+        await expect(
+          authService.login({
+            email: 'tunde@affordz.in',
+            password: 'Affordz#Admin2026!',
+          }),
+        ).rejects.toThrow(ForbiddenException);
+      } finally {
+        await prismaService.workspaceSetting.update({
+          where: { key: 'adminCredentials' },
+          data: { value: prevCreds },
+        });
+      }
     });
 
     it('Admin Profile: retrieves current authenticated profile and updates profile fields', async () => {
-      const profile = await authService.getProfile('ADM-001');
+      const profile = await authService.getProfile('usr-admin-amara');
       expect(profile.name).toBe('Amara Okonkwo');
-      expect(profile.role).toBe(Role.ADMIN);
+      expect(profile.role).toBe('Super Admin');
 
-      const updated = await authService.updateProfile('ADM-001', {
-        displayName: 'Amara Okonkwo-Smith',
-      });
-      expect(updated.user.name).toBe('Amara Okonkwo-Smith');
+      try {
+        const updated = await authService.updateProfile('usr-admin-amara', {
+          displayName: 'Amara Okonkwo-Smith',
+        });
+        expect(updated.user.name).toBe('Amara Okonkwo-Smith');
+      } finally {
+        await authService.updateProfile('usr-admin-amara', {
+          displayName: 'Amara Okonkwo',
+        });
+      }
     });
 
     it('Admin Logout: terminates administrative session safely', async () => {
-      const logoutRes = await authService.logout('ADM-001');
+      const logoutRes = await authService.logout('usr-admin-amara');
       expect(logoutRes.success).toBe(true);
     });
   });
 
   // ================= 2. RBAC & SECURITY BOUNDARIES =================
   describe('2. Role-Based Access Control (RBAC) & Security Boundaries', () => {
-    it('RBAC: allows Admin token access to ADMIN-restricted routes', () => {
+    it('RBAC: allows Admin token access to ADMIN-restricted routes', async () => {
       const adminToken = createJwtToken({
-        uid: 'ADM-001',
+        uid: 'usr-admin-1',
         role: Role.ADMIN,
       });
 
@@ -181,7 +296,7 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
       };
 
       // 1. AuthGuard populates request.user
-      const canAuth = authGuard.canActivate(mockContext);
+      const canAuth = await authGuard.canActivate(mockContext);
       expect(canAuth).toBe(true);
       expect(mockRequest.user.role).toBe(Role.ADMIN);
 
@@ -191,7 +306,7 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
       expect(canRole).toBe(true);
     });
 
-    it('RBAC: blocks Customer token from accessing ADMIN-restricted routes with 403 Forbidden', () => {
+    it('RBAC: blocks Customer token from accessing ADMIN-restricted routes with 403 Forbidden', async () => {
       const customerToken = createJwtToken({
         uid: 'usr-1',
         role: Role.CUSTOMER,
@@ -211,7 +326,7 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
       };
 
       // 1. AuthGuard populates customer role
-      authGuard.canActivate(mockContext);
+      await authGuard.canActivate(mockContext);
       expect(mockRequest.user.role).toBe(Role.CUSTOMER);
 
       // 2. RolesGuard enforces Role.ADMIN and must throw ForbiddenException
@@ -219,9 +334,9 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
       expect(() => rolesGuard.canActivate(mockContext)).toThrow(ForbiddenException);
     });
 
-    it('RBAC: blocks Driver token from accessing ADMIN-restricted routes with 403 Forbidden', () => {
+    it('RBAC: blocks Driver token from accessing ADMIN-restricted routes with 403 Forbidden', async () => {
       const driverToken = createJwtToken({
-        uid: 'drv-1',
+        uid: 'usr-driver-1',
         role: Role.DRIVER,
       });
 
@@ -238,16 +353,16 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
         getClass: () => {},
       };
 
-      authGuard.canActivate(mockContext);
+      await authGuard.canActivate(mockContext);
       expect(mockRequest.user.role).toBe(Role.DRIVER);
 
       jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue([Role.ADMIN]);
       expect(() => rolesGuard.canActivate(mockContext)).toThrow(ForbiddenException);
     });
 
-    it('RBAC: rejects expired JWT tokens with 401 Unauthorized', () => {
+    it('RBAC: rejects expired JWT tokens with 401 Unauthorized', async () => {
       const expiredToken = createJwtToken(
-        { uid: 'ADM-001', role: Role.ADMIN },
+        { uid: 'usr-admin-1', role: Role.ADMIN },
         process.env.JWT_SECRET,
         -10, // Expired 10 seconds ago
       );
@@ -263,10 +378,10 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
         }),
       };
 
-      expect(() => authGuard.canActivate(mockContext)).toThrow(UnauthorizedException);
+      await expect(authGuard.canActivate(mockContext)).rejects.toThrow(UnauthorizedException);
     });
 
-    it('RBAC: rejects missing Authorization header on protected admin routes', () => {
+    it('RBAC: rejects missing Authorization header on protected admin routes', async () => {
       const mockRequest: any = {
         headers: {},
         url: '/api/v1/admin/orders',
@@ -278,13 +393,55 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
         }),
       };
 
-      expect(() => authGuard.canActivate(mockContext)).toThrow(UnauthorizedException);
+      await expect(authGuard.canActivate(mockContext)).rejects.toThrow(UnauthorizedException);
     });
   });
 
   // ================= 3. DASHBOARD & OPERATIONAL SUMMARIES =================
   describe('3. Dashboard & Operational Summaries', () => {
     it('Dashboard Summary: computes real operational aggregates and queue sizes from the database', async () => {
+      const suffix = Math.random().toString(36).slice(2, 6);
+      const addrId = `${runId}_dash_addr_${suffix}`;
+      const orderId = `${runId}_dash_ord_${suffix}`;
+      createdAddressIds.push(addrId);
+      createdOrderIds.push(orderId);
+
+      await prismaService.address.create({
+        data: {
+          id: addrId,
+          userId: 'usr-1',
+          label: 'Home',
+          recipientName: 'Ananya Sharma',
+          recipientPhone: '+919845012890',
+          line1: '100 Feet Road, Indiranagar',
+          locality: 'Indiranagar',
+          city: 'Bengaluru',
+          state: 'Karnataka',
+          pincode: '560038',
+        },
+      });
+      await prismaService.order.create({
+        data: {
+          id: orderId,
+          orderNumber: `KC-DASH-${suffix}`,
+          customerId: 'usr-1',
+          vendorId: 'vend-1',
+          addressId: addrId,
+          deliveryAddress: {
+            recipientName: 'Ananya Sharma',
+            line1: '100 Feet Road, Indiranagar',
+            city: 'Bengaluru',
+          },
+          fulfillmentType: 'DARK_STORE',
+          status: 'READY_FOR_PICKUP',
+          paymentMethod: 'RAZORPAY',
+          paymentStatus: 'COMPLETED',
+          itemTotal: 1500,
+          taxes: 75,
+          grandTotal: 1575,
+        },
+      });
+
       const summary = await dashboardService.getSummary();
 
       expect(summary.actionRequired).toBeDefined();
@@ -316,6 +473,48 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
     });
 
     it('Customers: retrieves single customer detail with addresses, orders, and tickets', async () => {
+      const suffix = Math.random().toString(36).slice(2, 6);
+      const addrId = `${runId}_cust_a_${suffix}`;
+      const orderId = `${runId}_cust_o_${suffix}`;
+      createdAddressIds.push(addrId);
+      createdOrderIds.push(orderId);
+
+      await prismaService.address.create({
+        data: {
+          id: addrId,
+          userId: 'usr-1',
+          label: 'Home',
+          recipientName: 'Ananya Sharma',
+          recipientPhone: '+919845012890',
+          line1: '100 Feet Road, Indiranagar',
+          locality: 'Indiranagar',
+          city: 'Bengaluru',
+          state: 'Karnataka',
+          pincode: '560038',
+        },
+      });
+      await prismaService.order.create({
+        data: {
+          id: orderId,
+          orderNumber: `KC-CUST-${suffix}`,
+          customerId: 'usr-1',
+          vendorId: 'vend-1',
+          addressId: addrId,
+          deliveryAddress: {
+            recipientName: 'Ananya Sharma',
+            line1: '100 Feet Road, Indiranagar',
+            city: 'Bengaluru',
+          },
+          fulfillmentType: 'DARK_STORE',
+          status: 'PLACED',
+          paymentMethod: 'COD',
+          paymentStatus: 'PENDING',
+          itemTotal: 1299,
+          taxes: 65,
+          grandTotal: 1404,
+        },
+      });
+
       const customer = await usersService.getCustomerById('usr-1');
       expect(customer.name).toBe('Ananya Sharma');
       expect(customer.addresses.length).toBeGreaterThan(0);
@@ -324,10 +523,26 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
     });
 
     it('Customers: toggles status to SUSPENDED and records audit trail event', async () => {
+      const suffix = Math.random().toString(36).slice(2, 6);
+      const tempCustId = `${runId}_cust_u_${suffix}`;
+      createdUserIds.push(tempCustId);
+
+      await prismaService.user.create({
+        data: {
+          id: tempCustId,
+          firebaseUid: `fb_${tempCustId}`,
+          name: 'Suspend Test Customer',
+          email: `${tempCustId}@test.kudicart.in`,
+          phone: `+919868${Math.floor(100000 + Math.random() * 899999)}`,
+          role: 'CUSTOMER',
+          status: 'ACTIVE',
+        },
+      });
+
       const updateRes = await usersService.updateCustomerStatus(
-        'usr-1',
+        tempCustId,
         { status: 'SUSPENDED', reason: 'Payment dispute audit' },
-        'ADM-001',
+        'usr-admin-1',
         'Amara Okonkwo',
       );
 
@@ -336,10 +551,12 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
 
       // Verify audit log
       const audit = await auditService.listAuditEvents({ entityType: 'Customer' });
-      expect(audit.data.some((e: any) => e.entityId === 'usr-1')).toBe(true);
+      expect(audit.data.some((e: any) => e.entityId === tempCustId)).toBe(true);
 
-      // Revert status
-      await usersService.updateCustomerStatus('usr-1', { status: 'ACTIVE' });
+      // Clean temp customer's audit log entries
+      await prismaService.auditLog.deleteMany({
+        where: { entityId: tempCustId },
+      });
     });
   });
 
@@ -555,40 +772,134 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
 
   // ================= 7. ORDERS & DELIVERY ASSIGNMENTS =================
   describe('7. Orders & Delivery Partner Assignments', () => {
+    async function seedOrderAndDriver() {
+      const suffix = Math.random().toString(36).slice(2, 6);
+      const drvUserId = `${runId}_od_u_${suffix}`;
+      const drvProfId = `${runId}_od_p_${suffix}`;
+      const addrId = `${runId}_od_a_${suffix}`;
+      const orderId = `${runId}_od_o_${suffix}`;
+      const orderNumber = `KC-ADM-${suffix}`;
+      createdUserIds.push(drvUserId);
+      createdDriverProfileIds.push(drvProfId);
+      createdAddressIds.push(addrId);
+      createdOrderIds.push(orderId);
+
+      await prismaService.user.create({
+        data: {
+          id: drvUserId,
+          firebaseUid: `fb_${drvUserId}`,
+          name: 'Deepak Solanki',
+          email: `${drvUserId}@test.kudicart.in`,
+          phone: `+919866${Math.floor(100000 + Math.random() * 899999)}`,
+          role: 'DRIVER',
+          status: 'ACTIVE',
+        },
+      });
+      await prismaService.driverProfile.create({
+        data: {
+          id: drvProfId,
+          userId: drvUserId,
+          fullName: 'Deepak Solanki',
+          phone: `+919866${Math.floor(100000 + Math.random() * 899999)}`,
+          kycStatus: 'APPROVED',
+          isOnline: true,
+        },
+      });
+      await prismaService.address.create({
+        data: {
+          id: addrId,
+          userId: 'usr-1',
+          label: 'Home',
+          recipientName: 'Ananya Sharma',
+          recipientPhone: '+919845012890',
+          line1: '100 Feet Road, Indiranagar',
+          locality: 'Indiranagar',
+          city: 'Bengaluru',
+          state: 'Karnataka',
+          pincode: '560038',
+        },
+      });
+      await prismaService.order.create({
+        data: {
+          id: orderId,
+          orderNumber,
+          customerId: 'usr-1',
+          vendorId: 'vend-1',
+          addressId: addrId,
+          deliveryAddress: {
+            recipientName: 'Ananya Sharma',
+            line1: '100 Feet Road, Indiranagar',
+            city: 'Bengaluru',
+          },
+          fulfillmentType: 'DARK_STORE',
+          isTryAndBuy: true,
+          status: 'READY_FOR_PICKUP',
+          paymentMethod: 'RAZORPAY',
+          paymentStatus: 'COMPLETED',
+          itemTotal: 1599,
+          taxes: 80,
+          grandTotal: 1679,
+        },
+      });
+      await prismaService.orderItem.create({
+        data: {
+          orderId,
+          productId: 'prd-1',
+          title: 'Silk Anarkali Set',
+          brand: 'Avanya Ethnic',
+          size: 'M',
+          price: 1599,
+          quantity: 1,
+          image: 'https://example.com/item.jpg',
+        },
+      });
+      await prismaService.orderStatusHistory.create({
+        data: {
+          orderId,
+          status: 'READY_FOR_PICKUP',
+          note: 'Packed for admin assignment',
+          actorRole: Role.VENDOR,
+        },
+      });
+      return { drvProfId, orderId, orderNumber };
+    }
+
     it('Orders: lists orders with search, status filtering, and date range', async () => {
+      await seedOrderAndDriver();
       const list = await ordersService.listOrders({});
       expect(list.data.length).toBeGreaterThan(0);
-      expect(list.data[0].customerAddress).toBeDefined();
-      expect(list.data[0].pickupHub).toBeDefined();
+      expect(list.data[0].deliveryAddress).toBeDefined();
+      expect(list.data[0].vendorName).toBeDefined();
     });
 
     it('Orders: retrieves full order details, items, timeline history, and try & buy state', async () => {
-      const order = await ordersService.getOrderById('ord-89241');
-      expect(order.orderNumber).toBe('KC-89241');
+      const { orderId, orderNumber } = await seedOrderAndDriver();
+      const order = await ordersService.getOrderById(orderId);
+      expect(order.orderNumber).toBe(orderNumber);
       expect(order.items.length).toBeGreaterThan(0);
       expect(order.history.length).toBeGreaterThan(0);
       expect(order.isTryAndBuy).toBe(true);
     });
 
     it('Manual Assignment: assigns delivery partner to order ready for pickup and records audit log', async () => {
-      const store = prismaService.getStore();
-      const testOrder = store.orders[0];
-      testOrder.status = 'READY_FOR_PICKUP';
+      const { drvProfId, orderId } = await seedOrderAndDriver();
 
       const assignRes = await ordersService.assignDriver(
-        testOrder.id,
-        { driverId: 'drv-104', note: 'Priority boutique courier dispatch' },
-        'ADM-001',
+        orderId,
+        { driverId: drvProfId, note: 'Priority boutique courier dispatch' },
+        'usr-admin-1',
         'Amara Okonkwo',
       );
 
       expect(assignRes.success).toBe(true);
       expect(assignRes.order.status).toBe('ASSIGNED');
-      expect(assignRes.order.assignedDriver?.fullName).toBe('Deepak Solanki');
+      expect(assignRes.order.driverName).toBe('Deepak Solanki');
 
       // Verify audit log
-      const audit = await auditService.listAuditEvents({ actionType: 'DRIVER_ASSIGNED_MANUAL' });
-      expect(audit.data.some((e: any) => e.entityId === testOrder.orderNumber)).toBe(true);
+      const audit = await auditService.listAuditEvents({
+        actionType: 'ADMIN_MANUAL_DRIVER_ASSIGNED',
+      });
+      expect(audit.data.some((e: any) => e.entityId === orderId)).toBe(true);
 
       // Verify assignment queue reflects updated status
       const queue = await ordersService.listAssignments({});
@@ -598,48 +909,115 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
 
   // ================= 8. DELIVERY PARTNERS & KYC =================
   describe('8. Delivery Partners & KYC Dossiers', () => {
+    async function seedKycPartner() {
+      const suffix = Math.random().toString(36).slice(2, 6);
+      const userId = `${runId}_kyc_u_${suffix}`;
+      const profId = `${runId}_kyc_p_${suffix}`;
+      createdUserIds.push(userId);
+      createdDriverProfileIds.push(profId);
+
+      await prismaService.user.create({
+        data: {
+          id: userId,
+          firebaseUid: `fb_${userId}`,
+          name: 'Suraj Verma',
+          email: `${userId}@test.kudicart.in`,
+          phone: `+919867${Math.floor(100000 + Math.random() * 899999)}`,
+          role: 'DRIVER',
+          status: 'ACTIVE',
+        },
+      });
+      await prismaService.driverProfile.create({
+        data: {
+          id: profId,
+          userId,
+          fullName: 'Suraj Verma',
+          phone: `+919867${Math.floor(100000 + Math.random() * 899999)}`,
+          kycStatus: 'PENDING',
+          vehicleType: 'EV Scooter',
+          vehicleMake: 'Ather',
+          vehicleModel: 'Ather 450X',
+          vehicleRegistration: 'KA03EV9999',
+          selfieUrl: 'https://example.com/suraj_selfie.jpg',
+        },
+      });
+      await prismaService.driverDocument.createMany({
+        data: [
+          {
+            driverId: profId,
+            type: 'selfie',
+            side: 'front',
+            fileName: 'suraj_selfie.jpg',
+            fileUrl: 'https://example.com/suraj_selfie.jpg',
+            status: 'PENDING',
+          },
+          {
+            driverId: profId,
+            type: 'aadhaar',
+            side: 'front',
+            fileName: 'aadhaar_front.jpg',
+            fileUrl: 'https://example.com/aadhaar_front.jpg',
+            status: 'PENDING',
+          },
+        ],
+      });
+      return profId;
+    }
+
     it('Delivery Partners: lists partners with vehicle type and KYC status filters', async () => {
+      await seedKycPartner();
       const list = await driversService.listDrivers({});
       expect(list.data.length).toBeGreaterThanOrEqual(2);
 
       const evDrivers = await driversService.listDrivers({ vehicleType: 'EV' });
-      expect(evDrivers.data.every((d: any) => d.vehicleType.includes('EV') || d.vehicleModel.includes('Ather'))).toBe(true);
+      expect(
+        evDrivers.data.every(
+          (d: any) =>
+            String(d.vehicleType || '').includes('EV') ||
+            String(d.vehicleModel || '').includes('Ather'),
+        ),
+      ).toBe(true);
     });
 
     it('Delivery Partners: retrieves full dossier with vehicle details and KYC documents', async () => {
-      const partner = await driversService.getDriverById('drv-118');
+      const profId = await seedKycPartner();
+      const partner = await driversService.getDriverById(profId);
       expect(partner.fullName).toBe('Suraj Verma');
-      expect(partner.documents.selfie).toBeDefined();
-      expect(partner.documents.aadhaar).toBeDefined();
-      expect(partner.vehicleDetails.make).toBe('Ather');
+      expect(Array.isArray(partner.documents)).toBe(true);
+      expect(partner.documents.some((d: any) => d.type === 'selfie')).toBe(true);
+      expect(partner.documents.some((d: any) => d.type === 'aadhaar')).toBe(true);
+      expect(partner.vehicleMake).toBe('Ather');
     });
 
     it('Delivery Partners: approves KYC, updates document verification states, and appends audit trail', async () => {
+      const profId = await seedKycPartner();
       const approveRes = await driversService.reviewKyc(
-        'drv-118',
+        profId,
         { status: 'APPROVED' },
-        'ADM-001',
+        'usr-admin-1',
         'Amara Okonkwo',
       );
 
       expect(approveRes.success).toBe(true);
       expect(approveRes.kycStatus).toBe('APPROVED');
 
-      const updated = await driversService.getDriverById('drv-118');
-      expect(updated.documents.aadhaar.status).toBe('VERIFIED');
+      const updated = await driversService.getDriverById(profId);
+      const aadhaarDoc = updated.documents.find((d: any) => d.type === 'aadhaar');
+      expect(aadhaarDoc?.status).toBe('VERIFIED');
       expect(updated.auditTrail.length).toBeGreaterThan(0);
     });
 
     it('Delivery Partners: rejects KYC, requires rejection reason, and records audit trail', async () => {
+      const profId = await seedKycPartner();
       // Missing rejection reason throws BadRequestException
       await expect(
-        driversService.reviewKyc('drv-118', { status: 'REJECTED' }),
+        driversService.reviewKyc(profId, { status: 'REJECTED' }),
       ).rejects.toThrow(BadRequestException);
 
       const rejectRes = await driversService.reviewKyc(
-        'drv-118',
+        profId,
         { status: 'REJECTED', rejectionReason: 'Driving License image blurred and illegible' },
-        'ADM-001',
+        'usr-admin-1',
         'Amara Okonkwo',
       );
 
@@ -651,10 +1029,105 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
 
   // ================= 9. FINANCE: PAYMENTS & LEDGER =================
   describe('9. Payments & Vendor Settlement Ledger', () => {
+    async function seedFinanceRecords() {
+      const suffix = Math.random().toString(36).slice(2, 6);
+      const addrId = `${runId}_fin_a_${suffix}`;
+      const orderId = `${runId}_fin_o_${suffix}`;
+      const payoutId = `${runId}_fin_vp_${suffix}`;
+      createdAddressIds.push(addrId);
+      createdOrderIds.push(orderId);
+      createdVendorPayoutIds.push(payoutId);
+
+      await prismaService.address.create({
+        data: {
+          id: addrId,
+          userId: 'usr-1',
+          label: 'Home',
+          recipientName: 'Ananya Sharma',
+          recipientPhone: '+919845012890',
+          line1: '100 Feet Road, Indiranagar',
+          locality: 'Indiranagar',
+          city: 'Bengaluru',
+          state: 'Karnataka',
+          pincode: '560038',
+        },
+      });
+      await prismaService.order.create({
+        data: {
+          id: orderId,
+          orderNumber: `KC-FIN-${suffix}`,
+          customerId: 'usr-1',
+          vendorId: 'vend-1',
+          addressId: addrId,
+          deliveryAddress: {
+            recipientName: 'Ananya Sharma',
+            line1: '100 Feet Road, Indiranagar',
+            city: 'Bengaluru',
+          },
+          fulfillmentType: 'DARK_STORE',
+          status: 'DELIVERED',
+          paymentMethod: 'RAZORPAY',
+          paymentStatus: 'COMPLETED',
+          razorpayOrderId: `order_fin_${suffix}`,
+          razorpayPaymentId: `pay_fin_${suffix}`,
+          itemTotal: 1404,
+          taxes: 0,
+          grandTotal: 1404,
+        },
+      });
+      await prismaService.paymentTransaction.create({
+        data: {
+          orderId,
+          transactionType: 'CAPTURE',
+          razorpayOrderId: `order_fin_${suffix}`,
+          paymentId: `pay_fin_${suffix}`,
+          amount: 1404,
+          currency: 'INR',
+          status: 'COMPLETED',
+        },
+      });
+      await prismaService.ledgerEntry.createMany({
+        data: [
+          {
+            orderId,
+            vendorId: 'vend-1',
+            entryType: 'ORDER_REVENUE',
+            amount: 1404,
+            description: 'Finance test revenue',
+          },
+          {
+            orderId,
+            vendorId: 'vend-1',
+            entryType: 'COMMISSION_DEDUCTED',
+            amount: -175.5,
+            description: 'Finance test 12.5% commission',
+          },
+          {
+            orderId,
+            vendorId: 'vend-1',
+            entryType: 'VENDOR_PAYOUT',
+            amount: 1228.5,
+            description: 'Finance test payout',
+          },
+        ],
+      });
+      await prismaService.vendorPayout.create({
+        data: {
+          id: payoutId,
+          vendorId: 'vend-1',
+          amount: 1228.5,
+          status: 'PENDING',
+        },
+      });
+
+      return { payoutId };
+    }
+
     it('Payments: lists payments and calculates summary metrics', async () => {
+      await seedFinanceRecords();
       const list = await financeService.listPayments({});
       expect(list.data.length).toBeGreaterThan(0);
-      expect(list.data[0].gatewayPaymentId).toBeDefined();
+      expect(list.data[0].paymentId).toBeDefined();
 
       const metrics = await financeService.getPaymentMetrics();
       expect(metrics.settledToday).toBeGreaterThan(0);
@@ -663,6 +1136,7 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
     });
 
     it('Ledger: lists vendor ledger entries, computes take rate, and updates settlement status', async () => {
+      const { payoutId } = await seedFinanceRecords();
       const list = await financeService.listLedger({});
       expect(list.data.length).toBeGreaterThan(0);
       expect(list.data[0].commissionRate).toBeDefined();
@@ -673,9 +1147,9 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
       expect(metrics.averageTakeRate).toBeGreaterThan(0);
 
       const updateRes = await financeService.updateSettlementStatus(
-        '#VEN-7821',
+        payoutId,
         { status: 'HOLD' },
-        'ADM-001',
+        'usr-admin-1',
         'Amara Okonkwo',
       );
 
@@ -694,14 +1168,23 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
       expect(metrics.averageRating).toBeGreaterThanOrEqual(4.0);
       expect(metrics.ratingDistribution.length).toBe(5);
 
-      const modRes = await reviewsService.moderateReview(
-        '#REV-5510',
-        { status: 'FLAGGED', flagReason: 'Repetitive promotional language' },
-        'ADM-001',
-        'Amara Okonkwo',
-      );
-      expect(modRes.success).toBe(true);
-      expect(modRes.review.status).toBe('FLAGGED');
+      try {
+        const modRes = await reviewsService.moderateReview(
+          'rev-seed-1',
+          { status: 'FLAGGED', flagReason: 'Repetitive promotional language' },
+          'usr-admin-amara',
+          'Amara Okonkwo',
+        );
+        expect(modRes.success).toBe(true);
+        expect(modRes.review.status).toBe('FLAGGED');
+      } finally {
+        await reviewsService.moderateReview(
+          'rev-seed-1',
+          { status: 'PUBLISHED' },
+          'usr-admin-amara',
+          'Amara Okonkwo',
+        );
+      }
     });
 
     it('Support: lists tickets, calculates queue counts, and updates ticket status to RESOLVED', async () => {
@@ -709,16 +1192,25 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
       expect(list.data.length).toBeGreaterThan(0);
       expect(list.counts.all).toBeGreaterThan(0);
 
-      const updateRes = await supportService.updateTicket(
-        '#TICK-4032',
-        { status: 'RESOLVED', resolutionRemarks: 'Forwarded delivery landmark note to rider.' },
-        'ADM-001',
-        'Amara Okonkwo',
-      );
+      try {
+        const updateRes = await supportService.updateTicket(
+          'tkt-seed-1',
+          { status: 'RESOLVED', resolutionRemarks: 'Forwarded delivery landmark note to rider.' },
+          'usr-admin-amara',
+          'Amara Okonkwo',
+        );
 
-      expect(updateRes.success).toBe(true);
-      expect(updateRes.ticket.status).toBe('RESOLVED');
-      expect(updateRes.ticket.resolvedAt).toBeDefined();
+        expect(updateRes.success).toBe(true);
+        expect(updateRes.ticket.status).toBe('RESOLVED');
+        expect(updateRes.ticket.resolvedAt).toBeDefined();
+      } finally {
+        await supportService.updateTicket(
+          'tkt-seed-1',
+          { status: 'OPEN' },
+          'usr-admin-amara',
+          'Amara Okonkwo',
+        );
+      }
     });
   });
 
@@ -731,29 +1223,47 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
     });
 
     it('IAM: invites new administrative user and updates role assignment', async () => {
+      const inviteEmail = `folake.${runId}@affordz.in`;
+      const prevCredsSetting = await prismaService.workspaceSetting.findUnique({
+        where: { key: 'adminCredentials' },
+      });
+      const prevCreds = Array.isArray(prevCredsSetting?.value)
+        ? JSON.parse(JSON.stringify(prevCredsSetting!.value))
+        : [];
+
       const inviteRes = await accessService.inviteUser(
         {
           name: 'Folake Adeyemi',
-          email: 'folake@kudicart.com',
+          email: inviteEmail,
           role: 'Marketplace Operations',
           department: 'Fulfillment & Dispatch',
         },
-        'ADM-001',
+        'usr-admin-amara',
         'Amara Okonkwo',
       );
+      if ((inviteRes.user as any)?.userId) {
+        createdUserIds.push((inviteRes.user as any).userId);
+      }
 
-      expect(inviteRes.success).toBe(true);
-      expect(inviteRes.user.email).toBe('folake@kudicart.com');
-      expect((inviteRes.user as any).passwordHash).toBeUndefined();
+      try {
+        expect(inviteRes.success).toBe(true);
+        expect(inviteRes.user.email).toBe(inviteEmail);
+        expect((inviteRes.user as any).passwordHash).toBeUndefined();
 
-      // Update role
-      const updateRes = await accessService.updateUserRole(
-        inviteRes.user.id,
-        { role: 'Support Manager' },
-        'ADM-001',
-        'Amara Okonkwo',
-      );
-      expect(updateRes.user.role).toBe('Support Manager');
+        // Update role
+        const updateRes = await accessService.updateUserRole(
+          inviteRes.user.id,
+          { role: 'Support Manager' },
+          'usr-admin-amara',
+          'Amara Okonkwo',
+        );
+        expect(updateRes.user.role).toBe('Support Manager');
+      } finally {
+        await prismaService.workspaceSetting.update({
+          where: { key: 'adminCredentials' },
+          data: { value: prevCreds },
+        });
+      }
     });
 
     it('IAM: lists roles and updates role permissions matrix', async () => {
@@ -790,6 +1300,20 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
     });
 
     it('Audit Logs: lists immutable audit events with actor, entity, and change payloads', async () => {
+      const notifRes = await notificationsService.broadcast(
+        {
+          title: 'Audit Trail Seed Broadcast',
+          scope: 'Central Ops HQ',
+          severity: 'Informational',
+          note: 'Seeding audit event for AdminAuditService query verification.',
+        },
+        'usr-admin-1',
+        'Amara Okonkwo',
+      );
+      if (notifRes.notification?.id) {
+        createdNotificationIds.push(notifRes.notification.id);
+      }
+
       const audit = await auditService.listAuditEvents({});
       expect(audit.data.length).toBeGreaterThan(0);
       expect(audit.data[0].actionType).toBeDefined();
@@ -797,31 +1321,35 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
     });
 
     it('Notifications: lists notifications, marks as read, and broadcasts operational notice', async () => {
-      const list = await notificationsService.listNotifications({});
-      expect(list.data.length).toBeGreaterThan(0);
-
-      const markRes = await notificationsService.markAsRead(list.data[0].id);
-      expect(markRes.success).toBe(true);
-      expect(markRes.notification.read).toBe(true);
-
       const broadcastRes = await notificationsService.broadcast(
         {
           title: 'Emergency Server Maintenance Scheduled',
           scope: 'Central Ops HQ',
           severity: 'Operational Warning',
-          note: 'Maintenance window between 02:00 and 03:00 IST.',
+          message: 'Maintenance window between 02:00 and 03:00 IST.',
         },
-        'ADM-001',
+        'usr-admin-1',
         'Amara Okonkwo',
       );
       expect(broadcastRes.success).toBe(true);
       expect(broadcastRes.notification.title).toContain('Maintenance');
+      if (broadcastRes.notification?.id) {
+        createdNotificationIds.push(broadcastRes.notification.id);
+      }
+
+      const list = await notificationsService.listNotifications({});
+      expect(list.data.length).toBeGreaterThan(0);
+
+      const markRes = await notificationsService.markAsRead(broadcastRes.notification.id);
+      expect(markRes.success).toBe(true);
+      expect(markRes.notification.read).toBe(true);
     });
 
     it('Settings: retrieves profile session info, updates workspace preferences', async () => {
       const profileInfo = await settingsService.getProfileAndSession('ADM-001');
       expect(profileInfo.profile.displayName).toBeDefined();
-      expect(profileInfo.activeSession.gatewayIp).toBeDefined();
+      expect(profileInfo.activeSession.authProvider).toBeDefined();
+      expect(profileInfo.activeSession.channelStatus).toBeDefined();
 
       const prefRes = await settingsService.savePreferences({
         defaultPageSize: 20,

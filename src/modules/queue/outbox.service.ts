@@ -1,7 +1,24 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { QueueService } from './queue.service';
 import { QueueJobType } from './queue.constants';
+import { TrackingRealtimeGateway } from '../orders/tracking-realtime.gateway';
+
+interface ClaimedOutboxRow {
+  id: string;
+  aggregateType: string;
+  aggregateId: string;
+  eventType: string;
+  payload: any;
+  attempts: number;
+  createdAt: Date;
+}
+
+const PAYMENT_JOB_TYPES = new Set<string>([
+  QueueJobType.REFUND_PROCESSING,
+  QueueJobType.PAYMENT_RECONCILIATION_CHECK,
+  QueueJobType.ORDER_EXPIRY_CHECK,
+]);
 
 @Injectable()
 export class OutboxService {
@@ -10,133 +27,127 @@ export class OutboxService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly queueService: QueueService,
+    @Optional() private readonly trackingGateway?: TrackingRealtimeGateway,
   ) {}
 
-  /**
-   * Persists an outbox event within a transactional boundary.
-   * If a transaction client is passed, it is inserted atomically with the business mutation.
-   */
   async recordEvent(
-    tx: any,
-    aggregateType: 'ORDER' | 'DISPATCH' | 'TRY_AND_BUY' | 'PAYMENT' | string,
+    aggregateType: string,
     aggregateId: string,
     eventType: string,
     payload: any,
   ) {
-    if (this.prisma.isConnectedToDb && tx && tx.outboxEvent) {
-      try {
-        const event = await tx.outboxEvent.create({
-          data: {
-            aggregateType,
-            aggregateId,
-            eventType,
-            payload,
-            status: 'PENDING',
-          },
-        });
-        return event;
-      } catch (err: any) {
-        this.logger.warn(`Failed to record outbox event in DB transaction: ${err.message}`);
-      }
+    if (!this.prisma.isConnectedToDb) {
+      throw new Error('Database connection required to record OutboxEvent');
     }
 
-    // In-memory fallback for test doubles
-    const store = this.prisma.getStore();
-    if (!store.outboxEvents) {
-      store.outboxEvents = [];
-    }
-
-    const event = {
-      id: `evt-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-      aggregateType,
-      aggregateId,
-      eventType,
-      payload,
-      status: 'PENDING',
-      attempts: 0,
-      createdAt: new Date().toISOString(),
-    };
-    store.outboxEvents.push(event);
-    return event;
+    return this.prisma.outboxEvent.create({
+      data: {
+        aggregateType,
+        aggregateId,
+        eventType,
+        payload,
+        status: 'PENDING',
+      },
+    });
   }
 
-  /**
-   * Dispatches pending outbox events to BullMQ or asynchronous consumers.
-   * Ensures that temporary Redis disconnects do not lose business events.
-   */
-  async dispatchPendingEvents(): Promise<{ processedCount: number; failedCount: number }> {
-    let pendingEvents: any[] = [];
+  private broadcastRealtimeIfApplicable(eventType: string, payload: any) {
+    const orderId = payload?.orderId;
+    if (!orderId || !this.trackingGateway) return;
 
-    if (this.prisma.isConnectedToDb) {
-      try {
-        pendingEvents = await this.prisma.outboxEvent.findMany({
-          where: { status: 'PENDING', attempts: { lt: 5 } },
-          orderBy: { createdAt: 'asc' },
-          take: 50,
-        });
-      } catch (err: any) {
-        this.logger.warn(`Could not read pending outbox events from DB: ${err.message}`);
+    try {
+      if (eventType === 'ORDER_ARRIVED') {
+        this.trackingGateway.broadcastStatusUpdate(
+          orderId,
+          payload.status || 'OUT_FOR_DELIVERY',
+          { ...payload, event: 'ORDER_ARRIVED' },
+        );
+      } else if (eventType === 'TRY_AND_BUY_UPDATED') {
+        this.trackingGateway.broadcastStatusUpdate(
+          orderId,
+          payload.status || 'OUT_FOR_DELIVERY',
+          { ...payload, event: 'TRY_AND_BUY_UPDATED' },
+        );
       }
-    } else {
-      const store = this.prisma.getStore();
-      pendingEvents = (store.outboxEvents || []).filter(
-        (e: any) => e.status === 'PENDING' && (e.attempts || 0) < 5,
+    } catch (err: any) {
+      this.logger.warn(
+        `Realtime gateway broadcast skipped for ${eventType}: ${err?.message}`,
       );
     }
+  }
 
-    let processedCount = 0;
-    let failedCount = 0;
-
-    for (const evt of pendingEvents) {
-      try {
-        // Atomic lease claim: ensure this worker uniquely owns the event before enqueuing
-        if (this.prisma.isConnectedToDb) {
-          const claim = await this.prisma.outboxEvent.updateMany({
-            where: { id: evt.id, status: 'PENDING' },
-            data: { status: 'PUBLISHED', publishedAt: new Date() },
-          });
-          if (claim.count === 0) {
-            // Concurrently claimed by another worker instance
-            continue;
-          }
-        } else {
-          if (evt.status !== 'PENDING') {
-            continue;
-          }
-          evt.status = 'PUBLISHED';
-          evt.publishedAt = new Date().toISOString();
-        }
-
-        // Enqueue to BullMQ
-        await this.queueService.enqueueNotification(
-          (evt.eventType as any) || QueueJobType.ORDER_STATUS_NOTIFICATION,
-          evt.payload,
-        );
-
-        processedCount++;
-      } catch (err: any) {
-        failedCount++;
-        this.logger.error(`Failed to dispatch outbox event ${evt.id}: ${err.message}`);
-
-        if (this.prisma.isConnectedToDb) {
-          await this.prisma.outboxEvent.update({
-            where: { id: evt.id },
-            data: {
-              attempts: { increment: 1 },
-              lastError: err.message,
-              status: (evt.attempts || 0) >= 4 ? 'FAILED' : 'PENDING',
-              publishedAt: null,
-            },
-          });
-        } else {
-          evt.attempts = (evt.attempts || 0) + 1;
-          evt.lastError = err.message;
-          evt.status = evt.attempts >= 5 ? 'FAILED' : 'PENDING';
-          evt.publishedAt = null;
-        }
-      }
+  async dispatchPendingEvents(batchSize = 25) {
+    if (!this.prisma.isConnectedToDb) {
+      return {
+        processedCount: 0,
+        publishedCount: 0,
+        failedCount: 0,
+        timestamp: new Date().toISOString(),
+      };
     }
 
-    return { processedCount, failedCount };
+    const limit = Math.min(Math.max(Number(batchSize || 25), 1), 100);
+    let publishedCount = 0;
+    let failedCount = 0;
+    let processedCount = 0;
+
+    await this.prisma.$transaction(async (tx) => {
+      const pending = await tx.$queryRaw<ClaimedOutboxRow[]>`
+        SELECT id, "aggregateType", "aggregateId", "eventType", payload, attempts, "createdAt"
+        FROM "OutboxEvent"
+        WHERE status = 'PENDING'::"OutboxStatus"
+          AND attempts < 5
+        ORDER BY "createdAt" ASC
+        LIMIT ${limit}
+        FOR UPDATE SKIP LOCKED
+      `;
+
+      processedCount = pending.length;
+
+      for (const evt of pending) {
+        const nextAttempts = (evt.attempts || 0) + 1;
+        try {
+          const payload = evt.payload || {};
+          this.broadcastRealtimeIfApplicable(evt.eventType, payload);
+
+          if (PAYMENT_JOB_TYPES.has(evt.eventType)) {
+            await this.queueService.enqueuePaymentJob(evt.eventType, payload);
+          } else if (evt.eventType !== 'TRY_AND_BUY_UPDATED') {
+            await this.queueService.enqueueNotification(evt.eventType, payload);
+          }
+
+          await tx.outboxEvent.update({
+            where: { id: evt.id },
+            data: {
+              status: 'PUBLISHED',
+              publishedAt: new Date(),
+              attempts: nextAttempts,
+              lastError: null,
+            },
+          });
+          publishedCount++;
+        } catch (err: any) {
+          failedCount++;
+          await tx.outboxEvent.update({
+            where: { id: evt.id },
+            data: {
+              attempts: nextAttempts,
+              status: nextAttempts >= 5 ? 'FAILED' : 'PENDING',
+              lastError: err?.message || 'Outbox dispatch failure',
+            },
+          });
+          this.logger.error(
+            `Outbox event ${evt.id} (${evt.eventType}) attempt ${nextAttempts} failed: ${err?.message}`,
+          );
+        }
+      }
+    });
+
+    return {
+      processedCount,
+      publishedCount,
+      failedCount,
+      timestamp: new Date().toISOString(),
+    };
   }
 }

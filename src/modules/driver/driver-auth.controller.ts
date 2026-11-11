@@ -14,6 +14,9 @@ import { FirebaseLoginDto } from '../auth/dto/firebase-login.dto';
 import { RateLimit } from '../../common/decorators/rate-limit.decorator';
 import { RateLimitGuard } from '../../common/guards/rate-limit.guard';
 import { FirebaseAuthGuard } from '../../common/guards/auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { Role } from '../../common/enums/role.enum';
 import { CurrentUser, AuthenticatedUser } from '../../common/decorators/current-user.decorator';
 
 @Controller('api/v1/driver/auth')
@@ -72,14 +75,16 @@ export class DriverAuthController {
   }
 
   @Get('status')
-  @UseGuards(FirebaseAuthGuard)
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.DRIVER)
   async getStatus(@CurrentUser() user: AuthenticatedUser) {
     return this.authService.getAccountStatus(user.driverId || user.id);
   }
 
   @Post('logout')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(FirebaseAuthGuard)
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.DRIVER)
   async logout() {
     return { success: true, message: 'Logged out successfully' };
   }

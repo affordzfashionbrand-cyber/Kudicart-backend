@@ -1,21 +1,19 @@
-import { IsNotEmpty, IsIn, IsOptional, IsString } from 'class-validator';
-import { OrderStatus } from '../state-machine.service';
+import { IsNotEmpty, IsIn, IsOptional, IsString, IsInt } from 'class-validator';
+import {
+  CANONICAL_ORDER_STATUSES,
+  OrderStatus,
+} from '../../../common/contracts/order-contracts';
 
 export class UpdateOrderStatusDto {
   @IsNotEmpty({ message: 'status is required' })
-  @IsIn([
-    'PLACED',
-    'ACCEPTED',
-    'PREPARING',
-    'READY_FOR_PICKUP',
-    'ASSIGNED',
-    'PICKED_UP',
-    'OUT_FOR_DELIVERY',
-    'DELIVERED',
-  ])
+  @IsIn([...CANONICAL_ORDER_STATUSES])
   status: OrderStatus;
 
   @IsOptional()
   @IsString()
   note?: string;
+
+  @IsOptional()
+  @IsInt()
+  expectedVersion?: number;
 }

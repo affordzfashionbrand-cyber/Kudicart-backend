@@ -37,6 +37,7 @@ lerna-debug.log*
 .env
 .env.*.local
 .env.local
+.env.production
 
 # Secrets & Service Account Keys
 secrets/

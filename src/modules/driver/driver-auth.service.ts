@@ -2,17 +2,24 @@ import {
   Injectable,
   BadRequestException,
   UnauthorizedException,
-  Logger,
+  ForbiddenException,
+  ServiceUnavailableException,
   Optional,
+  Logger,
 } from '@nestjs/common';
-import { randomInt } from 'crypto';
+import { randomInt, randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Role } from '../../common/enums/role.enum';
 import { createJwtToken } from '../../common/utils/crypto.util';
+import {
+  buildPhoneLookupCandidates,
+  isNonProductionEnvironment,
+  normalizeStoredPhone,
+} from '../../common/utils/phone.util';
 import { FirebaseAdminService } from '../auth/firebase-admin.service';
 
-interface StoredOtp {
-  code: string;
+interface OtpEntry {
+  otp: string;
   expiresAt: number;
   attempts: number;
 }
@@ -20,222 +27,197 @@ interface StoredOtp {
 @Injectable()
 export class DriverAuthService {
   private readonly logger = new Logger(DriverAuthService.name);
-  // In-memory OTP storage: Note that in a clustered/multi-instance or restart scenario,
-  // a distributed cache (e.g., Redis) is required to share state across nodes.
-  private otpStore = new Map<string, StoredOtp>();
+  private otpStore = new Map<string, OtpEntry>();
 
   constructor(
-    private prisma: PrismaService,
-    @Optional() private firebaseAdmin?: FirebaseAdminService,
+    private readonly prisma: PrismaService,
+    @Optional() private readonly firebaseAdmin?: FirebaseAdminService,
   ) {}
 
-  cleanAndValidatePhone(phoneNumber: string): string {
-    const errorMsg = 'Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.';
-    if (!phoneNumber || typeof phoneNumber !== 'string') {
-      throw new BadRequestException(errorMsg);
+  private ensureDbConnected() {
+    if (!this.prisma.isConnectedToDb) {
+      throw new ServiceUnavailableException('PostgreSQL database connection is unavailable.');
     }
-    const digits = phoneNumber.replace(/[^0-9]/g, '');
-    const cleanPhone =
-      digits.length > 10 && digits.startsWith('91')
-        ? digits.slice(-10)
-        : digits.length > 10
-        ? digits.slice(-10)
-        : digits;
+  }
 
-    if (!cleanPhone || cleanPhone.length !== 10) {
-      throw new BadRequestException(errorMsg);
+  private ensureDevOtpEnabled() {
+    if (!isNonProductionEnvironment() || process.env.DISABLE_DEV_OTP === 'true') {
+      throw new ForbiddenException(
+        'Direct driver OTP endpoints are disabled in production. Use Firebase Phone Auth ID token.',
+      );
     }
-    if (!/^[6-9]/.test(cleanPhone)) {
-      throw new BadRequestException(errorMsg);
-    }
-    if (/^([0-9])\1{9}$/.test(cleanPhone)) {
-      throw new BadRequestException(errorMsg);
-    }
-    if (cleanPhone === '1234567890' || cleanPhone === '0123456789') {
-      throw new BadRequestException(errorMsg);
-    }
-    return cleanPhone;
+  }
+
+  private normalizeDigits(phone: string): string {
+    return phone.replace(/[^0-9]/g, '').slice(-10);
   }
 
   getOtpForTesting(phoneNumber: string): string | undefined {
-    if (process.env.NODE_ENV === 'production') {
-      throw new UnauthorizedException('Test OTP retrieval is disabled in production.');
+    if (process.env.NODE_ENV !== 'test') {
+      throw new UnauthorizedException('Test OTP retrieval is disabled outside test environment');
     }
-    const clean = this.cleanAndValidatePhone(phoneNumber);
-    return this.otpStore.get(clean)?.code;
+    const cleanPhone = this.normalizeDigits(phoneNumber);
+    return this.otpStore.get(cleanPhone)?.otp;
   }
 
   async sendOtp(phoneNumber: string) {
-    const cleanPhone = this.cleanAndValidatePhone(phoneNumber);
+    this.ensureDevOtpEnabled();
 
-    // Cryptographically secure 6-digit numeric OTP generation (Node.js crypto.randomInt)
-    const code = randomInt(100000, 1000000).toString();
+    if (!phoneNumber || typeof phoneNumber !== 'string') {
+      throw new BadRequestException('Valid mobile number is required');
+    }
+
+    const cleanPhone = this.normalizeDigits(phoneNumber);
+    if (
+      cleanPhone.length < 10 ||
+      !/^[6-9]\d{9}$/.test(cleanPhone) ||
+      /^(\d)\1{9}$/.test(cleanPhone)
+    ) {
+      throw new BadRequestException(
+        'Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.',
+      );
+    }
+
+    const otp = randomInt(100000, 999999).toString();
     this.otpStore.set(cleanPhone, {
-      code,
-      expiresAt: Date.now() + 5 * 60 * 1000, // 5 min expiry
+      otp,
+      expiresAt: Date.now() + 5 * 60 * 1000,
       attempts: 0,
     });
 
-    // Mask phone number in logs and NEVER log OTP codes or secrets
-    const maskedPhone = `+91 ******${cleanPhone.slice(-4)}`;
-    this.logger.log(`Driver OTP generated for mobile: ${maskedPhone}`);
-
-    // Verify configured SMS provider (e.g. FAST2SMS, TWILIO)
-    const hasSmsGateway = Boolean(process.env.FAST2SMS_API_KEY || process.env.TWILIO_ACCOUNT_SID);
-    if (!hasSmsGateway) {
-      this.logger.warn(
-        `SMS gateway is not configured (FAST2SMS_API_KEY or TWILIO_ACCOUNT_SID missing). OTP delivery to carrier skipped in development.`,
-      );
+    if (process.env.NODE_ENV === 'development') {
+      this.logger.log(`Dev driver OTP generated for ${cleanPhone}: ${otp}`);
     }
 
     return {
       success: true,
-      message: hasSmsGateway
-        ? `OTP sent successfully to +91 ${cleanPhone}`
-        : `Verification OTP generated for +91 ${cleanPhone}. (SMS provider gateway not configured in development environment).`,
-      countdownSeconds: 30,
+      message: 'Verification OTP dispatched',
+      expiresInSeconds: 300,
     };
   }
 
   async verifyOtp(phoneNumber: string, otp: string) {
-    const cleanPhone = this.cleanAndValidatePhone(phoneNumber);
-    if (!otp || typeof otp !== 'string' || !/^\d{6}$/.test(otp.trim())) {
-      throw new BadRequestException('Please enter a valid 6-digit numeric OTP');
+    this.ensureDevOtpEnabled();
+    this.ensureDbConnected();
+
+    if (!phoneNumber || !otp) {
+      throw new BadRequestException('Phone number and OTP are required');
     }
 
+    const cleanPhone = this.normalizeDigits(phoneNumber);
+    const trimmedOtp = otp.trim();
     const record = this.otpStore.get(cleanPhone);
-    if (!record) {
-      throw new UnauthorizedException('No active OTP request found for this mobile number. Request a new OTP.');
-    }
 
+    if (!record) {
+      throw new UnauthorizedException('No active OTP request found. Please request a new OTP.');
+    }
     if (Date.now() > record.expiresAt) {
       this.otpStore.delete(cleanPhone);
-      throw new BadRequestException('OTP has expired. Please request a new OTP.');
+      throw new UnauthorizedException('OTP has expired. Please request a new OTP.');
     }
 
     record.attempts += 1;
     if (record.attempts > 5) {
       this.otpStore.delete(cleanPhone);
-      throw new BadRequestException('Too many failed OTP attempts. Request a new OTP.');
+      throw new BadRequestException('Too many failed verification attempts. Please request a new OTP.');
     }
 
-    if (record.code !== otp.trim()) {
-      throw new UnauthorizedException('Invalid OTP. Please check the code and try again.');
+    if (record.otp !== trimmedOtp) {
+      throw new UnauthorizedException('Invalid OTP code entered.');
     }
 
-    // Clear OTP after successful verification
     this.otpStore.delete(cleanPhone);
 
-    const store = this.prisma.getStore();
-    let driver = store.drivers.find(
-      (d) =>
-        d.phone.replace(/[^0-9]/g, '').endsWith(cleanPhone.slice(-10)) ||
-        d.phone.includes(cleanPhone),
-    );
+    const formattedPhone = `+91 ${cleanPhone.slice(0, 5)} ${cleanPhone.slice(5)}`;
+    const candidates = buildPhoneLookupCandidates(formattedPhone);
 
-    let driverUser = store.users.find(
-      (u) =>
-        u.role === 'DRIVER' &&
-        u.phone &&
-        u.phone.replace(/[^0-9]/g, '').endsWith(cleanPhone.slice(-10)),
-    );
+    let user = await this.prisma.user.findFirst({
+      where: {
+        OR: candidates.map((phone) => ({ phone })),
+      },
+      include: { driverProfile: true },
+    });
 
-    // If new delivery partner, initialize clean onboarding state
-    if (!driver) {
-      const newDriverId = `KC-DRV-${randomInt(1000, 10000)}`;
-      const newUserId = `usr-drv-${Date.now()}`;
-
-      driverUser = {
-        id: newUserId,
-        firebaseUid: `fb-${cleanPhone}`,
-        phone: `+91 ${cleanPhone.slice(-10)}`,
-        email: `driver.${cleanPhone.slice(-4)}@kudicart.in`,
-        name: 'New Delivery Partner',
-        avatar: null,
-        role: 'DRIVER',
-        status: 'ACTIVE',
-        createdAt: new Date().toISOString(),
-      };
-      store.users.push(driverUser);
-
-      driver = {
-        id: newDriverId,
-        userId: newUserId,
-        fullName: 'New Delivery Partner',
-        name: 'New Driver',
-        role: 'Delivery Partner',
-        status: 'Pending Verification',
-        phone: `+91 ${cleanPhone.slice(-10)}`,
-        email: driverUser.email,
-        tier: 'Bronze Tier',
-        avatarInitial: 'DP',
-        aadhaarNumber: '',
-        panNumber: '',
-        dob: '',
-        licenseNumber: '',
-        workPreference: 'PART_TIME',
-        rating: 5.0,
-        completedDeliveries: 0,
-        isOnline: false,
-        kycStatus: 'NOT_SUBMITTED',
-        vehicle: {
-          registrationNumber: '',
-          vehicleType: 'Bike',
-          make: '',
-          model: '',
-          rcStatus: 'Under review',
-        },
-        documents: {
-          aadhaar: { front: null, back: null, status: 'PENDING' },
-          pan: { front: null, back: null, status: 'PENDING' },
-          drivingLicence: { front: null, back: null, status: 'PENDING' },
-          vehicleRc: { front: null, back: null, status: 'PENDING' },
-          selfie: null,
-        },
-        workSummary: {
-          totalEarnings: 0,
-          loginHours: '0h',
-          ordersDone: 0,
-          totalSlot: '09:00 AM — 06:00 PM',
-          workingDays: '0 / 6 days',
-        },
-        currentLocation: {
-          latitude: 12.9716,
-          longitude: 77.5946,
-          heading: 0,
-          updatedAt: new Date().toISOString(),
-        },
-      };
-      store.drivers.push(driver);
+    if (user && user.status !== 'ACTIVE') {
+      throw new ForbiddenException('Driver account is inactive or suspended');
     }
 
-    const payload = {
-      uid: driver.userId,
-      sub: driver.userId,
-      phone_number: driver.phone,
-      email: driver.email,
-      name: driver.fullName,
-      role: Role.DRIVER,
+    if (user && user.role !== Role.DRIVER) {
+      throw new ForbiddenException(
+        `This phone is registered with role ${user.role}, not DRIVER.`,
+      );
+    }
+
+    if (!user) {
+      const userId = `usr-drv-${randomUUID().slice(0, 8)}`;
+      const driverId = `drv-${randomUUID().slice(0, 8)}`;
+      user = await this.prisma.user.create({
+        data: {
+          id: userId,
+          firebaseUid: `fb-${userId}`,
+          name: `Rider ${cleanPhone.slice(-4)}`,
+          phone: formattedPhone,
+          email: null,
+          role: Role.DRIVER,
+          status: 'ACTIVE',
+          driverProfile: {
+            create: {
+              id: driverId,
+              fullName: `Rider ${cleanPhone.slice(-4)}`,
+              phone: formattedPhone,
+              workPreference: 'FULL_TIME',
+              tier: 'Starter',
+              rating: 5.0,
+              completedDeliveries: 0,
+              isOnline: false,
+              kycStatus: 'PENDING',
+            },
+          },
+        },
+        include: { driverProfile: true },
+      });
+    } else if (!user.driverProfile) {
+      const driverProfile = await this.prisma.driverProfile.create({
+        data: {
+          id: `drv-${randomUUID().slice(0, 8)}`,
+          userId: user.id,
+          fullName: user.name,
+          phone: user.phone || formattedPhone,
+          workPreference: 'FULL_TIME',
+          tier: 'Starter',
+          rating: 5.0,
+          completedDeliveries: 0,
+          isOnline: false,
+          kycStatus: 'PENDING',
+        },
+      });
+      user = { ...user, driverProfile };
+    }
+
+    const driver = user.driverProfile!;
+    const token = createJwtToken({
+      sub: user.id,
       driverId: driver.id,
-      kycStatus: driver.kycStatus,
-    };
-    const token = createJwtToken(payload);
+      phone: user.phone,
+      email: user.email,
+      name: driver.fullName || user.name,
+      role: Role.DRIVER,
+    });
 
     return {
       success: true,
       token,
       role: Role.DRIVER,
-      kycStatus: driver.kycStatus,
+      driverId: driver.id,
       user: {
-        id: driver.userId,
+        id: user.id,
         driverId: driver.id,
-        name: driver.name,
-        fullName: driver.fullName,
+        name: driver.fullName,
         phone: driver.phone,
-        email: driver.email,
+        email: user.email,
         kycStatus: driver.kycStatus,
-        isOnline: driver.isOnline,
-        workPreference: driver.workPreference,
+        tier: driver.tier,
+        role: Role.DRIVER,
       },
     };
   }
@@ -244,146 +226,156 @@ export class DriverAuthService {
     if (!idToken) {
       throw new BadRequestException('Firebase ID token is required');
     }
-
     if (!this.firebaseAdmin) {
-      throw new UnauthorizedException('Firebase authentication is not configured on this server');
+      throw new UnauthorizedException('Firebase authentication service is not configured');
     }
+    this.ensureDbConnected();
 
     const decoded = await this.firebaseAdmin.verifyIdToken(idToken);
-    const store = this.prisma.getStore();
-
-    const cleanPhone = decoded.phoneNumber
-      ? decoded.phoneNumber.replace(/[^0-9]/g, '').slice(-10)
-      : '';
-
-    let driver = store.drivers.find(
-      (d) =>
-        (d.userId && d.userId === decoded.uid) ||
-        (cleanPhone && d.phone && d.phone.replace(/[^0-9]/g, '').endsWith(cleanPhone)),
-    );
-
-    let driverUser = store.users.find(
-      (u) =>
-        u.firebaseUid === decoded.uid ||
-        (cleanPhone && u.phone && u.phone.replace(/[^0-9]/g, '').endsWith(cleanPhone)),
-    );
-
-    if (!driverUser) {
-      const newUserId = `usr-drv-${Date.now()}`;
-      driverUser = {
-        id: newUserId,
-        firebaseUid: decoded.uid,
-        phone: decoded.phoneNumber || '+91 98765 43210',
-        email: decoded.email || `driver.${decoded.uid.substring(0, 8)}@kudicart.in`,
-        name: decoded.name || 'New Delivery Partner',
-        avatar: null,
-        role: 'DRIVER',
-        status: 'ACTIVE',
-        createdAt: new Date().toISOString(),
-      };
-      store.users.push(driverUser);
+    if (!decoded || !decoded.uid) {
+      throw new UnauthorizedException('Invalid Firebase ID token');
     }
 
-    if (!driver) {
-      const newDriverId = `KC-DRV-${randomInt(1000, 10000)}`;
-      driver = {
-        id: newDriverId,
-        userId: driverUser.id,
-        fullName: driverUser.name,
-        name: driverUser.name,
-        role: 'Delivery Partner',
-        status: 'Pending Verification',
-        phone: driverUser.phone,
-        email: driverUser.email,
-        tier: 'Bronze Tier',
-        avatarInitial: 'DP',
-        aadhaarNumber: '',
-        panNumber: '',
-        dob: '',
-        licenseNumber: '',
-        workPreference: 'PART_TIME',
-        rating: 5.0,
-        completedDeliveries: 0,
-        isOnline: false,
-        kycStatus: 'NOT_SUBMITTED',
-        vehicle: {
-          registrationNumber: '',
-          vehicleType: 'Bike',
-          make: '',
-          model: '',
-          rcStatus: 'Under review',
-        },
-        documents: {
-          aadhaar: { front: null, back: null, status: 'PENDING' },
-          pan: { front: null, back: null, status: 'PENDING' },
-          drivingLicence: { front: null, back: null, status: 'PENDING' },
-          vehicleRc: { front: null, back: null, status: 'PENDING' },
-          selfie: null,
-        },
-        workSummary: {
-          totalEarnings: 0,
-          loginHours: '0h',
-          ordersDone: 0,
-          totalSlot: '09:00 AM — 06:00 PM',
-          workingDays: '0 / 6 days',
-        },
-        currentLocation: {
-          latitude: 12.9716,
-          longitude: 77.5946,
-          heading: 0,
-          updatedAt: new Date().toISOString(),
-        },
-      };
-      store.drivers.push(driver);
+    const normalizedEmail = decoded.email ? decoded.email.trim().toLowerCase() : null;
+    const normalizedPhone = normalizeStoredPhone(decoded.phoneNumber);
+    const phoneCandidates = buildPhoneLookupCandidates(normalizedPhone);
+
+    const orClauses: any[] = [{ firebaseUid: decoded.uid }];
+    if (normalizedEmail) {
+      orClauses.push({ email: normalizedEmail });
+    }
+    if (phoneCandidates.length > 0) {
+      orClauses.push(...phoneCandidates.map((p) => ({ phone: p })));
     }
 
-    const payload = {
-      uid: driver.userId,
-      sub: driver.userId,
-      phone_number: driver.phone,
-      email: driver.email,
-      name: driver.fullName,
-      role: Role.DRIVER,
+    let user = await this.prisma.user.findFirst({
+      where: { OR: orClauses },
+      include: { driverProfile: true },
+    });
+
+    if (user && user.status !== 'ACTIVE') {
+      throw new ForbiddenException('Driver account is inactive or suspended');
+    }
+    if (user && user.role !== Role.DRIVER) {
+      throw new ForbiddenException(
+        `Account is registered as ${user.role} and cannot sign in to the Driver portal`,
+      );
+    }
+
+    let isNewDriver = false;
+    if (!user) {
+      isNewDriver = true;
+      const userId = `usr-drv-${randomUUID().slice(0, 8)}`;
+      const driverId = `drv-${randomUUID().slice(0, 8)}`;
+      const displayName = decoded.name?.trim() || 'Affordz Rider';
+      user = await this.prisma.user.create({
+        data: {
+          id: userId,
+          firebaseUid: decoded.uid,
+          name: displayName,
+          phone: normalizedPhone,
+          email: normalizedEmail,
+          avatar: decoded.picture || null,
+          role: Role.DRIVER,
+          status: 'ACTIVE',
+          driverProfile: {
+            create: {
+              id: driverId,
+              fullName: displayName,
+              phone: normalizedPhone || '',
+              workPreference: 'FULL_TIME',
+              tier: 'Starter',
+              rating: 5.0,
+              completedDeliveries: 0,
+              isOnline: false,
+              kycStatus: 'PENDING',
+            },
+          },
+        },
+        include: { driverProfile: true },
+      });
+    } else {
+      if (user.firebaseUid.startsWith('fb-') && decoded.uid !== user.firebaseUid) {
+        const uidTaken = await this.prisma.user.findUnique({ where: { firebaseUid: decoded.uid } });
+        if (!uidTaken) {
+          user = await this.prisma.user.update({
+            where: { id: user.id },
+            data: { firebaseUid: decoded.uid },
+            include: { driverProfile: true },
+          });
+        }
+      }
+      if (!user.driverProfile) {
+        isNewDriver = true;
+        const driverProfile = await this.prisma.driverProfile.create({
+          data: {
+            id: `drv-${randomUUID().slice(0, 8)}`,
+            userId: user.id,
+            fullName: user.name,
+            phone: user.phone || normalizedPhone || '',
+            workPreference: 'FULL_TIME',
+            tier: 'Starter',
+            rating: 5.0,
+            completedDeliveries: 0,
+            isOnline: false,
+            kycStatus: 'PENDING',
+          },
+        });
+        user = { ...user, driverProfile };
+      }
+    }
+
+    const driver = user.driverProfile!;
+    const token = createJwtToken({
+      sub: user.id,
       driverId: driver.id,
-      kycStatus: driver.kycStatus,
-    };
-    const token = createJwtToken(payload);
+      phone: user.phone,
+      email: user.email,
+      name: driver.fullName || user.name,
+      role: Role.DRIVER,
+    });
 
     return {
       success: true,
       token,
       role: Role.DRIVER,
-      kycStatus: driver.kycStatus,
+      driverId: driver.id,
+      isNewDriver,
       user: {
-        id: driver.userId,
+        id: user.id,
         driverId: driver.id,
-        name: driver.name,
-        fullName: driver.fullName,
-        phone: driver.phone,
-        email: driver.email,
+        firebaseUid: user.firebaseUid,
+        name: driver.fullName,
+        phone: driver.phone || user.phone,
+        email: user.email,
         kycStatus: driver.kycStatus,
-        isOnline: driver.isOnline,
-        workPreference: driver.workPreference,
+        tier: driver.tier,
+        role: Role.DRIVER,
       },
     };
   }
 
-  async getAccountStatus(driverId: string) {
-    const store = this.prisma.getStore();
-    const driver = store.drivers.find((d) => d.id === driverId || d.userId === driverId);
+  async getAccountStatus(driverOrUserId: string) {
+    this.ensureDbConnected();
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { OR: [{ id: driverOrUserId }, { userId: driverOrUserId }] },
+      include: { user: true },
+    });
+
     if (!driver) {
       throw new UnauthorizedException('Driver account not found');
     }
 
     return {
-      success: true,
       driverId: driver.id,
+      userId: driver.userId,
       fullName: driver.fullName,
       kycStatus: driver.kycStatus,
       isApproved: driver.kycStatus === 'APPROVED',
       isOnline: driver.isOnline,
-      workPreference: driver.workPreference,
-      rejectionReason: driver.rejectionReason || null,
+      rating: driver.rating,
+      tier: driver.tier,
+      status: driver.user?.status || 'ACTIVE',
     };
   }
 }
