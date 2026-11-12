@@ -16,6 +16,7 @@ import {
 } from '../../common/contracts/order-contracts';
 import { PrismaService } from '../../prisma/prisma.service';
 import { FirebaseAdminService } from '../auth/firebase-admin.service';
+import { RedisService } from '../../common/redis/redis.service';
 
 interface TrackingClient {
   ws: WebSocket;
@@ -43,6 +44,9 @@ export class TrackingRealtimeGateway
   implements OnApplicationBootstrap, OnModuleDestroy
 {
   private readonly logger = new Logger(TrackingRealtimeGateway.name);
+  public readonly instanceId = `gw_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  private readonly REDIS_TRACKING_CHANNEL = 'kudicart:tracking:events';
+
   private wss?: WebSocketServer;
   private heartbeatInterval?: NodeJS.Timeout;
   private upgradeAttached = false;
@@ -66,6 +70,7 @@ export class TrackingRealtimeGateway
     @Optional() private readonly httpAdapterHost?: HttpAdapterHost,
     @Optional() private readonly prisma?: PrismaService,
     @Optional() private readonly firebaseAdmin?: FirebaseAdminService,
+    @Optional() private readonly redisService?: RedisService,
   ) {}
 
   onApplicationBootstrap() {
@@ -87,6 +92,24 @@ export class TrackingRealtimeGateway
       this.logger.log(
         'WebSocket tracking gateway initialized in headless/noServer mode (/ws/tracking)',
       );
+    }
+
+    // Subscribe to distributed Redis Pub/Sub for cross-instance tracking
+    if (this.redisService) {
+      void this.redisService
+        .subscribe(this.REDIS_TRACKING_CHANNEL, (_channel, rawMessage) => {
+          this.handleDistributedTrackingMessage(rawMessage);
+        })
+        .then(() => {
+          this.logger.log(
+            `Gateway ${this.instanceId} subscribed to Redis distributed tracking channel [${this.REDIS_TRACKING_CHANNEL}]`,
+          );
+        })
+        .catch((err) => {
+          this.logger.warn(
+            `Failed to subscribe gateway to Redis tracking channel: ${err.message}`,
+          );
+        });
     }
 
     this.heartbeatInterval = setInterval(() => {
@@ -111,6 +134,10 @@ export class TrackingRealtimeGateway
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = undefined;
+    }
+
+    if (this.redisService) {
+      void this.redisService.unsubscribe(this.REDIS_TRACKING_CHANNEL).catch(() => {});
     }
 
     for (const t of this.pendingCloseTimers) {
@@ -141,6 +168,47 @@ export class TrackingRealtimeGateway
     if (this.wss) {
       this.wss.close();
       this.wss = undefined;
+    }
+  }
+
+  private handleDistributedTrackingMessage(rawMessage: string) {
+    try {
+      const envelope = JSON.parse(rawMessage);
+      if (!envelope || envelope.sourceInstanceId === this.instanceId) {
+        return; // Ignore events published by self
+      }
+
+      const orderId = envelope.orderId;
+      if (!orderId) return;
+
+      const clients = this.rooms.get(orderId);
+      if (!clients || clients.size === 0) {
+        return; // No local clients connected to this order on this instance
+      }
+
+      // Check sequence number to drop out-of-order updates
+      const currentSeq = this.orderSeqMap.get(orderId) || 0;
+      if (envelope.seq && envelope.seq < currentSeq) {
+        return;
+      }
+      if (envelope.seq) {
+        this.orderSeqMap.set(orderId, envelope.seq);
+      }
+
+      // Deliver message to local clients
+      for (const client of clients) {
+        this.sendJson(client.ws, envelope.payload);
+      }
+
+      // If terminal status update, schedule room close timer for local clients
+      if (
+        envelope.type === 'ORDER_STATUS_UPDATE' &&
+        TERMINAL_ORDER_STATUSES.includes(envelope.payload?.status as OrderStatus)
+      ) {
+        this.scheduleTerminalClose(orderId, envelope.payload.status);
+      }
+    } catch (err: any) {
+      this.logger.warn(`Error handling distributed tracking message: ${err.message}`);
     }
   }
 
@@ -278,6 +346,7 @@ export class TrackingRealtimeGateway
       type: 'CONNECTED',
       path: '/ws/tracking',
       authenticated: Boolean(ctx.userId),
+      instanceId: this.instanceId,
       timestamp: new Date().toISOString(),
     });
   }
@@ -448,6 +517,7 @@ export class TrackingRealtimeGateway
           where: { id: ctx.orderId },
           select: { id: true, status: true, driverProfileId: true },
         });
+
         if (!order || !LIVE_TRACKING_ACTIVE_STATUSES.includes(order.status as OrderStatus)) {
           return;
         }
@@ -490,12 +560,10 @@ export class TrackingRealtimeGateway
       return;
     }
 
-    const clients = this.rooms.get(orderId);
-    if (!clients || clients.size === 0) return;
-
+    const seq = this.nextSeq(orderId);
     const payload = {
       type: 'DRIVER_LOCATION',
-      seq: this.nextSeq(orderId),
+      seq,
       orderId,
       latitude: location.latitude,
       longitude: location.longitude,
@@ -507,8 +575,26 @@ export class TrackingRealtimeGateway
       isStale: location.isStale ?? false,
     };
 
-    for (const client of clients) {
-      this.sendJson(client.ws, payload);
+    // 1. Deliver to local clients in this instance
+    const clients = this.rooms.get(orderId);
+    if (clients && clients.size > 0) {
+      for (const client of clients) {
+        this.sendJson(client.ws, payload);
+      }
+    }
+
+    // 2. Publish to Redis Pub/Sub for peer backend instances
+    if (this.redisService) {
+      const envelope = {
+        sourceInstanceId: this.instanceId,
+        type: 'DRIVER_LOCATION',
+        orderId,
+        seq,
+        payload,
+      };
+      void this.redisService.publish(this.REDIS_TRACKING_CHANNEL, envelope).catch((err) => {
+        this.logger.warn(`Failed to publish location update to Redis: ${err.message}`);
+      });
     }
   }
 
@@ -518,9 +604,7 @@ export class TrackingRealtimeGateway
     payload?: Record<string, any>,
   ) {
     if (!orderId) return;
-    const clients = this.rooms.get(orderId);
-    if (!clients || clients.size === 0) return;
-
+    const seq = this.nextSeq(orderId);
     const rawEvent = payload?.event || payload?.eventType;
     const messageType =
       rawEvent === 'TRY_AND_BUY_UPDATED'
@@ -531,36 +615,59 @@ export class TrackingRealtimeGateway
 
     const message = {
       type: messageType,
-      seq: this.nextSeq(orderId),
+      seq,
       orderId,
       status,
       ...(payload || {}),
       timestamp: new Date().toISOString(),
     };
 
-    for (const client of clients) {
-      this.sendJson(client.ws, message);
+    // 1. Deliver to local clients in this instance
+    const clients = this.rooms.get(orderId);
+    if (clients && clients.size > 0) {
+      for (const client of clients) {
+        this.sendJson(client.ws, message);
+      }
     }
 
-    if (TERMINAL_ORDER_STATUSES.includes(status as OrderStatus)) {
-      const closeTimer = setTimeout(() => {
-        this.pendingCloseTimers.delete(closeTimer);
-        const roomClients = this.rooms.get(orderId);
-        if (!roomClients) return;
-        for (const client of Array.from(roomClients)) {
-          try {
-            client.ws.close(1000, `Order reached terminal state ${status}`);
-          } catch {
-            // ignore close error
-          }
-          this.removeClient(client.ws);
-        }
-        this.rooms.delete(orderId);
-        this.orderSeqMap.delete(orderId);
-      }, 250);
-      closeTimer.unref();
-      this.pendingCloseTimers.add(closeTimer);
+    // 2. Publish to Redis Pub/Sub for peer backend instances
+    if (this.redisService) {
+      const envelope = {
+        sourceInstanceId: this.instanceId,
+        type: messageType,
+        orderId,
+        seq,
+        payload: message,
+      };
+      void this.redisService.publish(this.REDIS_TRACKING_CHANNEL, envelope).catch((err) => {
+        this.logger.warn(`Failed to publish status update to Redis: ${err.message}`);
+      });
     }
+
+    // 3. Handle terminal order close
+    if (TERMINAL_ORDER_STATUSES.includes(status as OrderStatus)) {
+      this.scheduleTerminalClose(orderId, status);
+    }
+  }
+
+  private scheduleTerminalClose(orderId: string, status: string) {
+    const closeTimer = setTimeout(() => {
+      this.pendingCloseTimers.delete(closeTimer);
+      const roomClients = this.rooms.get(orderId);
+      if (!roomClients) return;
+      for (const client of Array.from(roomClients)) {
+        try {
+          client.ws.close(1000, `Order reached terminal state ${status}`);
+        } catch {
+          // ignore close error
+        }
+        this.removeClient(client.ws);
+      }
+      this.rooms.delete(orderId);
+      this.orderSeqMap.delete(orderId);
+    }, 250);
+    closeTimer.unref();
+    this.pendingCloseTimers.add(closeTimer);
   }
 
   private removeClient(ws: WebSocket) {

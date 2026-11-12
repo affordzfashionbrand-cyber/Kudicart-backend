@@ -30,9 +30,11 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { VendorController } from './modules/vendor/vendor.controller';
 import { VendorService } from './modules/vendor/vendor.service';
 import { TrackingModule } from './modules/orders/tracking.module';
+import { RedisModule } from './common/redis/redis.module';
 
 @Module({
   imports: [
+    RedisModule,
     PrismaModule,
     OrdersDomainModule,
     DriverModule,
@@ -70,6 +72,7 @@ import { TrackingModule } from './modules/orders/tracking.module';
     VendorService,
   ],
   exports: [
+    RedisModule,
     PrismaModule,
     OrdersDomainModule,
     DriverModule,

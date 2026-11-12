@@ -39,8 +39,14 @@ export class DriverNotificationsService {
       take: 100,
     });
 
+    const formatted = notifications.map((n) => ({
+      ...n,
+      read: n.isRead,
+      timestamp: n.createdAt.toISOString(),
+    }));
+
     const unreadCount = notifications.filter((n) => !n.isRead).length;
-    return { notifications, unreadCount };
+    return { notifications: formatted, unreadCount };
   }
 
   async markAsRead(driverId: string, notificationId: string) {

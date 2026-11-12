@@ -1,14 +1,26 @@
 import * as crypto from 'crypto';
 
 function getOtpSecret(): string {
+  const isProduction =
+    process.env.APP_ENV === 'production' || process.env.NODE_ENV === 'production';
   const secret = process.env.ORDER_OTP_SECRET || process.env.JWT_SECRET;
-  if (!secret) {
-    if (process.env.APP_ENV === 'production' || process.env.NODE_ENV === 'production') {
-      throw new Error('FATAL: ORDER_OTP_SECRET or JWT_SECRET is required in production mode');
+
+  if (isProduction) {
+    if (!secret || typeof secret !== 'string' || secret.trim().length === 0) {
+      throw new Error(
+        'FATAL: ORDER_OTP_SECRET or JWT_SECRET environment variable is strictly required in production mode',
+      );
     }
-    return 'affordz-order-otp-dev-secret-change-in-prod';
+    if (secret.length < 32) {
+      throw new Error(
+        'FATAL: ORDER_OTP_SECRET or JWT_SECRET must be at least 32 characters in length in production mode',
+      );
+    }
+    return secret;
   }
-  return secret;
+
+  // Non-production isolated secret
+  return secret || 'affordz_dev_testing_only_order_otp_secret_not_for_production';
 }
 
 /**

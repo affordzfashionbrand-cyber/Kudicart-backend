@@ -55,4 +55,88 @@ describe('QueueService', () => {
     expect(result.scheduledDelayMs).toBe(delayMs);
     expect(['queued', 'queued-in-process']).toContain(result.status);
   });
+
+  describe('getRedisConnectionOptions', () => {
+    const originalEnv = { ...process.env };
+
+    afterEach(() => {
+      process.env = { ...originalEnv };
+    });
+
+    it('returns null when neither REDIS_HOST nor REDIS_URL is configured', () => {
+      delete process.env.REDIS_HOST;
+      delete process.env.REDIS_URL;
+      const { getRedisConnectionOptions } = require('./queue.constants');
+      expect(getRedisConnectionOptions()).toBeNull();
+    });
+
+    it('correctly configures plain Redis with REDIS_HOST', () => {
+      process.env.REDIS_HOST = '127.0.0.1';
+      process.env.REDIS_PORT = '6379';
+      delete process.env.REDIS_TLS;
+      delete process.env.REDIS_PASSWORD;
+      delete process.env.REDIS_URL;
+
+      const { getRedisConnectionOptions } = require('./queue.constants');
+      const config = getRedisConnectionOptions();
+
+      expect(config).toBeDefined();
+      expect(config?.host).toBe('127.0.0.1');
+      expect(config?.port).toBe(6379);
+      expect(config?.tls).toBeUndefined();
+      expect(config?.maxRetriesPerRequest).toBeNull();
+    });
+
+    it('enables TLS and credentials when REDIS_TLS=true and credentials provided', () => {
+      process.env.REDIS_HOST = 'kudicart-redis.production.cache.amazonaws.com';
+      process.env.REDIS_PORT = '6380';
+      process.env.REDIS_PASSWORD = 'super-secret-pass';
+      process.env.REDIS_USERNAME = 'kudicart-app';
+      process.env.REDIS_TLS = 'true';
+      delete process.env.REDIS_URL;
+
+      const { getRedisConnectionOptions } = require('./queue.constants');
+      const config = getRedisConnectionOptions();
+
+      expect(config).toBeDefined();
+      expect(config?.host).toBe('kudicart-redis.production.cache.amazonaws.com');
+      expect(config?.port).toBe(6380);
+      expect(config?.password).toBe('super-secret-pass');
+      expect(config?.username).toBe('kudicart-app');
+      expect(config?.tls).toEqual({});
+      expect(config?.maxRetriesPerRequest).toBeNull();
+    });
+
+    it('parses rediss:// TLS protocol from REDIS_URL', () => {
+      delete process.env.REDIS_HOST;
+      delete process.env.REDIS_TLS;
+      process.env.REDIS_URL = 'rediss://default:mypassword@redis-cloud.net:16379';
+
+      const { getRedisConnectionOptions } = require('./queue.constants');
+      const config = getRedisConnectionOptions();
+
+      expect(config).toBeDefined();
+      expect(config?.host).toBe('redis-cloud.net');
+      expect(config?.port).toBe(16379);
+      expect(config?.username).toBe('default');
+      expect(config?.password).toBe('mypassword');
+      expect(config?.tls).toEqual({});
+      expect(config?.maxRetriesPerRequest).toBeNull();
+    });
+
+    it('parses plain redis:// protocol from REDIS_URL without TLS', () => {
+      delete process.env.REDIS_HOST;
+      delete process.env.REDIS_TLS;
+      process.env.REDIS_URL = 'redis://localhost:6379';
+
+      const { getRedisConnectionOptions } = require('./queue.constants');
+      const config = getRedisConnectionOptions();
+
+      expect(config).toBeDefined();
+      expect(config?.host).toBe('localhost');
+      expect(config?.port).toBe(6379);
+      expect(config?.tls).toBeUndefined();
+      expect(config?.maxRetriesPerRequest).toBeNull();
+    });
+  });
 });

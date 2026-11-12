@@ -1,12 +1,13 @@
 import { Module, Global } from '@nestjs/common';
 import { PrismaModule } from '../../prisma/prisma.module';
+import { RedisModule } from '../../common/redis/redis.module';
 import { FirebaseAdminService } from '../auth/firebase-admin.service';
 import { GoogleRoutesService } from './google-routes.service';
 import { TrackingRealtimeGateway } from './tracking-realtime.gateway';
 
 @Global()
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, RedisModule],
   providers: [FirebaseAdminService, GoogleRoutesService, TrackingRealtimeGateway],
   exports: [GoogleRoutesService, TrackingRealtimeGateway],
 })

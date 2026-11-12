@@ -12,6 +12,7 @@ export interface PushNotificationPayload {
   category?: 'ORDER' | 'SYSTEM' | 'DELIVERY' | 'PAYMENT' | 'ALERT';
   data?: Record<string, string>;
   imageUrl?: string;
+  channelId?: string;
 }
 
 @Injectable()
@@ -96,11 +97,18 @@ export class NotificationsService {
     }
 
     try {
+      const channelId =
+        payload.channelId ||
+        (payload.recipientRole === Role.DRIVER
+          ? 'kudicart_driver_alerts'
+          : 'affordz_critical_alerts');
+
       const fcmResult = await this.firebaseAdmin.sendMulticastPush(targetTokens, {
         title: payload.title,
         body: payload.body,
         data: safeData,
         imageUrl: payload.imageUrl,
+        channelId,
       });
 
       if (fcmResult.invalidTokens && fcmResult.invalidTokens.length > 0) {

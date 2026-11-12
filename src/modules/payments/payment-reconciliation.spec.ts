@@ -273,4 +273,59 @@ describe('PaymentReconciliationService (15m Expiry, Stock Restore, Refunds)', ()
     expect(refundTx?.status).toBe('REFUNDED');
     expect(refundTx?.amount).toBe(1155);
   });
+
+  it('handles concurrent reconcile() calls safely without duplicate refund submissions', async () => {
+    const suffix = Math.random().toString(36).slice(2, 6);
+    const orderId = `${runId}_concurrent_rfnd_${suffix}`;
+    const paymentId = `pay_concurrent_${runId}_${suffix}`;
+
+    createdOrderIds.push(orderId);
+
+    await prisma.order.create({
+      data: {
+        id: orderId,
+        orderNumber: `KC-CRF-${suffix}`,
+        customerId: 'usr-1',
+        vendorId: 'vend-1',
+        addressId: 'addr-1',
+        fulfillmentType: FulfillmentType.DARK_STORE,
+        status: OrderStatus.CANCELLED,
+        paymentMethod: PaymentMethod.RAZORPAY,
+        paymentStatus: PaymentStatus.REFUND_PENDING,
+        razorpayPaymentId: paymentId,
+        itemTotal: 2000,
+        taxes: 100,
+        grandTotal: 2100,
+        version: 1,
+      },
+    });
+
+    const refundSpy = jest.spyOn(razorpayClient, 'refundPayment');
+    const initialCallCount = refundSpy.mock.calls.length;
+
+    // Execute two concurrent reconciliation processes simultaneously
+    const [resA, resB] = await Promise.all([
+      service.reconcile(),
+      service.reconcile(),
+    ]);
+
+    // Exactly one refund request should be dispatched to Razorpay for this order
+    const callsForThisPayment = refundSpy.mock.calls.slice(initialCallCount).filter(
+      (args) => args[0]?.paymentId === paymentId,
+    );
+    expect(callsForThisPayment).toHaveLength(1);
+
+    // Exactly 1 refund record must exist in the database
+    const refundTransactions = await prisma.paymentTransaction.findMany({
+      where: { orderId, transactionType: 'REFUND' },
+    });
+    expect(refundTransactions).toHaveLength(1);
+    expect(refundTransactions[0].status).toBe('REFUNDED');
+
+    // Order state must be accurately REFUNDED
+    const finalOrder = await prisma.order.findUnique({ where: { id: orderId } });
+    expect(finalOrder?.paymentStatus).toBe('REFUNDED');
+
+    refundSpy.mockRestore();
+  });
 });

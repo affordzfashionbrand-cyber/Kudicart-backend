@@ -5,6 +5,11 @@
   "author": "KudiCart Engineering Team",
   "private": true,
   "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.0.0 <23.0.0",
+    "npm": ">=10.0.0"
+  },
+  "packageManager": "npm@10.9.2",
   "scripts": {
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\"",
@@ -12,16 +17,18 @@
     "start:dev": "nest start --watch",
     "dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main",
+    "start:prod": "node dist/src/main",
     "start:worker": "ts-node src/worker.ts",
-    "start:worker:prod": "node dist/worker",
+    "start:worker:prod": "node dist/src/worker",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
-    "test": "jest",
+    "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
+    "postinstall": "prisma generate",
+    "validate:deps": "node scripts/validate-dependencies.js",
     "sync:contracts": "node scripts/sync-contracts.js",
     "openapi:generate": "ts-node scripts/generate-openapi.ts"
   },

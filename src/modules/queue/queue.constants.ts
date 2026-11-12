@@ -29,6 +29,11 @@ export interface RedisConnectionConfig {
 }
 
 export function getRedisConnectionOptions(): RedisConnectionConfig | null {
+  const isTls =
+    process.env.REDIS_TLS === 'true' ||
+    process.env.REDIS_TLS === '1' ||
+    Boolean(process.env.REDIS_URL && process.env.REDIS_URL.startsWith('rediss:'));
+
   if (process.env.REDIS_HOST) {
     return {
       host: process.env.REDIS_HOST,
@@ -36,6 +41,10 @@ export function getRedisConnectionOptions(): RedisConnectionConfig | null {
       ...(process.env.REDIS_PASSWORD
         ? { password: process.env.REDIS_PASSWORD }
         : {}),
+      ...(process.env.REDIS_USERNAME
+        ? { username: process.env.REDIS_USERNAME }
+        : {}),
+      ...(isTls ? { tls: {} } : {}),
       maxRetriesPerRequest: null,
     };
   }
@@ -48,7 +57,7 @@ export function getRedisConnectionOptions(): RedisConnectionConfig | null {
         port: Number(parsed.port || 6379),
         ...(parsed.username ? { username: decodeURIComponent(parsed.username) } : {}),
         ...(parsed.password ? { password: decodeURIComponent(parsed.password) } : {}),
-        ...(parsed.protocol === 'rediss:' ? { tls: {} } : {}),
+        ...(isTls ? { tls: {} } : {}),
         maxRetriesPerRequest: null,
       };
     } catch {

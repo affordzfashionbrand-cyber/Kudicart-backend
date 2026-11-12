@@ -1,19 +1,59 @@
 import * as crypto from 'crypto';
 
+const KNOWN_INSECURE_SECRETS = new Set([
+  'affordz_dev_testing_only_jwt_secret_not_for_production',
+  'kudicart-super-secret-jwt-key',
+  'secret',
+  'jwt_secret',
+  'changeme',
+  '1234567890',
+  'test',
+  'development',
+]);
+
 /**
- * Resolve JWT signing secret from environment.
- * Rejects startup without JWT_SECRET in production.
+ * Validate and resolve the JWT signing secret.
+ * Enforces strict length (min 32 bytes/characters) and high entropy in production.
+ * Fails closed if missing, weak, or using an insecure fallback.
+ */
+export function validateJwtSecret(explicitSecret?: string): string {
+  const isProduction =
+    process.env.APP_ENV === 'production' || process.env.NODE_ENV === 'production';
+  const secret = explicitSecret || process.env.JWT_SECRET;
+
+  if (isProduction) {
+    if (!secret || typeof secret !== 'string' || secret.trim().length === 0) {
+      throw new Error(
+        'FATAL: JWT_SECRET environment variable is strictly required in production mode',
+      );
+    }
+    if (secret.length < 32) {
+      throw new Error(
+        'FATAL: JWT_SECRET must be at least 32 characters in length in production mode for secure HMAC-SHA256 signing',
+      );
+    }
+    if (KNOWN_INSECURE_SECRETS.has(secret.toLowerCase())) {
+      throw new Error(
+        'FATAL: Insecure or default JWT_SECRET detected in production mode. Set a cryptographically secure random secret.',
+      );
+    }
+    return secret;
+  }
+
+  // Non-production environment (development / test)
+  if (secret && typeof secret === 'string' && secret.trim().length > 0) {
+    return secret;
+  }
+
+  // Isolated development / test secret (strictly blocked in production)
+  return 'affordz_dev_testing_only_jwt_secret_not_for_production';
+}
+
+/**
+ * Resolve JWT signing secret from environment with production fail-closed validation.
  */
 export function getJwtSecret(): string {
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    if (process.env.APP_ENV === 'production' || process.env.NODE_ENV === 'production') {
-      throw new Error('FATAL: JWT_SECRET environment variable is required in production mode');
-    }
-    // Isolated development / test secret (strictly blocked in production)
-    return 'affordz_dev_testing_only_jwt_secret_not_for_production';
-  }
-  return secret;
+  return validateJwtSecret();
 }
 
 /**
@@ -145,5 +185,3 @@ export function verifyJwtToken(
     return { valid: false, error: err.message || 'Signature verification failed' };
   }
 }
-
-

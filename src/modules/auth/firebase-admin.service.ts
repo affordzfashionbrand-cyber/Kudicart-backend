@@ -162,6 +162,7 @@ export class FirebaseAdminService implements OnModuleInit {
       body: string;
       data?: Record<string, string>;
       imageUrl?: string;
+      channelId?: string;
     },
   ): Promise<{
     successCount: number;
@@ -183,6 +184,8 @@ export class FirebaseAdminService implements OnModuleInit {
       const { getMessaging } = getFirebaseMessaging();
       const messaging = getMessaging();
 
+      const channelId = payload.channelId || 'affordz_critical_alerts';
+
       const message: any = {
         tokens,
         notification: {
@@ -195,7 +198,7 @@ export class FirebaseAdminService implements OnModuleInit {
           priority: 'high',
           notification: {
             sound: 'default',
-            channelId: 'affordz_critical_alerts',
+            channelId,
           },
         },
       };
