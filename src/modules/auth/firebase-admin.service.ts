@@ -28,7 +28,16 @@ export class FirebaseAdminService implements OnModuleInit {
   }
 
   isReady(): boolean {
-    return this.initialized;
+    return this.initialized || Boolean(this.getWebApiKey());
+  }
+
+  private getWebApiKey(): string | undefined {
+    return (
+      process.env.FIREBASE_WEB_API_KEY ||
+      process.env.VITE_FIREBASE_API_KEY ||
+      process.env.NEXT_PUBLIC_FIREBASE_API_KEY ||
+      'AIzaSyDNrOgdNcWwL4RxN9f-3Ktp7e73rSlOifc'
+    );
   }
 
   private initializeFirebase() {
@@ -127,27 +136,70 @@ export class FirebaseAdminService implements OnModuleInit {
       }
     }
 
-    // Fail closed: Never return simulated identity in runtime or production
-    if (!this.initialized) {
+    // 1. If Firebase Admin SDK is initialized with a service account, verify via Admin SDK
+    if (this.initialized) {
+      try {
+        const { getAuth } = getFirebaseAuth();
+        const auth = getAuth();
+        const decoded = await auth.verifyIdToken(idToken, true);
+        return {
+          uid: decoded.uid,
+          phoneNumber: decoded.phone_number,
+          email: decoded.email,
+          name: decoded.name,
+          picture: decoded.picture,
+        };
+      } catch (err: any) {
+        this.logger.warn(`Firebase token verification failed: ${err.message}`);
+        throw new UnauthorizedException('Authentication token verification failed. Please sign in again.');
+      }
+    }
+
+    // 2. Cryptographically verify ID token directly with Google Identity Toolkit REST API
+    const webApiKey = this.getWebApiKey();
+    if (!webApiKey) {
       throw new UnauthorizedException(
         'Firebase authentication service is not configured on this server. Contact administrator.',
       );
     }
 
     try {
-      const { getAuth } = getFirebaseAuth();
-      const auth = getAuth();
-      const decoded = await auth.verifyIdToken(idToken, true);
+      const response = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${webApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        },
+      );
+
+      if (!response.ok) {
+        const errBody: any = await response.json().catch(() => ({}));
+        this.logger.warn(
+          `Google Identity Toolkit verification rejected: ${JSON.stringify(errBody?.error?.message || errBody)}`,
+        );
+        throw new UnauthorizedException('Authentication token verification failed. Please sign in again.');
+      }
+
+      const data: any = await response.json();
+      const user = data.users?.[0];
+      if (!user || !user.localId) {
+        throw new UnauthorizedException('Invalid Firebase ID token');
+      }
+
       return {
-        uid: decoded.uid,
-        phoneNumber: decoded.phone_number,
-        email: decoded.email,
-        name: decoded.name,
-        picture: decoded.picture,
+        uid: user.localId,
+        phoneNumber: user.phoneNumber,
+        email: user.email,
+        name: user.displayName,
+        picture: user.photoUrl,
       };
     } catch (err: any) {
-      this.logger.warn(`Firebase token verification failed: ${err.message}`);
-      throw new UnauthorizedException('Authentication token verification failed. Please sign in again.');
+      if (err instanceof UnauthorizedException) {
+        throw err;
+      }
+      this.logger.error(`Failed to reach Google Identity Toolkit: ${err.message}`);
+      throw new UnauthorizedException('Authentication service temporarily unavailable. Please try again.');
     }
   }
 

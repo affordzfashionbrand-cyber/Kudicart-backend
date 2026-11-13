@@ -85,8 +85,15 @@ export class DriverAuthService {
       attempts: 0,
     });
 
-    if (process.env.NODE_ENV === 'development') {
-      this.logger.log(`Driver OTP generated for ${cleanPhone}`);
+    const runtimeEnv = (process.env.APP_ENV || process.env.NODE_ENV || 'development').toLowerCase();
+    const exposeLocalDevOtp =
+      isNonProductionEnvironment() &&
+      runtimeEnv === 'development' &&
+      process.env.NODE_ENV !== 'test' &&
+      process.env.DISABLE_DEV_OTP !== 'true';
+
+    if (exposeLocalDevOtp || process.env.NODE_ENV === 'development') {
+      this.logger.log(`Driver OTP generated for ${cleanPhone}: ${otp}`);
     }
 
     return {
@@ -94,6 +101,7 @@ export class DriverAuthService {
       message: 'Verification OTP dispatched',
       expiresInSeconds: 300,
       countdownSeconds: 30,
+      ...(exposeLocalDevOtp ? { devOtp: otp } : {}),
     };
   }
 
@@ -375,6 +383,7 @@ export class DriverAuthService {
       fullName: driver.fullName,
       kycStatus: driver.kycStatus,
       isApproved: driver.kycStatus === 'APPROVED',
+      rejectionReason: driver.rejectionReason || null,
       isOnline: driver.isOnline,
       rating: driver.rating,
       tier: driver.tier,

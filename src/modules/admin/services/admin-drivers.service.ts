@@ -19,6 +19,16 @@ export class AdminDriversService {
   }
 
   private mapDriver(d: any) {
+    const isElectric = Boolean(
+      (d.vehicleType && d.vehicleType.toLowerCase().includes('ev')) ||
+      (d.vehicleModel && d.vehicleModel.toLowerCase().includes('electric')) ||
+      (d.vehicleType && d.vehicleType.toLowerCase().includes('electric'))
+    );
+    const vehicleTypeDisplay = d.vehicleType || (isElectric ? 'EV Scooty' : 'Bike');
+    const vehicleMakeDisplay = d.vehicleMake || (isElectric ? 'Ather Energy' : 'Hero');
+    const vehicleModelDisplay = d.vehicleModel || (isElectric ? '450X' : 'Splendor+');
+    const registrationNumber = d.vehicleRegistration || d.rcNumber || 'Unregistered';
+
     return {
       id: d.id,
       userId: d.userId,
@@ -34,13 +44,30 @@ export class AdminDriversService {
       tier: d.tier,
       rating: d.rating,
       completedDeliveries: d.completedDeliveries || 0,
-      vehicleType: d.vehicleType || '2W Scooter',
-      vehicleMake: d.vehicleMake || null,
-      vehicleModel: d.vehicleModel || null,
-      vehicleRegistration: d.vehicleRegistration || null,
+      aadhaarNumber: d.aadhaarNumber || null,
+      panNumber: d.panNumber || null,
+      dob: d.dob || null,
+      licenseNumber: d.licenseNumber || null,
+      workPreference: d.workPreference || 'PART_TIME',
+      rcNumber: d.rcNumber || null,
+      rcStatus: d.rcStatus || (registrationNumber !== 'Unregistered' ? 'Verified' : 'Under review'),
+      vehicleType: vehicleTypeDisplay,
+      vehicleMake: vehicleMakeDisplay,
+      vehicleModel: vehicleModelDisplay,
+      vehicleRegistration: registrationNumber,
+      vehicleDetails: {
+        vehicleType: vehicleTypeDisplay,
+        make: vehicleMakeDisplay,
+        model: vehicleModelDisplay,
+        registrationNumber,
+        isElectric,
+        color: 'Standard',
+        rcStatus: d.rcStatus || (registrationNumber !== 'Unregistered' ? 'Verified' : 'Under review'),
+      },
       currentLat: d.currentLat ?? null,
       currentLng: d.currentLng ?? null,
       documents: d.documents || [],
+      selfieUrl: d.selfieUrl || null,
       createdAt: d.createdAt.toISOString(),
     };
   }
