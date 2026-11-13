@@ -288,40 +288,8 @@ async function main() {
     },
   });
 
-  // 3. Dark Store Hubs
-  const coreHubs = [
-    {
-      id: 'hub-1',
-      name: 'Indiranagar Express Pod',
-      locality: 'Indiranagar 100ft Road',
-      address: 'Pod #4, Metro Pillar 128, 100ft Road, Indiranagar, Bengaluru, 560038',
-      lat: 12.9716,
-      lng: 77.6412,
-      deliveryMinutes: 18,
-      isActive: true,
-    },
-    {
-      id: 'hub-2',
-      name: 'Koramangala 4th Block Hub',
-      locality: 'Koramangala 4th Block',
-      address: 'Hub #2, 80ft Road, Sony Signal, Koramangala 4th Block, Bengaluru, 560034',
-      lat: 12.9352,
-      lng: 77.6245,
-      deliveryMinutes: 20,
-      isActive: true,
-    },
-    {
-      id: 'hub-3',
-      name: 'Whitefield Prestige Tech Pod',
-      locality: 'Whitefield',
-      address: 'Pod #7, ECC Road, Near ITPL, Whitefield, Bengaluru, 560066',
-      lat: 12.9698,
-      lng: 77.75,
-      deliveryMinutes: 22,
-      isActive: true,
-    },
-  ];
-  for (const hub of [...coreHubs, ...INITIAL_DARK_STORES]) {
+  // 3. Dark Store Hubs (Pozhichalur & Tambaram)
+  for (const hub of INITIAL_DARK_STORES) {
     await prisma.darkStoreHub.upsert({
       where: { id: hub.id },
       update: {
@@ -513,7 +481,7 @@ async function main() {
         'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?auto=format&fit=crop&w=800&q=80',
       ],
       fulfillmentType: FulfillmentType.DARK_STORE,
-      darkStoreHubId: 'hub-1',
+      darkStoreHubId: 'hub-pozhichalur',
       tryAndBuyEligible: true,
     },
     {
@@ -546,7 +514,7 @@ async function main() {
         'https://images.unsplash.com/photo-1509631179647-0177331693ae?auto=format&fit=crop&w=800&q=80',
       ],
       fulfillmentType: FulfillmentType.DARK_STORE,
-      darkStoreHubId: 'hub-1',
+      darkStoreHubId: 'hub-pozhichalur',
       tryAndBuyEligible: true,
     },
     {
@@ -578,7 +546,7 @@ async function main() {
         'https://images.unsplash.com/photo-1506630448388-4e683c67ddb0?auto=format&fit=crop&w=800&q=80',
       ],
       fulfillmentType: FulfillmentType.DARK_STORE,
-      darkStoreHubId: 'hub-2',
+      darkStoreHubId: 'hub-tambaram',
       tryAndBuyEligible: true,
     },
     {
@@ -643,7 +611,7 @@ async function main() {
         'https://images.unsplash.com/photo-1610030469983-98e550d6193c?auto=format&fit=crop&w=1200&q=90',
       ],
       fulfillmentType: FulfillmentType.DARK_STORE,
-      darkStoreHubId: 'hub-indiranagar',
+      darkStoreHubId: 'hub-pozhichalur',
       tryAndBuyEligible: true,
     },
     {
@@ -707,7 +675,7 @@ async function main() {
         'https://images.unsplash.com/photo-1496747611176-843222e1e57c?auto=format&fit=crop&w=1200&q=90',
       ],
       fulfillmentType: FulfillmentType.DARK_STORE,
-      darkStoreHubId: 'hub-koramangala',
+      darkStoreHubId: 'hub-tambaram',
       tryAndBuyEligible: true,
     },
     {
@@ -739,7 +707,7 @@ async function main() {
         'https://images.unsplash.com/photo-1610030469983-98e550d6193c?auto=format&fit=crop&w=1200&q=90',
       ],
       fulfillmentType: FulfillmentType.DARK_STORE,
-      darkStoreHubId: 'hub-indiranagar',
+      darkStoreHubId: 'hub-pozhichalur',
       tryAndBuyEligible: true,
     },
     {
@@ -770,7 +738,7 @@ async function main() {
         'https://images.unsplash.com/photo-1603252110481-7ba873bf42ab?auto=format&fit=crop&w=1200&q=90',
       ],
       fulfillmentType: FulfillmentType.DARK_STORE,
-      darkStoreHubId: 'hub-indiranagar',
+      darkStoreHubId: 'hub-pozhichalur',
       tryAndBuyEligible: true,
     },
     {
@@ -801,7 +769,7 @@ async function main() {
         'https://images.unsplash.com/photo-1506629905607-d9e08e2d3e8e?auto=format&fit=crop&w=1200&q=90',
       ],
       fulfillmentType: FulfillmentType.DARK_STORE,
-      darkStoreHubId: 'hub-koramangala',
+      darkStoreHubId: 'hub-tambaram',
       tryAndBuyEligible: true,
     },
     {
@@ -863,7 +831,7 @@ async function main() {
         'https://images.unsplash.com/photo-1549298916-b41d501d3772?auto=format&fit=crop&w=1200&q=90',
       ],
       fulfillmentType: FulfillmentType.DARK_STORE,
-      darkStoreHubId: 'hub-indiranagar',
+      darkStoreHubId: 'hub-pozhichalur',
       tryAndBuyEligible: true,
     },
     {
@@ -925,7 +893,7 @@ async function main() {
         'https://images.unsplash.com/photo-1507679799987-c73779587ccf?auto=format&fit=crop&w=1200&q=90',
       ],
       fulfillmentType: FulfillmentType.DARK_STORE,
-      darkStoreHubId: 'hub-koramangala',
+      darkStoreHubId: 'hub-tambaram',
       tryAndBuyEligible: true,
     },
   ];

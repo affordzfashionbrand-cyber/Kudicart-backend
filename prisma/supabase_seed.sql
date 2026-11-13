@@ -1,13 +1,20 @@
 -- Affordz / KudiCart Initial Seed Data for Supabase PostgreSQL
 -- Copy & Paste into Supabase Dashboard -> SQL Editor -> Click 'Run'
 
--- 1. Dark Store Hubs
+-- 1. Dark Store Hubs (Pozhichalur & Tambaram, Chennai)
 INSERT INTO "DarkStoreHub" ("id", "name", "locality", "address", "lat", "lng", "deliveryMinutes", "isActive", "createdAt", "updatedAt")
 VALUES
-('hub-1', 'Indiranagar Express Pod', 'Indiranagar 100ft Road', 'Pod #4, Metro Pillar 128, 100ft Road, Indiranagar, Bengaluru, 560038', 12.9716, 77.6412, 18, true, NOW(), NOW()),
-('hub-2', 'Koramangala 4th Block Hub', 'Koramangala 4th Block', 'Hub #2, 80ft Road, Sony Signal, Koramangala 4th Block, Bengaluru, 560034', 12.9352, 77.6245, 20, true, NOW(), NOW()),
-('hub-3', 'Whitefield Prestige Tech Pod', 'Whitefield', 'Pod #7, ECC Road, Near ITPL, Whitefield, Bengaluru, 560066', 12.9698, 77.7500, 22, true, NOW(), NOW())
-ON CONFLICT ("id") DO NOTHING;
+('hub-pozhichalur', 'Pozhichalur Express Hub', 'Pozhichalur', 'Main Road, Pozhichalur, Chennai, Tamil Nadu 600074', 12.9818, 80.1384, 18, true, NOW(), NOW()),
+('hub-tambaram', 'Tambaram Central Hub', 'Tambaram', 'GST Road, Tambaram, Chennai, Tamil Nadu 600045', 12.9249, 80.1000, 20, true, NOW(), NOW())
+ON CONFLICT ("id") DO UPDATE SET
+  "name" = EXCLUDED."name",
+  "locality" = EXCLUDED."locality",
+  "address" = EXCLUDED."address",
+  "lat" = EXCLUDED."lat",
+  "lng" = EXCLUDED."lng",
+  "deliveryMinutes" = EXCLUDED."deliveryMinutes",
+  "isActive" = EXCLUDED."isActive",
+  "updatedAt" = NOW();
 
 -- 2. Users
 INSERT INTO "User" ("id", "firebaseUid", "phone", "email", "name", "avatar", "role", "createdAt", "updatedAt")

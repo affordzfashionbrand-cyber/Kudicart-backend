@@ -41,6 +41,8 @@ async function bootstrap() {
     'http://127.0.0.1:3002',
     'http://localhost:8081',
     'http://127.0.0.1:8081',
+    'http://localhost:8082',
+    'http://127.0.0.1:8082',
     'http://localhost:19006',
   ];
 
@@ -79,8 +81,13 @@ async function bootstrap() {
       if (permittedOrigins.has(origin)) {
         return callback(null, true);
       }
-      // Allow localhost dev servers in non-production environments
-      if (!isProduction && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      // Allow localhost and private LAN dev servers in non-production environments
+      if (
+        !isProduction &&
+        /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$/.test(
+          origin,
+        )
+      ) {
         return callback(null, true);
       }
       logger.warn(`CORS blocked browser request from unauthorized origin: ${origin}`);

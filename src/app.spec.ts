@@ -326,9 +326,9 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
 
     it('Catalog: lists active Dark Store express fulfillment hubs', async () => {
       const hubs = await catalogService.getDarkStores();
-      expect(hubs.length).toBeGreaterThanOrEqual(3);
-      expect(hubs.find((h) => h.locality.includes('Indiranagar'))).toBeDefined();
-      expect(hubs.find((h) => h.locality.includes('Koramangala'))).toBeDefined();
+      expect(hubs.length).toBe(2);
+      expect(hubs.find((h) => h.locality.includes('Pozhichalur'))).toBeDefined();
+      expect(hubs.find((h) => h.locality.includes('Tambaram'))).toBeDefined();
     });
 
     it('Catalog: filters by fulfillmentType (DARK_STORE vs VENDOR)', async () => {
@@ -421,7 +421,7 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
           galleryImages: [],
           stockQuantity,
           fulfillmentType: FulfillmentType.DARK_STORE,
-          darkStoreHubId: 'hub-1',
+          darkStoreHubId: 'hub-pozhichalur',
         },
       });
       return { userId, prodId };
@@ -528,13 +528,13 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
           label: 'Home',
           recipientName: 'Ananya Sharma',
           recipientPhone: '+91 98450 12890',
-          line1: '100 Feet Road, Indiranagar',
-          locality: 'Indiranagar',
-          city: 'Bengaluru',
-          state: 'Karnataka',
-          pincode: '560038',
-          latitude: 12.9784,
-          longitude: 77.6408,
+          line1: '12 Main Road, Pozhichalur',
+          locality: 'Pozhichalur',
+          city: 'Chennai',
+          state: 'Tamil Nadu',
+          pincode: '600074',
+          latitude: 12.9820,
+          longitude: 80.1380,
         },
       });
       await prismaService.product.create({
@@ -555,7 +555,7 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
           stockQuantity,
           tryAndBuyEligible,
           fulfillmentType: FulfillmentType.DARK_STORE,
-          darkStoreHubId: 'hub-1',
+          darkStoreHubId: 'hub-pozhichalur',
         },
       });
       return { userId, addrId, prodId };
@@ -849,13 +849,13 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
           label: 'Home',
           recipientName: 'Ananya Sharma',
           recipientPhone: '+91 98450 12890',
-          line1: '100 Feet Road, Indiranagar',
-          locality: 'Indiranagar',
-          city: 'Bengaluru',
-          state: 'Karnataka',
-          pincode: '560038',
-          latitude: 12.9784,
-          longitude: 77.6408,
+          line1: '12 Main Road, Pozhichalur',
+          locality: 'Pozhichalur',
+          city: 'Chennai',
+          state: 'Tamil Nadu',
+          pincode: '600074',
+          latitude: 12.9820,
+          longitude: 80.1380,
         },
       });
       await prismaService.order.create({

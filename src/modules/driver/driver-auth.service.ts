@@ -86,13 +86,14 @@ export class DriverAuthService {
     });
 
     if (process.env.NODE_ENV === 'development') {
-      this.logger.log(`Dev driver OTP generated for ${cleanPhone}: ${otp}`);
+      this.logger.log(`Driver OTP generated for ${cleanPhone}`);
     }
 
     return {
       success: true,
       message: 'Verification OTP dispatched',
       expiresInSeconds: 300,
+      countdownSeconds: 30,
     };
   }
 
@@ -170,7 +171,7 @@ export class DriverAuthService {
               rating: 5.0,
               completedDeliveries: 0,
               isOnline: false,
-              kycStatus: 'PENDING',
+              kycStatus: 'NOT_SUBMITTED',
             },
           },
         },
@@ -188,7 +189,7 @@ export class DriverAuthService {
           rating: 5.0,
           completedDeliveries: 0,
           isOnline: false,
-          kycStatus: 'PENDING',
+          kycStatus: 'NOT_SUBMITTED',
         },
       });
       user = { ...user, driverProfile };
@@ -209,6 +210,7 @@ export class DriverAuthService {
       token,
       role: Role.DRIVER,
       driverId: driver.id,
+      kycStatus: driver.kycStatus,
       user: {
         id: user.id,
         driverId: driver.id,
@@ -288,7 +290,7 @@ export class DriverAuthService {
               rating: 5.0,
               completedDeliveries: 0,
               isOnline: false,
-              kycStatus: 'PENDING',
+              kycStatus: 'NOT_SUBMITTED',
             },
           },
         },
@@ -318,7 +320,7 @@ export class DriverAuthService {
             rating: 5.0,
             completedDeliveries: 0,
             isOnline: false,
-            kycStatus: 'PENDING',
+            kycStatus: 'NOT_SUBMITTED',
           },
         });
         user = { ...user, driverProfile };
@@ -341,6 +343,7 @@ export class DriverAuthService {
       role: Role.DRIVER,
       driverId: driver.id,
       isNewDriver,
+      kycStatus: driver.kycStatus,
       user: {
         id: user.id,
         driverId: driver.id,

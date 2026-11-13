@@ -703,7 +703,7 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
           title: 'Banarasi Brocade Festive Kurta',
           description: 'Handwoven silk with fine zari border and tailored silhouette.',
           categoryId: 'kurtis',
-          darkStoreHubId: 'hub-indiranagar',
+          darkStoreHubId: 'hub-pozhichalur',
           price: 1599,
           originalPrice: 2999,
           stockQuantity: 30,
@@ -724,7 +724,7 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
       expect(res.product.fulfillmentType).toBe('DARK_STORE');
       expect(res.product.tryAndBuyEligible).toBe(true);
       expect(res.product.discount).toBe('47% OFF');
-      expect(res.product.darkStoreHubId).toBe('hub-indiranagar');
+      expect(res.product.darkStoreHubId).toBe('hub-pozhichalur');
     });
 
     it('Products: rejects Dark Store creation if originalPrice is less than price', async () => {
@@ -734,7 +734,7 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
             title: 'Faulty Pricing Product',
             description: 'Test invalid pricing',
             categoryId: 'kurtis',
-            darkStoreHubId: 'hub-indiranagar',
+            darkStoreHubId: 'hub-pozhichalur',
             price: 2500,
             originalPrice: 1500,
             stockQuantity: 10,
@@ -754,7 +754,7 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
             title: 'Invalid Fulfillment',
             description: 'Attempting vendor fulfillment via admin',
             categoryId: 'kurtis',
-            darkStoreHubId: 'hub-indiranagar',
+            darkStoreHubId: 'hub-pozhichalur',
             price: 1000,
             originalPrice: 1500,
             stockQuantity: 10,

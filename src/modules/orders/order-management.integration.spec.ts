@@ -214,7 +214,7 @@ describe('Order Management End-to-End HTTP + WS + PostgreSQL Integration', () =>
         stockQuantity: 10,
         tryAndBuyEligible: true,
         fulfillmentType: FulfillmentType.DARK_STORE,
-        darkStoreHubId: 'hub-1',
+        darkStoreHubId: 'hub-pozhichalur',
       },
     });
 
@@ -675,7 +675,7 @@ describe('Order Management End-to-End HTTP + WS + PostgreSQL Integration', () =>
       data: {
         vendorId: ctx.vendAId,
         fulfillmentType: FulfillmentType.DARK_STORE,
-        darkStoreHubId: 'hub-1',
+        darkStoreHubId: 'hub-pozhichalur',
       },
     });
 
