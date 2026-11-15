@@ -12,7 +12,7 @@ export class AdminQueryDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(100)
+  @Max(200)
   limit?: number = 10;
 
   @IsOptional()
