@@ -1,0 +1,80 @@
+export const HOME_CONTENT_CACHE_PREFIX = 'cache:home:layout';
+export const HOME_CONTENT_CACHE_TTL_SECONDS = 300; // 5 minutes
+
+export const DEFAULT_HOMEPAGE_SECTIONS = [
+  {
+    sectionKey: 'HERO_BANNER',
+    displayName: 'Hero Banners Carousel',
+    title: 'Fashion, now.',
+    subtitle: 'Hyperlocal & Curated Runway Drops',
+    displayOrder: 1,
+    isEnabled: true,
+  },
+  {
+    sectionKey: 'BANK_OFFERS',
+    displayName: 'Partner Bank Offers Ticker',
+    title: 'Partner Bank Offers',
+    subtitle: 'Instant Discounts & Exclusive Rebates',
+    displayOrder: 2,
+    isEnabled: true,
+  },
+  {
+    sectionKey: 'TRENDING_CITY',
+    displayName: 'Trending in Your City',
+    title: 'TRENDING IN YOUR CITY',
+    subtitle: 'Popular styles moving right now near you',
+    displayOrder: 3,
+    isEnabled: true,
+  },
+  {
+    sectionKey: 'CURATED_DEALS',
+    displayName: 'Curated Deals (Him & Her)',
+    title: 'CURATED EDITORIAL TIERS',
+    subtitle: 'Signature edits crafted for discerning tastes',
+    displayOrder: 4,
+    isEnabled: true,
+  },
+  {
+    sectionKey: 'BUDGET_STORES',
+    displayName: 'Shop by Budget Stores',
+    title: 'SHOP BY BUDGET STORES',
+    subtitle: 'Curated wardrobe staples capped to your price limit',
+    displayOrder: 5,
+    isEnabled: true,
+  },
+  {
+    sectionKey: 'FLASH_DROP',
+    displayName: 'Flash Atelier Live Drop',
+    title: 'LIVE ATELIER DROP',
+    subtitle: 'Strictly limited quantity drops closing soon',
+    displayOrder: 6,
+    isEnabled: true,
+    metadata: {
+      endsInMinutes: 45,
+    },
+  },
+  {
+    sectionKey: 'TREND_RADAR',
+    displayName: 'Trend Radar / Aesthetic Hub',
+    title: 'TREND RADAR',
+    subtitle: 'Emerging aesthetics and sartorial directions',
+    displayOrder: 7,
+    isEnabled: true,
+  },
+  {
+    sectionKey: 'BRAND_SPOTLIGHT',
+    displayName: 'Vendor Brand Spotlight',
+    title: 'BRAND SPOTLIGHT',
+    subtitle: 'Official flagships & verified designer houses',
+    displayOrder: 8,
+    isEnabled: true,
+  },
+  {
+    sectionKey: 'LUXE_WEEKEND',
+    displayName: 'Urban Editorial Deals Strip',
+    title: 'LUXE WEEKEND',
+    subtitle: 'High-end designer pieces at weekend-only pricing',
+    displayOrder: 9,
+    isEnabled: true,
+  },
+];

@@ -31,11 +31,13 @@ import { VendorController } from './modules/vendor/vendor.controller';
 import { VendorService } from './modules/vendor/vendor.service';
 import { TrackingModule } from './modules/orders/tracking.module';
 import { RedisModule } from './common/redis/redis.module';
+import { HomeContentModule } from './modules/home-content/home-content.module';
 
 @Module({
   imports: [
     RedisModule,
     PrismaModule,
+    HomeContentModule,
     OrdersDomainModule,
     DriverModule,
     AdminModule,
@@ -74,6 +76,7 @@ import { RedisModule } from './common/redis/redis.module';
   exports: [
     RedisModule,
     PrismaModule,
+    HomeContentModule,
     OrdersDomainModule,
     DriverModule,
     AdminModule,

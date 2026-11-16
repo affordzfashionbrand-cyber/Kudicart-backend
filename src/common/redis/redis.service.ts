@@ -62,6 +62,7 @@ class InMemoryRedisBus {
   private readonly emitter = new EventEmitter();
   private readonly zsets = new Map<string, Map<string, number>>();
   private readonly ttls = new Map<string, number>();
+  private readonly kvs = new Map<string, { value: string; expiry?: number }>();
 
   public static getInstance(): InMemoryRedisBus {
     if (!InMemoryRedisBus.instance) {
@@ -92,8 +93,28 @@ class InMemoryRedisBus {
     this.ttls.clear();
   }
 
+  set(key: string, value: string, ttlSeconds?: number): void {
+    const expiry = ttlSeconds ? Date.now() + ttlSeconds * 1000 : undefined;
+    this.kvs.set(key, { value, expiry });
+  }
+
+  get(key: string): string | null {
+    const entry = this.kvs.get(key);
+    if (!entry) return null;
+    if (entry.expiry && Date.now() > entry.expiry) {
+      this.kvs.delete(key);
+      return null;
+    }
+    return entry.value;
+  }
+
+  del(key: string): number {
+    return this.kvs.delete(key) ? 1 : 0;
+  }
+
   clearAll() {
     this.clearRateLimits();
+    this.kvs.clear();
     this.emitter.removeAllListeners();
   }
 
@@ -356,6 +377,35 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       this.memoryBus.unsubscribe(channel, handler);
       this.subHandlers.delete(channel);
     }
+  }
+
+  /**
+   * General Key-Value operations with Redis/fallback support.
+   */
+  async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
+    if (this.isUsingRealRedis() && this.client) {
+      if (ttlSeconds) {
+        await this.client.set(key, value, 'EX', ttlSeconds);
+      } else {
+        await this.client.set(key, value);
+      }
+      return;
+    }
+    this.memoryBus.set(key, value, ttlSeconds);
+  }
+
+  async get(key: string): Promise<string | null> {
+    if (this.isUsingRealRedis() && this.client) {
+      return await this.client.get(key);
+    }
+    return this.memoryBus.get(key);
+  }
+
+  async del(key: string): Promise<number> {
+    if (this.isUsingRealRedis() && this.client) {
+      return await this.client.del(key);
+    }
+    return this.memoryBus.del(key);
   }
 
   /**

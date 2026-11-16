@@ -132,6 +132,7 @@ model Category {
   isActive     Boolean    @default(true)
   isPopular    Boolean    @default(false)
   products     Product[]
+  banners      HomeBanner[]
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
@@ -219,6 +220,7 @@ model Product {
   cartItems         CartItem[]
   orderItems        OrderItem[]
   reviews           Review[]
+  banners           HomeBanner[]
 }
 
 model Coupon {
@@ -747,4 +749,109 @@ model WorkspaceSetting {
   key       String   @id
   value     Json
   updatedAt DateTime @updatedAt
+}
+
+// ==========================================
+// HOMEPAGE CMS & MARKETING MODULE
+// ==========================================
+
+enum BannerPlacement {
+  HERO_CAROUSEL
+  EDITORIAL_STRIP
+  MODERN_REDEFINED
+  PROMO_POPUP
+}
+
+enum DeepLinkActionType {
+  CATEGORY
+  PRODUCT
+  BRAND
+  SEARCH_QUERY
+  EXTERNAL_URL
+  NONE
+}
+
+model HomeBanner {
+  id              String             @id @default(uuid())
+  placement       BannerPlacement    @default(HERO_CAROUSEL)
+  tag             String?            // e.g. "DROP_04 • 00:28" or "TODAY'S LOOK"
+  title1          String             // e.g. "Fashion,"
+  title2          String?            // e.g. "now."
+  imageUrl        String             // Cloudinary asset URL
+  mobileImageUrl  String?            // Optional high-density mobile aspect ratio
+  targetGender    String             @default("All") // "All" | "Men" | "Women" | "Kids"
+  
+  // Dynamic Deep-Linking
+  actionType      DeepLinkActionType @default(CATEGORY)
+  actionValue     String?            // categoryId, productId, brand name, search query, or URL
+  categoryId      String?
+  category        Category?          @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  productId       String?
+  product         Product?           @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  displayOrder    Int                @default(0)
+  isActive        Boolean            @default(true)
+  startDate       DateTime?          // Scheduled start
+  endDate         DateTime?          // Scheduled expiration
+  
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@index([placement, isActive, displayOrder])
+}
+
+model BankOffer {
+  id              String    @id @default(uuid())
+  bankName        String    // e.g. "AXIS BANK", "HDFC BANK"
+  badgeBgColor    String    @default("#111111") // Hex color e.g. "#861F41"
+  title           String    // e.g. "10% INSTANT DISCOUNT*"
+  subtitle        String    // e.g. "On Axis Bank Credit Cards • Min Spend ₹2,499"
+  code            String?   // e.g. "AXIS10"
+  discountText    String    // e.g. "10% OFF up to ₹1,000"
+  minSpendText    String?   // e.g. "₹2,499"
+  details         String    // Modal terms description
+  termsUrl        String?
+  displayOrder    Int       @default(0)
+  isActive        Boolean   @default(true)
+  validFrom       DateTime?
+  validTill       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([isActive, displayOrder])
+}
+
+model HomeSectionConfig {
+  id              String            @id @default(uuid())
+  sectionKey      String            @unique // e.g. "HERO_BANNER", "BANK_OFFERS", "TRENDING_CITY", "CURATED_DEALS", "BUDGET_STORES", "FLASH_DROP", "TREND_RADAR", "BRAND_SPOTLIGHT", "LUXE_WEEKEND"
+  displayName     String            // e.g. "Hero Banners Carousel"
+  title           String?           // Dynamic section title
+  subtitle        String?           // Dynamic section subtitle
+  displayOrder    Int               @default(0)
+  isEnabled       Boolean           @default(true)
+  metadata        Json?             // Flexible config e.g. countdown timestamp, grid columns, tags
+  items           HomeSectionItem[]
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([isEnabled, displayOrder])
+}
+
+model HomeSectionItem {
+  id              String             @id @default(uuid())
+  sectionConfigId String
+  sectionConfig   HomeSectionConfig  @relation(fields: [sectionConfigId], references: [id], onDelete: Cascade)
+  title           String
+  subtitle        String?
+  badge           String?
+  imageUrl        String
+  accentColor     String?
+  actionType      DeepLinkActionType @default(CATEGORY)
+  actionValue     String?
+  displayOrder    Int                @default(0)
+  isActive        Boolean            @default(true)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@index([sectionConfigId, isActive, displayOrder])
 }
