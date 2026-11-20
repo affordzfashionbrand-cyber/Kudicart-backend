@@ -93,6 +93,14 @@ export class AdminQueryDto {
 
   @IsOptional()
   @IsString()
+  from?: string;
+
+  @IsOptional()
+  @IsString()
+  to?: string;
+
+  @IsOptional()
+  @IsString()
   sort?: string;
 }
 

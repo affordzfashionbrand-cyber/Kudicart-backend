@@ -14,9 +14,9 @@ export class UpdateVehicleDto {
   @IsNotEmpty({ message: 'Vehicle type is required' })
   @IsString()
   @IsIn(
-    ['Bike', 'Scooty', 'EV Bike', 'EV Scooty', 'Electric Scooter', 'Scooter', 'Cycle', 'Other'],
+    ['Bike', 'Scooty', 'EV Scooter', 'EV Bike', 'EV Scooty', 'Electric Scooter', 'Scooter', 'Cycle', 'Other'],
     {
-      message: 'Vehicle type must be Bike, Scooty, EV Bike, or EV Scooty',
+      message: 'Vehicle type must be Bike, Scooty, EV Scooter, EV Bike, or EV Scooty',
     },
   )
   vehicleType: string;

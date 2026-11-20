@@ -7,6 +7,7 @@ import {
   IsBoolean,
   IsEmail,
   IsDateString,
+  IsArray,
   Min,
 } from 'class-validator';
 
@@ -116,6 +117,10 @@ export class AdminKycReviewDto {
   @IsOptional()
   @IsString()
   rejectionReason?: string;
+
+  @IsOptional()
+  @IsArray()
+  rejectedDocuments?: string[];
 }
 
 export class UpdateSettlementStatusDto {
