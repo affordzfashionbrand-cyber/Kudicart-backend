@@ -92,6 +92,37 @@ export class DriverAdminController {
       throw new BadRequestException('A rejection reason must be provided when rejecting KYC');
     }
 
+    let rejectedDocTypes: string[] = [];
+    if (dto.status === 'REJECTED') {
+      if (Array.isArray(dto.rejectedDocuments) && dto.rejectedDocuments.length > 0) {
+        rejectedDocTypes = dto.rejectedDocuments.map((d) => {
+          if (d === 'docDL' || d === 'licenseNumber') return 'drivingLicence';
+          if (d === 'docRC' || d === 'vehicleReg' || d === 'vehicleType' || d === 'vehicleMakeModel') return 'vehicleRc';
+          if (d === 'docAadhaar' || d === 'aadhaarNumber') return 'aadhaar';
+          if (d === 'docPan' || d === 'panNumber') return 'pan';
+          if (d === 'docSelfie') return 'selfie';
+          return d;
+        });
+      } else if (dto.rejectionReason) {
+        const reasonLower = dto.rejectionReason.toLowerCase();
+        if (reasonLower.includes('driving licence') || reasonLower.includes('licence') || reasonLower.includes('license') || reasonLower.includes('dl')) {
+          rejectedDocTypes.push('drivingLicence');
+        }
+        if (reasonLower.includes('vehicle rc') || reasonLower.includes('registration certificate') || reasonLower.includes('rc document')) {
+          rejectedDocTypes.push('vehicleRc');
+        }
+        if (reasonLower.includes('aadhaar')) {
+          rejectedDocTypes.push('aadhaar');
+        }
+        if (reasonLower.includes('pan')) {
+          rejectedDocTypes.push('pan');
+        }
+        if (reasonLower.includes('selfie') || reasonLower.includes('portrait')) {
+          rejectedDocTypes.push('selfie');
+        }
+      }
+    }
+
     const updated = await this.prisma.$transaction(async (tx) => {
       const res = await tx.driverProfile.update({
         where: { id: driver.id },
@@ -101,13 +132,50 @@ export class DriverAdminController {
             dto.status === 'REJECTED' ? dto.rejectionReason!.trim() : null,
         },
       });
-      await tx.driverDocument.updateMany({
-        where: { driverId: driver.id },
-        data: {
-          status: dto.status === 'APPROVED' ? 'VERIFIED' : 'REJECTED',
-          verifiedAt: dto.status === 'APPROVED' ? new Date() : null,
-        },
-      });
+
+      if (dto.status === 'APPROVED') {
+        await tx.driverDocument.updateMany({
+          where: { driverId: driver.id },
+          data: {
+            status: 'VERIFIED',
+            rejectionReason: null,
+            verifiedAt: new Date(),
+          },
+        });
+      } else if (rejectedDocTypes.length > 0) {
+        await tx.driverDocument.updateMany({
+          where: {
+            driverId: driver.id,
+            type: { in: rejectedDocTypes },
+          },
+          data: {
+            status: 'REJECTED',
+            rejectionReason: dto.rejectionReason!.trim(),
+            verifiedAt: null,
+          },
+        });
+
+        await tx.driverDocument.updateMany({
+          where: {
+            driverId: driver.id,
+            type: { notIn: rejectedDocTypes },
+          },
+          data: {
+            status: 'VERIFIED',
+            rejectionReason: null,
+            verifiedAt: new Date(),
+          },
+        });
+      } else {
+        await tx.driverDocument.updateMany({
+          where: { driverId: driver.id },
+          data: {
+            status: 'REJECTED',
+            rejectionReason: dto.rejectionReason!.trim(),
+            verifiedAt: null,
+          },
+        });
+      }
       return res;
     });
 

@@ -52,5 +52,26 @@ export class AdminDeliveryPartnersController {
   ) {
     return this.driversService.toggleAvailability(id, actor?.id, actor?.name);
   }
+
+  @Get(':id/delivery-stats')
+  async getDriverDeliveryStats(@Param('id') id: string) {
+    return this.driversService.getDriverDeliveryStats(id);
+  }
+
+  @Get(':id/deliveries')
+  async getDriverDeliveries(
+    @Param('id') id: string,
+    @Query() query: AdminQueryDto,
+  ) {
+    return this.driversService.getDriverDeliveries(id, query);
+  }
+
+  @Get(':id/deliveries/:deliveryId')
+  async getDriverDeliveryDetail(
+    @Param('id') id: string,
+    @Param('deliveryId') deliveryId: string,
+  ) {
+    return this.driversService.getDriverDeliveryDetail(id, deliveryId);
+  }
 }
 

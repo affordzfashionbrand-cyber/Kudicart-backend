@@ -73,6 +73,9 @@ export class DriverProfileService {
         uploadedAt: d.createdAt.toISOString(),
       };
       grouped[d.type].status = d.status;
+      if (d.rejectionReason) {
+        grouped[d.type].rejectionReason = d.rejectionReason;
+      }
     }
 
     return grouped;
@@ -239,6 +242,7 @@ export class DriverProfileService {
             fileSize: dto.fileSize || '2.0 MB',
             mimeType: dto.mimeType || 'image/jpeg',
             status: 'PENDING',
+            rejectionReason: null,
           },
         });
       } else {

@@ -11,4 +11,7 @@ export class KycReviewDto {
   @IsOptional()
   @IsString()
   rejectionReason?: string;
+
+  @IsOptional()
+  rejectedDocuments?: string[];
 }

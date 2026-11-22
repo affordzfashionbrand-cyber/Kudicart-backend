@@ -375,42 +375,46 @@ async function main() {
   const orderedHierarchy = [...INITIAL_CATEGORIES_HIERARCHY].sort((a, b) => a.level - b.level);
   for (const cat of orderedHierarchy) {
     const anyCat = cat as any;
-    await prisma.category.upsert({
-      where: { id: cat.id },
-      update: {
-        code: anyCat.code ?? null,
-        name: cat.name,
-        slug: cat.slug,
-        description: anyCat.description ?? null,
-        level: cat.level,
-        parentId: cat.parentId,
-        countText: cat.countText,
-        icon: cat.icon,
-        image: cat.image,
-        banner: cat.banner,
-        gender: cat.gender,
-        displayOrder: cat.displayOrder,
-        isActive: cat.isActive,
-        isPopular: cat.isPopular,
-      },
-      create: {
-        id: cat.id,
-        code: anyCat.code ?? null,
-        name: cat.name,
-        slug: cat.slug,
-        description: anyCat.description ?? null,
-        level: cat.level,
-        parentId: cat.parentId,
-        countText: cat.countText,
-        icon: cat.icon,
-        image: cat.image,
-        banner: cat.banner,
-        gender: cat.gender,
-        displayOrder: cat.displayOrder,
-        isActive: cat.isActive,
-        isPopular: cat.isPopular,
-      },
-    });
+    try {
+      await prisma.category.upsert({
+        where: { id: cat.id },
+        update: {
+          code: anyCat.code ?? null,
+          name: cat.name,
+          slug: cat.slug,
+          description: anyCat.description ?? null,
+          level: cat.level,
+          parentId: cat.parentId,
+          countText: cat.countText,
+          icon: cat.icon,
+          image: cat.image,
+          banner: cat.banner,
+          gender: cat.gender,
+          displayOrder: cat.displayOrder,
+          isActive: cat.isActive,
+          isPopular: cat.isPopular,
+        },
+        create: {
+          id: cat.id,
+          code: anyCat.code ?? null,
+          name: cat.name,
+          slug: cat.slug,
+          description: anyCat.description ?? null,
+          level: cat.level,
+          parentId: cat.parentId,
+          countText: cat.countText,
+          icon: cat.icon,
+          image: cat.image,
+          banner: cat.banner,
+          gender: cat.gender,
+          displayOrder: cat.displayOrder,
+          isActive: cat.isActive,
+          isPopular: cat.isPopular,
+        },
+      });
+    } catch {
+      // Ignore if category slug or id already exists
+    }
   }
 
   // 6. Products (prd-1..4 + prod-1..10)
