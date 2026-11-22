@@ -136,4 +136,87 @@ export class VendorController {
       body?.expectedVersion,
     );
   }
+
+  // --- Store Availability & Timings ---
+
+  @Get('store/status')
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async getStoreStatus(@CurrentUser() user: AuthenticatedUser) {
+    return this.vendorService.getStoreStatus(user.id);
+  }
+
+  @Patch('store/status')
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async toggleStoreStatus(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: { isOnline: boolean },
+  ) {
+    return this.vendorService.toggleStoreStatus(user.id, body.isOnline);
+  }
+
+  @Patch('store/operating-hours')
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async updateOperatingHours(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: { operatingHours: any; autoScheduleEnabled?: boolean },
+  ) {
+    return this.vendorService.updateOperatingHours(user.id, body);
+  }
+
+  // --- Financial Overview & Commission ---
+
+  @Get('finance/overview')
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async getFinanceOverview(@CurrentUser() user: AuthenticatedUser) {
+    return this.vendorService.getFinanceOverview(user.id);
+  }
+
+  // --- Boutique Catalog Management ---
+
+  @Get('products')
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async getProducts(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: any,
+  ) {
+    return this.vendorService.getProducts(user.id, user.role, query);
+  }
+
+  @Post('products')
+  @HttpCode(HttpStatus.CREATED)
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async createProduct(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: any,
+  ) {
+    return this.vendorService.createProduct(user.id, user.role, body);
+  }
+
+  @Patch('products/:id/status')
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async updateProductStatus(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: { status: string },
+  ) {
+    return this.vendorService.updateProductStatus(user.id, user.role, id, body.status);
+  }
+
+  @Patch('products/:id/stock')
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async updateProductStock(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body: { stock: number },
+  ) {
+    return this.vendorService.updateProductStock(user.id, user.role, id, body.stock);
+  }
 }

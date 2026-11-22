@@ -384,4 +384,275 @@ export class VendorService {
     });
     return this.ordersService.formatOrderResponse(updated, role, userId);
   }
+
+  async getStoreStatus(userId: string) {
+    this.ensureDbConnected();
+    const vendor = await this.prisma.vendor.findFirst({
+      where: { userId },
+      include: {
+        categoryCommissions: { include: { category: true } },
+      },
+    });
+    if (!vendor) {
+      throw new ForbiddenException('Vendor store not linked to user');
+    }
+
+    let isCurrentlyOpen = vendor.isOnline;
+    if (vendor.isOnline && vendor.autoScheduleEnabled && vendor.operatingHours) {
+      const hoursMap = vendor.operatingHours as Record<string, any>;
+      const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+      const currentDay = days[new Date().getDay()];
+      const todaySchedule = hoursMap[currentDay];
+      if (todaySchedule && todaySchedule.isOpen === false) {
+        isCurrentlyOpen = false;
+      }
+    }
+
+    return {
+      vendorId: vendor.id,
+      storeName: vendor.storeName,
+      isOnline: vendor.isOnline,
+      isCurrentlyOpen,
+      autoScheduleEnabled: vendor.autoScheduleEnabled,
+      operatingHours: vendor.operatingHours,
+      notificationEmail: vendor.notificationEmail,
+      categoryCommissions: vendor.categoryCommissions.map((cc) => ({
+        id: cc.id,
+        categoryId: cc.categoryId,
+        categoryName: cc.category?.name || cc.categoryId,
+        commissionRate: cc.commissionRate,
+      })),
+    };
+  }
+
+  async toggleStoreStatus(userId: string, isOnline: boolean) {
+    this.ensureDbConnected();
+    const vendor = await this.prisma.vendor.findFirst({ where: { userId } });
+    if (!vendor) {
+      throw new ForbiddenException('Vendor store not linked to user');
+    }
+
+    const updated = await this.prisma.vendor.update({
+      where: { id: vendor.id },
+      data: { isOnline: Boolean(isOnline) },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        userRole: Role.VENDOR,
+        action: 'VENDOR_STORE_STATUS_TOGGLED',
+        entityType: 'Vendor',
+        entityId: vendor.id,
+        details: JSON.stringify({ previousStatus: vendor.isOnline, newStatus: updated.isOnline }),
+      },
+    });
+
+    return {
+      success: true,
+      isOnline: updated.isOnline,
+      message: updated.isOnline
+        ? 'Store is now online and accepting orders.'
+        : 'Store is now offline. Products will appear unavailable.',
+    };
+  }
+
+  async updateOperatingHours(userId: string, body: { operatingHours: any; autoScheduleEnabled?: boolean }) {
+    this.ensureDbConnected();
+    const vendor = await this.prisma.vendor.findFirst({ where: { userId } });
+    if (!vendor) {
+      throw new ForbiddenException('Vendor store not linked to user');
+    }
+
+    const updated = await this.prisma.vendor.update({
+      where: { id: vendor.id },
+      data: {
+        operatingHours: body.operatingHours,
+        autoScheduleEnabled: body.autoScheduleEnabled !== undefined ? Boolean(body.autoScheduleEnabled) : undefined,
+      },
+    });
+
+    return {
+      success: true,
+      operatingHours: updated.operatingHours,
+      autoScheduleEnabled: updated.autoScheduleEnabled,
+      message: 'Store operating hours saved successfully.',
+    };
+  }
+
+  async getFinanceOverview(userId: string) {
+    this.ensureDbConnected();
+    const vendor = await this.prisma.vendor.findFirst({
+      where: { userId },
+      include: {
+        categoryCommissions: { include: { category: true } },
+        ledgerEntries: { orderBy: { createdAt: 'desc' } },
+        payouts: { orderBy: { createdAt: 'desc' } },
+      },
+    });
+    if (!vendor) {
+      throw new ForbiddenException('Vendor store not linked to user');
+    }
+
+    let grossRevenue = 0;
+    let commissionClaimed = 0;
+    let netPayoutPayable = 0;
+
+    for (const e of vendor.ledgerEntries) {
+      if (e.entryType === 'ORDER_REVENUE') {
+        grossRevenue += Number(e.amount) || 0;
+      } else if (e.entryType === 'COMMISSION_DEDUCTED') {
+        commissionClaimed += Math.abs(Number(e.amount) || 0);
+      } else if (e.entryType === 'VENDOR_PAYOUT') {
+        netPayoutPayable += Number(e.amount) || 0;
+      }
+    }
+
+    const settledPayouts = vendor.payouts
+      .filter((p) => p.status === 'SETTLED' || p.status === 'COMPLETED')
+      .reduce((sum, p) => sum + p.amount, 0);
+
+    const pendingBalance = Math.max(0, netPayoutPayable - settledPayouts);
+
+    return {
+      vendorId: vendor.id,
+      storeName: vendor.storeName,
+      grossRevenue: Math.round(grossRevenue * 100) / 100,
+      commissionClaimed: Math.round(commissionClaimed * 100) / 100,
+      netEarnings: Math.round(netPayoutPayable * 100) / 100,
+      settledPayouts: Math.round(settledPayouts * 100) / 100,
+      pendingBalance: Math.round(pendingBalance * 100) / 100,
+      bankDetails: vendor.bankDetails,
+      categoryCommissions: vendor.categoryCommissions.map((cc) => ({
+        categoryId: cc.categoryId,
+        categoryName: cc.category?.name || cc.categoryId,
+        commissionRate: cc.commissionRate,
+      })),
+      recentTransactions: vendor.ledgerEntries.slice(0, 20).map((e) => ({
+        id: e.id,
+        orderId: e.orderId,
+        entryType: e.entryType,
+        amount: e.amount,
+        description: e.description,
+        createdAt: e.createdAt.toISOString(),
+      })),
+    };
+  }
+
+  async getProducts(userId: string, role: string, query?: any) {
+    this.ensureDbConnected();
+    const vendor = await this.resolveVendor(userId, role);
+    const where: any = {};
+    if (vendor) {
+      where.vendorId = vendor.id;
+    }
+    if (query?.search) {
+      where.OR = [
+        { title: { contains: query.search, mode: 'insensitive' } },
+        { brand: { contains: query.search, mode: 'insensitive' } },
+      ];
+    }
+    if (query?.categoryId) {
+      where.categoryId = query.categoryId;
+    }
+
+    const products = await this.prisma.product.findMany({
+      where,
+      include: {
+        category: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return {
+      vendorId: vendor?.id || null,
+      storeName: vendor?.storeName || 'Affordz Vendor',
+      total: products.length,
+      products: products.map((p) => ({
+        id: p.id,
+        title: p.title,
+        brand: p.brand,
+        categoryId: p.categoryId,
+        categoryName: p.category?.name || 'Category',
+        price: p.price,
+        originalPrice: p.originalPrice,
+        discount: p.discount,
+        stockQuantity: p.stockQuantity,
+        listingStatus: p.listingStatus,
+        image: p.image,
+        sizes: p.sizes,
+        fulfillmentType: p.fulfillmentType,
+        createdAt: p.createdAt.toISOString(),
+      })),
+    };
+  }
+
+  async createProduct(userId: string, role: string, body: any) {
+    this.ensureDbConnected();
+    const vendor = await this.resolveVendor(userId, role);
+    if (!vendor) {
+      throw new ForbiddenException('Vendor store not linked to user');
+    }
+
+    const product = await this.prisma.product.create({
+      data: {
+        vendorId: vendor.id,
+        fulfillmentType: 'VENDOR',
+        categoryId: body.categoryId,
+        title: body.title,
+        brand: body.brand || vendor.storeName,
+        description: body.description || '',
+        price: Number(body.price),
+        originalPrice: Number(body.originalPrice || body.price),
+        discount: body.discount || '0% OFF',
+        stockQuantity: Number(body.stockQuantity || 10),
+        listingStatus: body.listingStatus || 'ACTIVE',
+        sizes: Array.isArray(body.sizes) && body.sizes.length > 0 ? body.sizes : ['Free Size'],
+        image: body.image || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=600&q=80',
+        altText: body.title,
+        galleryImages: Array.isArray(body.galleryImages) ? body.galleryImages : [],
+        tags: Array.isArray(body.tags) ? body.tags : [],
+        readyToShip: true,
+      },
+      include: { category: true },
+    });
+
+    return {
+      success: true,
+      message: `Product "${product.title}" created successfully.`,
+      product,
+    };
+  }
+
+  async updateProductStatus(userId: string, role: string, productId: string, status: string) {
+    this.ensureDbConnected();
+    const vendor = await this.resolveVendor(userId, role);
+    const product = await this.prisma.product.findUnique({ where: { id: productId } });
+    if (!product) throw new NotFoundException('Product not found');
+    if (vendor && product.vendorId !== vendor.id) {
+      throw new ForbiddenException('Product does not belong to your boutique');
+    }
+
+    const updated = await this.prisma.product.update({
+      where: { id: productId },
+      data: { listingStatus: status },
+    });
+    return { success: true, product: updated };
+  }
+
+  async updateProductStock(userId: string, role: string, productId: string, stock: number) {
+    this.ensureDbConnected();
+    const vendor = await this.resolveVendor(userId, role);
+    const product = await this.prisma.product.findUnique({ where: { id: productId } });
+    if (!product) throw new NotFoundException('Product not found');
+    if (vendor && product.vendorId !== vendor.id) {
+      throw new ForbiddenException('Product does not belong to your boutique');
+    }
+
+    const updated = await this.prisma.product.update({
+      where: { id: productId },
+      data: { stockQuantity: Number(stock) },
+    });
+    return { success: true, product: updated };
+  }
 }

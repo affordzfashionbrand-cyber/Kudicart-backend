@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, UnauthorizedException, ServiceUnavailableException } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -66,15 +66,27 @@ export class FirebaseAdminService implements OnModuleInit {
       }
 
       // 2. Check GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_SERVICE_ACCOUNT_PATH
-      const explicitPath =
+      const rawExplicitPath =
         process.env.FIREBASE_SERVICE_ACCOUNT_PATH ||
         process.env.GOOGLE_APPLICATION_CREDENTIALS;
-      if (explicitPath && fs.existsSync(explicitPath)) {
-        const serviceAccount = JSON.parse(fs.readFileSync(explicitPath, 'utf8'));
-        initializeApp({ credential: cert(serviceAccount) });
-        this.initialized = true;
-        this.logger.log(`Firebase Admin SDK initialized from explicit path: ${explicitPath}`);
-        return;
+      if (rawExplicitPath) {
+        const cleanPath = rawExplicitPath.replace(/^["']|["']$/g, '').trim();
+        const candidatePaths = [
+          cleanPath,
+          path.resolve(cleanPath),
+          path.resolve(process.cwd(), cleanPath),
+          path.resolve(process.cwd(), 'kudicart-backend', cleanPath),
+          path.resolve(__dirname, '..', '..', '..', cleanPath),
+        ];
+        for (const p of candidatePaths) {
+          if (fs.existsSync(p)) {
+            const serviceAccount = JSON.parse(fs.readFileSync(p, 'utf8'));
+            initializeApp({ credential: cert(serviceAccount) });
+            this.initialized = true;
+            this.logger.log(`Firebase Admin SDK initialized from explicit path: ${p}`);
+            return;
+          }
+        }
       }
 
       // 3. Search standard filesystem paths
@@ -283,6 +295,68 @@ export class FirebaseAdminService implements OnModuleInit {
       this.logger.error(`FCM multicast delivery error: ${err.message}`, err.stack);
       return { successCount: 0, failureCount: tokens.length, invalidTokens: [] };
     }
+  }
+
+  async getUserByEmail(email: string): Promise<string | null> {
+    if (!this.initialized) return null;
+    try {
+      const { getAuth } = getFirebaseAuth();
+      const userRecord = await getAuth().getUserByEmail(email);
+      return userRecord.uid;
+    } catch (err: any) {
+      return null;
+    }
+  }
+
+  async createAuthUser(params: {
+    email: string;
+    password: string;
+    displayName: string;
+    phoneNumber?: string;
+  }): Promise<{ uid: string }> {
+    if (!this.initialized) {
+      this.logger.error(`Firebase Admin SDK is not initialized when attempting to create auth user for ${params.email}`);
+      throw new ServiceUnavailableException('Firebase authentication service is not initialized on this server.');
+    }
+    const { getAuth } = getFirebaseAuth();
+    const auth = getAuth();
+    try {
+      const userRecord = await auth.createUser({
+        email: params.email,
+        password: params.password,
+        displayName: params.displayName,
+        ...(params.phoneNumber ? { phoneNumber: params.phoneNumber } : {}),
+      });
+      await auth.setCustomUserClaims(userRecord.uid, { role: 'VENDOR' });
+      return { uid: userRecord.uid };
+    } catch (err: any) {
+      if (err.code === 'auth/phone-number-already-exists' && params.phoneNumber) {
+        this.logger.warn(
+          `Phone number ${params.phoneNumber} already registered on Firebase. Retrying user creation with email only for ${params.email}.`,
+        );
+        const retryRecord = await auth.createUser({
+          email: params.email,
+          password: params.password,
+          displayName: params.displayName,
+        });
+        await auth.setCustomUserClaims(retryRecord.uid, { role: 'VENDOR' });
+        return { uid: retryRecord.uid };
+      }
+      this.logger.error(`Firebase Admin createUser failed for ${params.email}: ${err.message} (code: ${err.code})`);
+      throw err;
+    }
+  }
+
+  async setUserPassword(uid: string, password: string): Promise<void> {
+    if (!this.initialized) return;
+    const { getAuth } = getFirebaseAuth();
+    await getAuth().updateUser(uid, { password });
+  }
+
+  async setUserClaims(uid: string, claims: Record<string, any>): Promise<void> {
+    if (!this.initialized) return;
+    const { getAuth } = getFirebaseAuth();
+    await getAuth().setCustomUserClaims(uid, claims);
   }
 }
 

@@ -562,6 +562,93 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
 
   // ================= 5. VENDORS MODULE =================
   describe('5. Vendors / Boutiques Management', () => {
+    beforeAll(async () => {
+      await prismaService.user.upsert({
+        where: { id: 'usr-vendor-7821' },
+        update: {},
+        create: {
+          id: 'usr-vendor-7821',
+          firebaseUid: 'fb-test-7821',
+          name: 'Tariq Mir',
+          email: 'tariq.mir@kashmirloom.example',
+          phone: '+91 98201 11204',
+          role: Role.VENDOR,
+        },
+      });
+      await prismaService.vendor.upsert({
+        where: { id: 'ven_7821' },
+        update: { status: 'PENDING_REVIEW' },
+        create: {
+          id: 'ven_7821',
+          userId: 'usr-vendor-7821',
+          storeName: 'Kashmir Loom Heritage',
+          status: 'PENDING_REVIEW',
+          category: 'Textiles & Apparel',
+          operatingHub: 'Bandra West Terminal Hub, Mumbai',
+          address: '14/B, Heritage Arcade, Hill Road, Bandra West',
+        },
+      });
+
+      await prismaService.user.upsert({
+        where: { id: 'usr-vendor-7814' },
+        update: {},
+        create: {
+          id: 'usr-vendor-7814',
+          firebaseUid: 'fb-test-7814',
+          name: 'Devika Singhania',
+          email: 'devika@luxeheritage.example',
+          phone: '+91 98202 44912',
+          role: Role.VENDOR,
+        },
+      });
+      await prismaService.vendor.upsert({
+        where: { id: 'ven_7814' },
+        update: { status: 'ACTIVE' },
+        create: {
+          id: 'ven_7814',
+          userId: 'usr-vendor-7814',
+          storeName: 'Luxe Heritage Clothiers',
+          status: 'ACTIVE',
+          category: 'Women Ethnic',
+        },
+      });
+
+      const dossiers = {
+        ven_7821: {
+          vendorNumber: '#VEN-7821',
+          storeName: 'Kashmir Loom Heritage',
+          ownerName: 'Tariq Mir',
+          email: 'tariq.mir@kashmirloom.example',
+          documents: [
+            { id: 'doc_1', title: 'Certificate of Incorporation', verified: false },
+          ],
+          bankDetails: { bankName: 'HDFC Bank', accountMasked: '•••• 4092' },
+        },
+        ven_7814: {
+          vendorNumber: '#VEN-7814',
+          storeName: 'Luxe Heritage Clothiers',
+          ownerName: 'Devika Singhania',
+        },
+      };
+      await prismaService.workspaceSetting.upsert({
+        where: { key: 'vendorDossiers' },
+        update: { value: dossiers as any },
+        create: { key: 'vendorDossiers', value: dossiers as any },
+      });
+    });
+
+    afterAll(async () => {
+      await prismaService.vendor.deleteMany({
+        where: { id: { in: ['ven_7821', 'ven_7814'] } },
+      });
+      await prismaService.user.deleteMany({
+        where: { id: { in: ['usr-vendor-7821', 'usr-vendor-7814'] } },
+      });
+      await prismaService.workspaceSetting.deleteMany({
+        where: { key: 'vendorDossiers' },
+      });
+    });
+
     it('Vendors: lists and filters vendors by status tab and category', async () => {
       const allVendors = await vendorsService.listVendors({});
       expect(allVendors.data.length).toBeGreaterThanOrEqual(2);
@@ -618,6 +705,31 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
 
       // Toggle back
       await vendorsService.toggleSuspendVendor('ven_7814');
+    });
+
+    it('Vendors: deletes a vendor boutique and cleans up vendor record', async () => {
+      const tempUser = await prismaService.user.create({
+        data: {
+          id: 'usr-vendor-del',
+          firebaseUid: 'fb-test-del',
+          name: 'Temp Vendor',
+          email: 'temp.del@example.com',
+          role: Role.VENDOR,
+        },
+      });
+      const tempVendor = await prismaService.vendor.create({
+        data: {
+          id: 'ven-temp-del',
+          userId: tempUser.id,
+          storeName: 'To Be Deleted Boutique',
+        },
+      });
+
+      const delRes = await vendorsService.deleteVendor('ven-temp-del', 'ADM-001', 'Amara Okonkwo');
+      expect(delRes.success).toBe(true);
+
+      const check = await prismaService.vendor.findUnique({ where: { id: 'ven-temp-del' } });
+      expect(check).toBeNull();
     });
   });
 

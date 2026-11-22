@@ -1,6 +1,7 @@
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 generator client {
@@ -133,6 +134,7 @@ model Category {
   isPopular    Boolean    @default(false)
   products     Product[]
   banners      HomeBanner[]
+  vendorCommissions VendorCategoryCommission[]
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
@@ -160,8 +162,29 @@ model Vendor {
   orders          Order[]        @relation("VendorOrders")
   ledgerEntries   LedgerEntry[]
   payouts         VendorPayout[]
+  
+  // Added fields to match service expectations
+  isOnline                Boolean                    @default(true)
+  autoScheduleEnabled     Boolean                    @default(false)
+  notificationEmail       String?
+  operatingHours          Json?
+  bankDetails             Json?
+  categoryCommissions     VendorCategoryCommission[]
+  
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
+}
+
+model VendorCategoryCommission {
+  id          String   @id @default(uuid())
+  vendorId    String
+  vendor      Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id])
+  commission  Float
+  commissionRate Float @default(12.5)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 model DarkStoreHub {
@@ -174,6 +197,7 @@ model DarkStoreHub {
   deliveryMinutes Int             @default(18)
   isActive        Boolean         @default(true)
   products        Product[]
+  productStocks   ProductStock[]
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 }
@@ -194,6 +218,7 @@ model Product {
   rating            Float           @default(4.5)
   reviewsCount      Int             @default(0)
   stockQuantity     Int             @default(10)
+  stockAssignments  ProductStock[]
   stockBadge        String?
   listingStatus     String          @default("ACTIVE")
   gender            String?
@@ -215,12 +240,26 @@ model Product {
   colorHex          String?
   specifications    Json?
   certification     String?
+  commissionAmount  Float?
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
   cartItems         CartItem[]
   orderItems        OrderItem[]
   reviews           Review[]
   banners           HomeBanner[]
+}
+
+model ProductStock {
+  id            String       @id @default(uuid())
+  productId     String
+  product       Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  hubId         String
+  hub           DarkStoreHub @relation(fields: [hubId], references: [id])
+  stockQuantity Int          @default(0)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([productId, hubId])
 }
 
 model Coupon {
@@ -375,6 +414,8 @@ model OrderItem {
   tryAndBuyDecision String?
   returnCondition   String?
   collectedAt       DateTime?
+  appliedCommissionRate Float?
+  commissionAmount      Float?
 }
 
 model OrderStatusHistory {

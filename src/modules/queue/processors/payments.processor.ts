@@ -63,6 +63,7 @@ export class PaymentsProcessor implements OnModuleInit, OnModuleDestroy {
         const report = await this.paymentReconciliation.reconcile({
           pendingThresholdMinutes: 1,
           expiryThresholdMinutes: Number(data?.expiryThresholdMinutes ?? 15),
+          orderId: data?.orderId,
         });
         return {
           handled: true,

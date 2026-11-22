@@ -22,6 +22,7 @@ export interface ReconciliationReport {
 @Injectable()
 export class PaymentReconciliationService {
   private readonly logger = new Logger(PaymentReconciliationService.name);
+  private readonly activeRefundLocks = new Set<string>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -30,7 +31,11 @@ export class PaymentReconciliationService {
   ) {}
 
   async reconcile(
-    options: { pendingThresholdMinutes?: number; expiryThresholdMinutes?: number } = {},
+    options: {
+      pendingThresholdMinutes?: number;
+      expiryThresholdMinutes?: number;
+      orderId?: string;
+    } = {},
   ): Promise<ReconciliationReport> {
     const details: ReconciliationReport['details'] = [];
     if (!this.prisma.isConnectedToDb) {
@@ -156,6 +161,7 @@ export class PaymentReconciliationService {
       where: {
         paymentMethod: 'RAZORPAY',
         paymentStatus: 'REFUND_PENDING',
+        ...(options.orderId ? { id: options.orderId } : {}),
       },
       include: { tryAndBuySession: true },
     });
@@ -171,148 +177,163 @@ export class PaymentReconciliationService {
         continue;
       }
 
-      // 1. Atomic Concurrency Lock: Use CAS on order.version to prevent concurrent reconciliation
-      // workers from executing duplicate refund calls against Razorpay simultaneously.
-      const claim = await this.prisma.order.updateMany({
-        where: {
-          id: order.id,
-          paymentStatus: 'REFUND_PENDING',
-          version: order.version,
-        },
-        data: {
-          version: { increment: 1 },
-        },
-      });
-
-      if (claim.count === 0) {
+      if (this.activeRefundLocks.has(order.id)) {
         details.push({
           orderId: order.id,
           orderNumber: order.orderNumber,
           action: 'SKIPPED',
-          reason: 'Concurrent reconciliation lock: another process claimed this refund',
+          reason: 'Refund currently in progress in this instance',
         });
         continue;
       }
 
-      // 2. Check existing refund transactions for this order to prevent duplicate submissions
-      const existingRefund = await this.prisma.paymentTransaction.findFirst({
-        where: { orderId: order.id, transactionType: 'REFUND' },
-        orderBy: { createdAt: 'desc' },
-      });
-
-      if (existingRefund) {
-        // A. Successfully completed refund: ensure order reflects REFUNDED and skip re-submission
-        if (existingRefund.status === 'REFUNDED' || existingRefund.status === 'COMPLETED') {
-          await this.prisma.order.updateMany({
-            where: { id: order.id, paymentStatus: 'REFUND_PENDING' },
-            data: { paymentStatus: 'REFUNDED' },
-          });
-          details.push({
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            action: 'SKIPPED',
-            reason: `Refund already completed successfully (${existingRefund.refundId || existingRefund.id})`,
-          });
-          continue;
-        }
-
-        // B. Pending refund awaiting provider settlement: skip duplicate submission
-        if (existingRefund.status === 'PENDING') {
-          details.push({
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            action: 'SKIPPED',
-            reason: `Refund submission already pending provider confirmation (${existingRefund.refundId || existingRefund.id})`,
-          });
-          continue;
-        }
-
-        // C. Previously failed refund: proceed to retry
-        if (existingRefund.status === 'FAILED') {
-          this.logger.warn(
-            `Retrying previously failed refund for Order #${order.orderNumber} (previous failure: ${existingRefund.failureReason || 'unknown'})`,
-          );
-        }
-      }
-
-      const refundAmount =
-        order.tryAndBuySession?.refundAmount && order.tryAndBuySession.refundAmount > 0
-          ? order.tryAndBuySession.refundAmount
-          : order.grandTotal;
-
+      this.activeRefundLocks.add(order.id);
       try {
-        const res = await this.razorpayClient.refundPayment({
-          paymentId: order.razorpayPaymentId,
-          amountInPaisa: Math.round(refundAmount * 100),
-          notes: { orderId: order.id, orderNumber: order.orderNumber },
+        // 1. Atomic Concurrency Lock: Use CAS on order.version to prevent concurrent reconciliation
+        // workers from executing duplicate refund calls against Razorpay simultaneously.
+        const claim = await this.prisma.order.updateMany({
+          where: {
+            id: order.id,
+            paymentStatus: 'REFUND_PENDING',
+            version: order.version,
+          },
+          data: {
+            version: { increment: 1 },
+          },
         });
 
-        const isProcessed = res.status === 'processed';
-        const finalStatus = isProcessed ? 'REFUNDED' : 'PENDING';
+        if (claim.count === 0) {
+          details.push({
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            action: 'SKIPPED',
+            reason: 'Concurrent reconciliation lock: another process claimed this refund',
+          });
+          continue;
+        }
 
-        await this.prisma.$transaction(async (tx) => {
-          if (isProcessed) {
-            await tx.order.updateMany({
+        // 2. Check existing refund transactions for this order to prevent duplicate submissions
+        const existingRefund = await this.prisma.paymentTransaction.findFirst({
+          where: { orderId: order.id, transactionType: 'REFUND' },
+          orderBy: { createdAt: 'desc' },
+        });
+
+        if (existingRefund) {
+          // A. Successfully completed refund: ensure order reflects REFUNDED and skip re-submission
+          if (existingRefund.status === 'REFUNDED' || existingRefund.status === 'COMPLETED') {
+            await this.prisma.order.updateMany({
               where: { id: order.id, paymentStatus: 'REFUND_PENDING' },
               data: { paymentStatus: 'REFUNDED' },
             });
-            if (order.tryAndBuySession) {
-              await tx.tryAndBuySession.updateMany({
-                where: { id: order.tryAndBuySession.id, paymentStatus: 'REFUND_PENDING' },
+            details.push({
+              orderId: order.id,
+              orderNumber: order.orderNumber,
+              action: 'SKIPPED',
+              reason: `Refund already completed successfully (${existingRefund.refundId || existingRefund.id})`,
+            });
+            continue;
+          }
+
+          // B. Pending refund awaiting provider settlement: skip duplicate submission
+          if (existingRefund.status === 'PENDING') {
+            details.push({
+              orderId: order.id,
+              orderNumber: order.orderNumber,
+              action: 'SKIPPED',
+              reason: `Refund submission already pending provider confirmation (${existingRefund.refundId || existingRefund.id})`,
+            });
+            continue;
+          }
+
+          // C. Previously failed refund: proceed to retry
+          if (existingRefund.status === 'FAILED') {
+            this.logger.warn(
+              `Retrying previously failed refund for Order #${order.orderNumber} (previous failure: ${existingRefund.failureReason || 'unknown'})`,
+            );
+          }
+        }
+
+        const refundAmount =
+          order.tryAndBuySession?.refundAmount && order.tryAndBuySession.refundAmount > 0
+            ? order.tryAndBuySession.refundAmount
+            : order.grandTotal;
+
+        try {
+          const res = await this.razorpayClient.refundPayment({
+            paymentId: order.razorpayPaymentId,
+            amountInPaisa: Math.round(refundAmount * 100),
+            notes: { orderId: order.id, orderNumber: order.orderNumber },
+          });
+
+          const isProcessed = res.status === 'processed';
+          const finalStatus = isProcessed ? 'REFUNDED' : 'PENDING';
+
+          await this.prisma.$transaction(async (tx) => {
+            if (isProcessed) {
+              await tx.order.updateMany({
+                where: { id: order.id, paymentStatus: 'REFUND_PENDING' },
                 data: { paymentStatus: 'REFUNDED' },
               });
+              if (order.tryAndBuySession) {
+                await tx.tryAndBuySession.updateMany({
+                  where: { id: order.tryAndBuySession.id, paymentStatus: 'REFUND_PENDING' },
+                  data: { paymentStatus: 'REFUNDED' },
+                });
+              }
             }
-          }
-          const exists = await tx.paymentTransaction.findUnique({
-            where: { refundId: res.refundId },
+            const exists = await tx.paymentTransaction.findUnique({
+              where: { refundId: res.refundId },
+            });
+            if (!exists) {
+              await tx.paymentTransaction.create({
+                data: {
+                  orderId: order.id,
+                  checkoutGroupId: order.checkoutGroupId,
+                  paymentId: order.razorpayPaymentId!,
+                  refundId: res.refundId,
+                  transactionType: 'REFUND',
+                  amount: refundAmount,
+                  currency: 'INR',
+                  status: finalStatus,
+                  method: 'Razorpay',
+                },
+              });
+            }
           });
-          if (!exists) {
-            await tx.paymentTransaction.create({
+
+          refundsCompletedCount++;
+          details.push({
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            action: 'REFUNDED',
+            reason: `Refund ${res.refundId} processed (₹${refundAmount})`,
+          });
+        } catch (err: any) {
+          await this.prisma.paymentTransaction
+            .create({
               data: {
                 orderId: order.id,
                 checkoutGroupId: order.checkoutGroupId,
                 paymentId: order.razorpayPaymentId!,
-                refundId: res.refundId,
                 transactionType: 'REFUND',
                 amount: refundAmount,
                 currency: 'INR',
-                status: finalStatus,
+                status: 'FAILED',
+                failureReason: err?.message || 'Razorpay refund execution failed',
                 method: 'Razorpay',
               },
-            });
-          }
-        });
+            })
+            .catch(() => {});
 
-        refundsCompletedCount++;
-        details.push({
-          orderId: order.id,
-          orderNumber: order.orderNumber,
-          action: 'REFUNDED',
-          reason: `Refund ${res.refundId} processed (₹${refundAmount})`,
-        });
-      } catch (err: any) {
-        await this.prisma.paymentTransaction
-          .create({
-            data: {
-              orderId: order.id,
-              checkoutGroupId: order.checkoutGroupId,
-              paymentId: order.razorpayPaymentId!,
-              transactionType: 'REFUND',
-              amount: refundAmount,
-              currency: 'INR',
-              status: 'FAILED',
-              failureReason: err?.message || 'Razorpay refund execution failed',
-              method: 'Razorpay',
-            },
-          })
-          .catch(() => {});
-
-        details.push({
-          orderId: order.id,
-          orderNumber: order.orderNumber,
-          action: 'SKIPPED',
-          reason: `Refund attempt failed and recorded for retry: ${err?.message}`,
-        });
+          details.push({
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            action: 'SKIPPED',
+            reason: `Refund attempt failed and recorded for retry: ${err?.message}`,
+          });
+        }
+      } finally {
+        this.activeRefundLocks.delete(order.id);
       }
     }
 
