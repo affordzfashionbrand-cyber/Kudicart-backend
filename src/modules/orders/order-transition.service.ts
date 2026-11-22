@@ -189,9 +189,51 @@ export class OrderTransitionService {
           });
 
           if (!existingLedger && existing.vendorId) {
-            const commissionRate =
-              existing.vendor?.commissionRate ?? DEFAULT_COMMISSION_RATE;
-            const breakdown = computeCommissionBreakdown(netKeptSubtotal, commissionRate);
+            let totalCommission = 0;
+            let hasItemCommissions = false;
+
+            const keptItemIds: string[] | null =
+              Array.isArray((existing as any).tryAndBuySession?.keptItemIds)
+                ? (existing as any).tryAndBuySession.keptItemIds
+                : null;
+
+            if (Array.isArray(existing.items) && existing.items.length > 0) {
+              for (const it of existing.items) {
+                // If Try & Buy kept items are specified, ignore returned items
+                if (keptItemIds && keptItemIds.length > 0 && !keptItemIds.includes(it.id)) {
+                  continue;
+                }
+                if ((it as any).commissionAmount != null) {
+                  totalCommission += Number((it as any).commissionAmount);
+                  hasItemCommissions = true;
+                }
+              }
+            }
+
+            let commissionAmount = 0;
+            let vendorPayout = 0;
+            let displayRate = 0;
+
+            if (hasItemCommissions && totalCommission > 0) {
+              // If partial subtotal is settled (e.g. returns) and keptItemIds was not explicit, prorate proportionally
+              const totalItemsSubtotal = (existing.items || []).reduce(
+                (sum, it) => sum + Number(it.price || 0) * Number(it.quantity || 1),
+                0,
+              );
+              if (!keptItemIds && totalItemsSubtotal > 0 && netKeptSubtotal < totalItemsSubtotal) {
+                totalCommission = (totalCommission / totalItemsSubtotal) * netKeptSubtotal;
+              }
+
+              commissionAmount = Math.round(totalCommission * 100) / 100;
+              vendorPayout = Math.max(0, Math.round((netKeptSubtotal - commissionAmount) * 100) / 100);
+              displayRate = netKeptSubtotal > 0 ? Math.round((commissionAmount / netKeptSubtotal) * 1000) / 10 : 0;
+            } else {
+              const commissionRate = existing.vendor?.commissionRate ?? DEFAULT_COMMISSION_RATE;
+              const breakdown = computeCommissionBreakdown(netKeptSubtotal, commissionRate);
+              commissionAmount = breakdown.commissionAmount;
+              vendorPayout = breakdown.vendorPayout;
+              displayRate = breakdown.commissionRate;
+            }
 
             await tx.ledgerEntry.createMany({
               data: [
@@ -208,15 +250,15 @@ export class OrderTransitionService {
                   vendorId: existing.vendorId,
                   driverId: existing.driverProfileId || existing.driverId || null,
                   entryType: 'COMMISSION_DEDUCTED',
-                  amount: -breakdown.commissionAmount,
-                  description: `Platform commission (${breakdown.commissionRate}%) on Order #${existing.orderNumber}`,
+                  amount: -commissionAmount,
+                  description: `Platform category-wise commission (~${displayRate}%) on Order #${existing.orderNumber}`,
                 },
                 {
                   orderId: existing.id,
                   vendorId: existing.vendorId,
                   driverId: existing.driverProfileId || existing.driverId || null,
                   entryType: 'VENDOR_PAYOUT',
-                  amount: breakdown.vendorPayout,
+                  amount: vendorPayout,
                   description: `Net vendor settlement payable for Order #${existing.orderNumber}`,
                 },
               ],

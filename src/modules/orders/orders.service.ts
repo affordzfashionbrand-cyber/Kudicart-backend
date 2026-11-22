@@ -20,6 +20,7 @@ import { QueueService } from '../queue/queue.service';
 import { QueueJobType } from '../queue/queue.constants';
 import { CheckoutDto } from './dto/checkout.dto';
 import { Role } from '../../common/enums/role.enum';
+import { EmailService } from '../notifications/email.service';
 import {
   CheckoutResponseContract,
   LIVE_TRACKING_ACTIVE_STATUSES,
@@ -43,7 +44,12 @@ const ORDER_WITH_RELATIONS = {
   items: true,
   history: { orderBy: { createdAt: 'asc' as const } },
   address: true,
-  vendor: true,
+  vendor: {
+    include: {
+      user: true,
+      categoryCommissions: true,
+    },
+  },
   driver: {
     select: {
       id: true,
@@ -71,6 +77,7 @@ export class OrdersService {
     @Optional() private readonly googleRoutesService?: GoogleRoutesService,
     @Optional() private readonly trackingGateway?: TrackingRealtimeGateway,
     @Optional() private readonly queueService?: QueueService,
+    @Optional() private readonly emailService?: EmailService,
   ) {}
 
   private ensureDbConnected() {
@@ -140,6 +147,7 @@ export class OrdersService {
     vendor?: any;
   } {
     const isTerminal = TERMINAL_ORDER_STATUSES.includes(order.status as OrderStatus);
+    const isVendorViewer = viewerRole === Role.VENDOR;
     const shouldExposeOtp =
       viewerRole === Role.CUSTOMER &&
       viewerUserId &&
@@ -147,19 +155,33 @@ export class OrdersService {
       !isTerminal &&
       Boolean(order.deliveryOtpHash);
 
+    const formattedDeliveryAddress = isVendorViewer && order.deliveryAddress
+      ? {
+          area: order.deliveryAddress.area || order.deliveryAddress.locality || 'Delivery Area',
+          city: order.deliveryAddress.city || 'Mumbai',
+          state: order.deliveryAddress.state || 'Maharashtra',
+          postalCode: order.deliveryAddress.postalCode || '400050',
+        }
+      : order.deliveryAddress ?? null;
+
     const formatted: any = {
       id: order.id,
       orderNumber: order.orderNumber,
       version: order.version ?? 1,
       checkoutGroupId: order.checkoutGroupId ?? null,
-      customerId: order.customerId,
-      customerName: order.customer?.name || order.deliveryAddress?.recipientName || undefined,
+      customerId: isVendorViewer ? undefined : order.customerId,
+      customerName: isVendorViewer
+        ? `Customer #${order.orderNumber ? String(order.orderNumber).slice(-4) : 'KC'}`
+        : (order.customer?.name || order.deliveryAddress?.recipientName || undefined),
       vendorId: order.vendorId ?? null,
       vendorName: order.vendor?.storeName || undefined,
       driverId: order.driverId ?? null,
       driverProfileId: order.driverProfileId ?? null,
       driverName: order.driverProfile?.fullName || order.driver?.name || null,
       driverPhone: order.driverProfile?.phone || order.driver?.phone || null,
+      driverVehicle: order.driverProfile?.vehicleRegistration
+        ? `${order.driverProfile.vehicleType || 'Vehicle'} (${order.driverProfile.vehicleRegistration})`
+        : (order.driverProfile?.vehicleType || null),
       fulfillmentType: order.fulfillmentType || 'DARK_STORE',
       status: order.status,
       paymentMethod: order.paymentMethod,
@@ -176,9 +198,9 @@ export class OrdersService {
       grandTotal: Math.round(order.grandTotal || 0),
       etaMinutes: order.etaMinutes ?? 0,
       isTryAndBuy: Boolean(order.isTryAndBuy),
-      deliveryInstructions: order.deliveryInstructions ?? null,
+      deliveryInstructions: isVendorViewer ? null : (order.deliveryInstructions ?? null),
       verificationPhotos: Array.isArray(order.verificationPhotos) ? order.verificationPhotos : [],
-      deliveryAddress: order.deliveryAddress ?? null,
+      deliveryAddress: formattedDeliveryAddress,
       arrivedAt: order.arrivedAt ? new Date(order.arrivedAt).toISOString() : null,
       deliveredAt: order.deliveredAt ? new Date(order.deliveredAt).toISOString() : null,
       cancelledAt: order.cancelledAt ? new Date(order.cancelledAt).toISOString() : null,
@@ -345,7 +367,16 @@ export class OrdersService {
     const productIds = Array.from(new Set(rawRequestedItems.map((i) => i.productId)));
     const products = await this.prisma.product.findMany({
       where: { id: { in: productIds } },
-      include: { vendor: true, darkStoreHub: true },
+      include: {
+        vendor: {
+          include: {
+            user: true,
+            categoryCommissions: true,
+          },
+        },
+        darkStoreHub: true,
+        category: true,
+      },
     });
     const productMap = new Map(products.map((p) => [p.id, p]));
 
@@ -353,6 +384,14 @@ export class OrdersService {
       const product = productMap.get(reqItem.productId);
       if (!product) {
         throw new NotFoundException(`Product '${reqItem.productId}' not found`);
+      }
+
+      if (product.fulfillmentType === 'VENDOR' && product.vendor) {
+        if (product.vendor.isOnline === false) {
+          throw new BadRequestException(
+            `Product "${product.title}" is currently unavailable because boutique "${product.vendor.storeName}" is offline. Please check back when vendor is online.`,
+          );
+        }
       }
 
       if (product.fulfillmentType === 'DARK_STORE') {
@@ -376,6 +415,19 @@ export class OrdersService {
         }
       }
 
+      let appliedCommissionRate = 0;
+      if (product.vendor) {
+        const catMatch = product.vendor.categoryCommissions?.find(
+          (cc) => cc.categoryId === product.categoryId,
+        );
+        appliedCommissionRate = catMatch
+          ? catMatch.commissionRate
+          : (product.vendor.commissionRate ?? 0);
+      }
+      const itemPrice = Math.round(product.price);
+      const commissionAmount =
+        Math.round(itemPrice * reqItem.quantity * (appliedCommissionRate / 100) * 100) / 100;
+
       const normalizedSize = reqItem.size?.trim() || product.sizes?.[0] || 'Free Size';
       const itemTryAndBuyEligible =
         (product.fulfillmentType || 'DARK_STORE') === 'DARK_STORE' &&
@@ -388,13 +440,15 @@ export class OrdersService {
         brand: product.brand,
         size: normalizedSize,
         trialSize: dto.isTryAndBuy && itemTryAndBuyEligible ? reqItem.trialSize ?? null : null,
-        price: Math.round(product.price),
+        price: itemPrice,
         quantity: reqItem.quantity,
         image: product.image,
         vendorId: product.vendorId || 'vend-affordz-official',
         fulfillmentType: (product.fulfillmentType || 'DARK_STORE') as 'DARK_STORE' | 'VENDOR',
         etaMinutes: product.darkStoreHub?.deliveryMinutes ?? 28,
         itemTryAndBuyEligible,
+        appliedCommissionRate,
+        commissionAmount,
       };
     });
 
@@ -681,6 +735,8 @@ export class OrdersService {
                 price: it.price,
                 quantity: it.quantity,
                 image: it.image,
+                appliedCommissionRate: it.appliedCommissionRate ?? null,
+                commissionAmount: it.commissionAmount ?? null,
               })),
             },
             history: {
@@ -904,6 +960,27 @@ export class OrdersService {
           },
         })
         .catch((err) => this.logger.warn(`Failed saving IdempotencyKey: ${err?.message}`));
+    }
+
+    // Dispatch asynchronous order alert email to boutique vendors
+    for (const freshOrd of freshOrders) {
+      if (freshOrd.fulfillmentType === 'VENDOR' && freshOrd.vendor) {
+        const recipientEmail = freshOrd.vendor.notificationEmail || (freshOrd.vendor as any).user?.email;
+        if (recipientEmail && this.emailService) {
+          const portalUrl = `${process.env.VENDOR_PORTAL_URL || 'http://localhost:3000'}/vendor/orders`;
+          this.emailService
+            .sendVendorOrderNotificationEmail({
+              to: recipientEmail,
+              storeName: freshOrd.vendor.storeName,
+              orderNumber: freshOrd.orderNumber,
+              orderId: freshOrd.id,
+              itemCount: freshOrd.items?.length || 1,
+              totalAmount: freshOrd.grandTotal,
+              portalUrl,
+            })
+            .catch((e) => this.logger.warn(`Failed to dispatch vendor alert email: ${e.message}`));
+        }
+      }
     }
 
     return response;

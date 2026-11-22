@@ -355,42 +355,6 @@ async function main() {
     },
   });
 
-  const adminVendorUserMap: Record<string, string> = {
-    ven_7821: 'usr-vendor-7821',
-    ven_7814: 'usr-vendor-7814',
-    ven_7809: 'usr-vendor-7809',
-    ven_7792: 'usr-vendor-7792',
-  };
-  for (const av of INITIAL_ADMIN_VENDORS) {
-    const userId = adminVendorUserMap[av.id];
-    if (!userId) continue;
-    await prisma.vendor.upsert({
-      where: { id: av.id },
-      update: {
-        storeName: av.storeName,
-        commissionRate: 15,
-        status: av.status,
-        address: av.registeredAddress,
-        phone: av.phone,
-        contactPerson: av.ownerName,
-        operatingHub: av.operatingHub,
-        category: av.category,
-      },
-      create: {
-        id: av.id,
-        userId,
-        storeName: av.storeName,
-        commissionRate: 15,
-        status: av.status,
-        address: av.registeredAddress,
-        phone: av.phone,
-        contactPerson: av.ownerName,
-        operatingHub: av.operatingHub,
-        category: av.category,
-      },
-    });
-  }
-
   // 5. Categories (legacy cat-1..cat-6 + full hierarchy)
   const coreCats = [
     { id: 'cat-1', name: 'Atelier Wear', slug: 'atelier-wear', level: 1, icon: 'Sparkles', countText: '148 designs' },
@@ -1329,32 +1293,6 @@ async function main() {
         permissions: INITIAL_ROLE_PERMISSIONS,
       } as any,
     },
-  });
-
-  const vendorDossiersValue = Object.fromEntries(
-    INITIAL_ADMIN_VENDORS.map((v: any) => [
-      v.id,
-      {
-        vendorNumber: v.vendorNumber,
-        legalEntityName: v.legalEntityName,
-        ownerName: v.ownerName,
-        ownerRole: v.ownerRole,
-        email: v.email,
-        registeredAddress: v.registeredAddress,
-        gstin: v.gstin,
-        pan: v.pan,
-        documents: v.documents || [],
-        bankDetails: v.bankDetails || null,
-        assignedReviewer: v.assignedReviewer || null,
-        submissionDate: v.submissionDate || null,
-        productCount: v.productCount ?? 0,
-      },
-    ]),
-  );
-  await prisma.workspaceSetting.upsert({
-    where: { key: 'vendorDossiers' },
-    update: { value: vendorDossiersValue as any },
-    create: { key: 'vendorDossiers', value: vendorDossiersValue as any },
   });
 
   console.log('Affordz PostgreSQL seeding completed.');

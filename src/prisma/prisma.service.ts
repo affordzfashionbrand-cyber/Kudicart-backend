@@ -58,8 +58,17 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
           );
         }
         this.logger.warn(
-          `PrismaService: PostgreSQL connection failed (${err.message}) in development/test mode.`,
+          `PrismaService: PostgreSQL connection failed (${err.message}) in development/test mode. Scheduling retry...`,
         );
+        setTimeout(async () => {
+          try {
+            await this.$connect();
+            this.isConnectedToDb = true;
+            this.logger.log('PrismaService: Successfully reconnected to PostgreSQL database on retry.');
+          } catch (retryErr: any) {
+            this.logger.warn(`PrismaService: Reconnect retry failed: ${retryErr.message}`);
+          }
+        }, 5000);
       }
     } else {
       if (isProduction) {

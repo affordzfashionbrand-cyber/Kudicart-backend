@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Param,
   Query,
   Body,
@@ -13,6 +14,7 @@ import {
 import { AdminVendorsService } from '../services/admin-vendors.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
 import { VendorReviewActionDto } from '../dto/admin-actions.dto';
+import { OnboardVendorDto } from '../dto/onboard-vendor.dto';
 import { FirebaseAuthGuard } from '../../../common/guards/auth.guard';
 import { RolesGuard } from '../../../common/guards/roles.guard';
 import { Roles } from '../../../common/decorators/roles.decorator';
@@ -28,6 +30,15 @@ export class AdminVendorsController {
   @Get()
   async listVendors(@Query() query: AdminQueryDto) {
     return this.vendorsService.listVendors(query);
+  }
+
+  @Post('onboard')
+  @HttpCode(HttpStatus.CREATED)
+  async onboardVendor(
+    @Body() dto: OnboardVendorDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.vendorsService.onboardVendor(dto, actor?.id, actor?.name);
   }
 
   @Get(':id')
@@ -61,6 +72,25 @@ export class AdminVendorsController {
     @CurrentUser() actor: AuthenticatedUser,
   ) {
     return this.vendorsService.toggleSuspendVendor(id, actor?.id, actor?.name);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.OK)
+  async deleteVendor(
+    @Param('id') id: string,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.vendorsService.deleteVendor(id, actor?.id, actor?.name);
+  }
+
+  @Post(':id/reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetVendorPassword(
+    @Param('id') id: string,
+    @Body('password') password: string,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.vendorsService.resetVendorPassword(id, password, actor?.id, actor?.name);
   }
 }
 
