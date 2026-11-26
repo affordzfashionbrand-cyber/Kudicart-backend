@@ -197,6 +197,7 @@ export class AdminVendorsService {
             vendorId: vendorRow.id,
             categoryId: cc.categoryId,
             commission: Number(cc.commissionRate),
+            commissionRate: Number(cc.commissionRate),
           })),
         });
       }
@@ -221,7 +222,9 @@ export class AdminVendorsService {
       return { vendor: vendorRow };
     });
 
-    const loginUrl = process.env.VENDOR_PORTAL_URL || 'http://localhost:3000/login';
+    const defaultPortalOrigin =
+      process.env.APP_ENV === 'production' ? 'https://admin.affordz.com' : 'http://localhost:3000';
+    const loginUrl = process.env.VENDOR_PORTAL_URL || `${defaultPortalOrigin}/login`;
     await this.emailService.sendVendorWelcomeEmail({
       to: normalizedEmail,
       storeName: dto.storeName,

@@ -14,6 +14,7 @@ export class AdminDashboardService {
     const [
       orders,
       vendorCount,
+      pendingVendors,
       driverProfiles,
       pendingDrivers,
       paymentTransactions,
@@ -28,6 +29,12 @@ export class AdminDashboardService {
         orderBy: { createdAt: 'desc' },
       }),
       this.prisma.vendor.count(),
+      this.prisma.vendor.findMany({
+        where: { status: 'PENDING' },
+        include: { user: { select: { id: true, name: true, email: true } } },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      }),
       this.prisma.driverProfile.findMany({
         include: { user: { select: { id: true, email: true, status: true } } },
         orderBy: { createdAt: 'desc' },
@@ -96,12 +103,13 @@ export class AdminDashboardService {
     return {
       actionRequired: {
         unassignedCount,
-        pendingBoutiquesCount: 0,
+        pendingBoutiquesCount: pendingVendors.length,
         driverKycCount: pendingDrivers.length,
         openTicketsCount: supportTicketsOpen,
       },
       operationalQueues: {
         readyForPickup: statusCountMap.READY_FOR_PICKUP,
+        pendingBoutiques: pendingVendors.length,
         pendingDrivers: pendingDrivers.length,
         onlineDrivers: driverProfiles.filter((d) => d.isOnline).length,
       },
@@ -117,7 +125,14 @@ export class AdminDashboardService {
       pipelineCounts,
       lifecyclePipeline: pipelineCounts,
       queues: {
-        pendingBoutiques: [],
+        pendingBoutiques: pendingVendors.map((v) => ({
+          id: v.id,
+          storeName: v.storeName,
+          ownerName: v.contactPerson || v.user?.name || 'Owner',
+          email: v.user?.email || v.notificationEmail || null,
+          operatingHub: v.operatingHub || null,
+          createdAt: v.createdAt.toISOString(),
+        })),
         driverKycQueue: pendingDrivers,
       },
       recentOrders,

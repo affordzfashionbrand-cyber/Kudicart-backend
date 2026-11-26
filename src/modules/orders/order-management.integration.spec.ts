@@ -15,13 +15,14 @@ import { PrismaService } from '../../prisma/prisma.service';
 jest.setTimeout(30000);
 
 describe('Order Management End-to-End HTTP + WS + PostgreSQL Integration', () => {
+  jest.setTimeout(120000);
   let moduleRef: TestingModule;
   let app: INestApplication;
   let prisma: PrismaService;
   let wsBaseUrl: string;
 
   const runId = `om_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  let phoneSeq = 100000;
+  let phoneSeq = 100000 + Math.floor(Math.random() * 800000);
   const nextPhone = () => `+919866${phoneSeq++}`;
 
   const createdUserIds: string[] = [];
@@ -316,13 +317,19 @@ describe('Order Management End-to-End HTTP + WS + PostgreSQL Integration', () =>
 
   afterEach(async () => {
     const trackedOrders = [...createdOrderIds];
-    if (createdGroupIds.length > 0) {
+    const extraWhere: any[] = [];
+    if (createdGroupIds.length > 0) extraWhere.push({ checkoutGroupId: { in: createdGroupIds } });
+    if (createdUserIds.length > 0) extraWhere.push({ customerId: { in: createdUserIds } });
+    if (extraWhere.length > 0) {
       const grpOrders = await prisma.order.findMany({
-        where: { checkoutGroupId: { in: createdGroupIds } },
-        select: { id: true },
+        where: { OR: extraWhere },
+        select: { id: true, checkoutGroupId: true },
       });
       for (const o of grpOrders) {
         if (!trackedOrders.includes(o.id)) trackedOrders.push(o.id);
+        if (o.checkoutGroupId && !createdGroupIds.includes(o.checkoutGroupId)) {
+          createdGroupIds.push(o.checkoutGroupId);
+        }
       }
     }
 

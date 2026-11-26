@@ -24,11 +24,27 @@ export interface VendorOrderAlertEmailDto {
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
   private transporter: Transporter | null = null;
+  private isMockTransport = false;
   private readonly fromAddress =
-    process.env.SMTP_FROM || '"KudiCart Vendor Operations" <no-reply@kudicart.com>';
+    process.env.SMTP_FROM || '"Affordz Partner Operations" <concierge@affordz.in>';
 
   constructor() {
     this.initTransporter();
+  }
+
+  private escapeHtml(value: unknown): string {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  private isProductionRuntime(): boolean {
+    const appEnv = (process.env.APP_ENV || '').toLowerCase();
+    const nodeEnv = (process.env.NODE_ENV || '').toLowerCase();
+    return appEnv === 'production' || (nodeEnv === 'production' && appEnv !== 'development' && appEnv !== 'test');
   }
 
   private async initTransporter() {
@@ -38,6 +54,7 @@ export class EmailService {
     const pass = process.env.SMTP_PASS;
 
     if (host && user && pass) {
+      this.isMockTransport = false;
       this.transporter = nodemailer.createTransport({
         host,
         port,
@@ -45,21 +62,31 @@ export class EmailService {
         auth: { user, pass },
       });
       this.logger.log(`Initialized SMTP transport with host ${host}:${port}`);
+    } else if (this.isProductionRuntime()) {
+      this.isMockTransport = true;
+      this.transporter = null;
+      this.logger.error(
+        'SMTP_HOST / SMTP_USER / SMTP_PASS are missing in production. Refusing simulated email transport.',
+      );
     } else {
-      // In development or when SMTP credentials are not yet populated, use a JSON / mock transport
-      // with full console visibility so onboarding is never blocked.
+      this.isMockTransport = true;
       this.transporter = nodemailer.createTransport({
         jsonTransport: true,
       });
       this.logger.warn(
-        'SMTP_HOST / SMTP_USER not set. Using JSON/Mock transport for development emails.',
+        'SMTP_HOST / SMTP_USER not set. Using JSON transport for non-production emails.',
       );
     }
   }
 
   async sendVendorWelcomeEmail(dto: VendorWelcomeEmailDto): Promise<boolean> {
     try {
-      const subject = `Welcome to KudiCart — Your Vendor Portal Credentials for ${dto.storeName}`;
+      const storeNameEsc = this.escapeHtml(dto.storeName);
+      const ownerNameEsc = this.escapeHtml(dto.ownerName);
+      const loginUrlEsc = this.escapeHtml(dto.loginUrl);
+      const toEsc = this.escapeHtml(dto.to);
+      const tempPassEsc = this.escapeHtml(dto.tempPassword);
+      const subject = `Welcome to Affordz — Your Vendor Portal Credentials for ${dto.storeName}`;
       const html = `
         <!DOCTYPE html>
         <html>
@@ -81,23 +108,23 @@ export class EmailService {
         <body>
           <div class="container">
             <div class="header">
-              <h2 style="margin: 0; font-weight: 700; letter-spacing: 0.5px;">KudiCart Partner Operations</h2>
+              <h2 style="margin: 0; font-weight: 700; letter-spacing: 0.5px;">Affordz Partner Operations</h2>
             </div>
             <div class="content">
-              <p>Dear <strong>${dto.ownerName}</strong>,</p>
-              <p>Congratulations! Your boutique store <strong>${dto.storeName}</strong> has been successfully onboarded as an authorized boutique partner on KudiCart.</p>
+              <p>Dear <strong>${ownerNameEsc}</strong>,</p>
+              <p>Congratulations! Your boutique store <strong>${storeNameEsc}</strong> has been successfully onboarded as an authorized boutique partner on Affordz.</p>
               <p>You can now manage your catalog, review customer orders, and track your settlements directly from the Vendor Operations Portal.</p>
               
               <div class="creds-box">
-                <div class="creds-row"><span class="creds-label">Portal URL:</span> <span class="creds-val">${dto.loginUrl}</span></div>
-                <div class="creds-row"><span class="creds-label">Login Email:</span> <span class="creds-val">${dto.to}</span></div>
-                <div class="creds-row"><span class="creds-label">Temporary Password:</span> <span class="creds-val">${dto.tempPassword}</span></div>
+                <div class="creds-row"><span class="creds-label">Portal URL:</span> <span class="creds-val">${loginUrlEsc}</span></div>
+                <div class="creds-row"><span class="creds-label">Login Email:</span> <span class="creds-val">${toEsc}</span></div>
+                <div class="creds-row"><span class="creds-label">Temporary Password:</span> <span class="creds-val">${tempPassEsc}</span></div>
               </div>
 
               <p>Please click the button below to sign in. For security purposes, we recommend updating your password upon your first sign in.</p>
               
               <div style="text-align: center;">
-                <a href="${dto.loginUrl}" class="btn">Sign In to Vendor Portal</a>
+                <a href="${loginUrlEsc}" class="btn">Sign In to Vendor Portal</a>
               </div>
 
               <p style="margin-top: 24px; font-size: 13px; color: #666666;">
@@ -105,21 +132,25 @@ export class EmailService {
               </p>
             </div>
             <div class="footer">
-              &copy; ${new Date().getFullYear()} KudiCart Technologies. All rights reserved.
+              &copy; ${new Date().getFullYear()} Affordz Technologies. All rights reserved.
             </div>
           </div>
         </body>
         </html>
       `;
 
-      if (!this.transporter) await this.initTransporter();
+      if (!this.transporter && !this.isProductionRuntime()) await this.initTransporter();
+      if (!this.transporter) {
+        this.logger.error(`Cannot send vendor welcome email to ${dto.to}: SMTP transport is not configured.`);
+        return false;
+      }
 
-      const info = await this.transporter!.sendMail({
+      const info = await this.transporter.sendMail({
         from: this.fromAddress,
         to: dto.to,
         subject,
         html,
-        text: `Welcome to KudiCart, ${dto.ownerName}! Your boutique ${dto.storeName} is ready. Login: ${dto.loginUrl} | User: ${dto.to} | Temp Password: ${dto.tempPassword}`,
+        text: `Welcome to Affordz, ${dto.ownerName}! Your boutique ${dto.storeName} is ready. Login: ${dto.loginUrl} | User: ${dto.to} | Temp Password: ${dto.tempPassword}`,
       });
 
       this.logger.log(
@@ -134,6 +165,9 @@ export class EmailService {
 
   async sendVendorOrderNotificationEmail(dto: VendorOrderAlertEmailDto): Promise<boolean> {
     try {
+      const storeNameEsc = this.escapeHtml(dto.storeName);
+      const orderNumEsc = this.escapeHtml(dto.orderNumber);
+      const portalUrlEsc = this.escapeHtml(dto.portalUrl);
       const subject = `[New Order Alert] Order #${dto.orderNumber} placed for ${dto.storeName}`;
       const html = `
         <!DOCTYPE html>
@@ -157,32 +191,36 @@ export class EmailService {
               <h2 style="margin: 0;">New Order Received!</h2>
             </div>
             <div class="content">
-              <p>Hello <strong>${dto.storeName}</strong> team,</p>
-              <p>You have received a new order on KudiCart that requires your confirmation and preparation.</p>
+              <p>Hello <strong>${storeNameEsc}</strong> team,</p>
+              <p>You have received a new order on Affordz that requires your confirmation and preparation.</p>
 
               <div class="highlight-card">
-                <div class="row"><strong>Order Reference:</strong> <span>#${dto.orderNumber}</span></div>
-                <div class="row"><strong>Items Count:</strong> <span>${dto.itemCount} item(s)</span></div>
-                <div class="row"><strong>Order Value:</strong> <span>₹${dto.totalAmount.toFixed(2)}</span></div>
+                <div class="row"><strong>Order Reference:</strong> <span>#${orderNumEsc}</span></div>
+                <div class="row"><strong>Items Count:</strong> <span>${Number(dto.itemCount) || 1} item(s)</span></div>
+                <div class="row"><strong>Order Value:</strong> <span>₹${Number(dto.totalAmount || 0).toFixed(2)}</span></div>
               </div>
 
               <p>Please log in to your Vendor Portal to review the order items and accept the order so preparation can begin.</p>
 
               <div style="text-align: center;">
-                <a href="${dto.portalUrl}" class="btn">View & Accept Order</a>
+                <a href="${portalUrlEsc}" class="btn">View & Accept Order</a>
               </div>
             </div>
             <div class="footer">
-              &copy; ${new Date().getFullYear()} KudiCart Technologies. All rights reserved.
+              &copy; ${new Date().getFullYear()} Affordz Technologies. All rights reserved.
             </div>
           </div>
         </body>
         </html>
       `;
 
-      if (!this.transporter) await this.initTransporter();
+      if (!this.transporter && !this.isProductionRuntime()) await this.initTransporter();
+      if (!this.transporter) {
+        this.logger.error(`Cannot send order alert email to ${dto.to}: SMTP transport is not configured.`);
+        return false;
+      }
 
-      await this.transporter!.sendMail({
+      await this.transporter.sendMail({
         from: this.fromAddress,
         to: dto.to,
         subject,

@@ -21,17 +21,35 @@ export class AdminReportsService {
       const orders = await this.prisma.order.findMany({
         include: {
           customer: true,
-          vendor: true,
+          vendor: { include: { categoryCommissions: true } },
           driver: true,
           driverProfile: true,
-          items: true,
+          items: { include: { product: { select: { categoryId: true } } } },
         },
         orderBy: { createdAt: 'desc' },
       });
 
       const rows = orders.map((o) => {
+        const computedItemCommission = o.items.reduce((sum, it: any) => {
+          if (typeof it.commissionAmount === 'number') {
+            return sum + it.commissionAmount;
+          }
+          const catMatch = o.vendor?.categoryCommissions?.find(
+            (cc: any) => cc.categoryId === it.product?.categoryId,
+          );
+          const itemRate =
+            typeof it.appliedCommissionRate === 'number'
+              ? it.appliedCommissionRate
+              : (catMatch?.commissionRate ?? o.vendor?.commissionRate ?? 12.5);
+          return sum + (Number(it.price) || 0) * (it.quantity || 1) * (itemRate / 100);
+        }, 0);
         const rate = o.vendor?.commissionRate ?? 12.5;
-        const commission = Number((o.grandTotal * (rate / 100)).toFixed(2));
+        const commission = Number(
+          (o.items.length > 0
+            ? computedItemCommission
+            : (o.grandTotal || 0) * (rate / 100)
+          ).toFixed(2),
+        );
         return {
           orderId: o.orderNumber,
           dateTime: o.createdAt.toISOString(),
@@ -56,7 +74,7 @@ export class AdminReportsService {
     if (cat === 'VENDORS') {
       const vendors = await this.prisma.vendor.findMany({
         include: {
-          orders: true,
+          orders: { include: { items: true } },
           payouts: { orderBy: { createdAt: 'desc' }, take: 1 },
         },
         orderBy: { storeName: 'asc' },
@@ -68,7 +86,27 @@ export class AdminReportsService {
           deliveredOrders.reduce((sum, o) => sum + (o.grandTotal || 0), 0).toFixed(2),
         );
         const commissionRate = v.commissionRate ?? 12.5;
-        const commissionRetained = Number((grossSales * (commissionRate / 100)).toFixed(2));
+        const trackedCommission = deliveredOrders.reduce(
+          (sum, o) =>
+            sum +
+            o.items.reduce(
+              (s, it: any) =>
+                s +
+                (typeof it.commissionAmount === 'number'
+                  ? it.commissionAmount
+                  : (Number(it.price) || 0) *
+                    (it.quantity || 1) *
+                    ((it.appliedCommissionRate ?? commissionRate) / 100)),
+              0,
+            ),
+          0,
+        );
+        const commissionRetained = Number(
+          (trackedCommission > 0
+            ? trackedCommission
+            : grossSales * (commissionRate / 100)
+          ).toFixed(2),
+        );
         const netPayable = Number((grossSales - commissionRetained).toFixed(2));
         return {
           vendorId: v.id,
@@ -91,16 +129,35 @@ export class AdminReportsService {
     }
 
     if (cat === 'DRIVERS') {
-      const drivers = await this.prisma.driverProfile.findMany({
-        orderBy: { fullName: 'asc' },
-      });
+      const defaultPayout = Number(process.env.DRIVER_BASE_PAYOUT_RUPEES) || 55;
+      const [drivers, driverPayoutEntries] = await Promise.all([
+        this.prisma.driverProfile.findMany({
+          orderBy: { fullName: 'asc' },
+        }),
+        this.prisma.ledgerEntry.findMany({
+          where: { entryType: { in: ['DRIVER_PAYOUT', 'DRIVER_BONUS', 'SURGE_BONUS'] } },
+          select: { driverId: true, amount: true },
+        }),
+      ]);
+
+      const payoutByDriver = new Map<string, number>();
+      for (const entry of driverPayoutEntries) {
+        if (!entry.driverId) continue;
+        payoutByDriver.set(
+          entry.driverId,
+          (payoutByDriver.get(entry.driverId) || 0) + (Number(entry.amount) || 0),
+        );
+      }
 
       const rows = drivers.map((d) => ({
         partnerId: d.id,
         name: d.fullName,
         vehicleType: d.vehicleType || 'Two-Wheeler',
         completedRuns: d.completedDeliveries || 0,
-        payoutTotal: (d.completedDeliveries || 0) * 55,
+        payoutTotal:
+          payoutByDriver.get(d.id) ??
+          payoutByDriver.get(d.userId) ??
+          (d.completedDeliveries || 0) * defaultPayout,
         status: d.isOnline ? 'Active' : 'Standby',
       }));
 

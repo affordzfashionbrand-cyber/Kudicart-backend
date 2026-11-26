@@ -16,31 +16,32 @@ export function formatOrderPacket(order: any, _legacyStore?: any, explicitTryAnd
   const pickupLat =
     vendor?.darkStoreHub?.lat ??
     order.items?.[0]?.product?.darkStoreHub?.lat ??
-    12.9716;
+    null;
   const pickupLng =
     vendor?.darkStoreHub?.lng ??
     order.items?.[0]?.product?.darkStoreHub?.lng ??
-    77.6412;
+    null;
 
   const dropLat = typeof address?.latitude === 'number' ? address.latitude : null;
   const dropLng = typeof address?.longitude === 'number' ? address.longitude : null;
   const distanceKm =
-    dropLat != null && dropLng != null
+    pickupLat != null && pickupLng != null && dropLat != null && dropLng != null
       ? `${haversineDistanceKm(pickupLat, pickupLng, dropLat, dropLng)} km`
-      : '2.4 km';
+      : null;
 
   const formattedAddress = address?.line1
     ? `${address.line1}, ${address.locality || ''}${address.city ? `, ${address.city}` : ''}`.replace(
         /,\s*,/g,
         ',',
       )
-    : 'Bengaluru Delivery Address';
+    : 'Delivery address pending';
 
   const pickupName = vendor?.storeName || 'Affordz Official Store';
   const pickupAddress =
     vendor?.darkStoreHub?.address ||
     order.items?.[0]?.product?.darkStoreHub?.address ||
-    'Indiranagar Express Hub, Bengaluru';
+    vendor?.address ||
+    '';
 
   const stage = tnb?.stage || (order.tryAndBuyStage ?? (isTryAndBuy ? 'HANDOVER_PENDING' : undefined));
 
@@ -70,7 +71,8 @@ export function formatOrderPacket(order: any, _legacyStore?: any, explicitTryAnd
     toteId: `T-${String(order.orderNumber || order.id).slice(-3)}`,
     distance: distanceKm,
     eta: `${order.etaMinutes ?? 15} mins`,
-    pickupCoordinates: { latitude: pickupLat, longitude: pickupLng },
+    pickupCoordinates:
+      pickupLat != null && pickupLng != null ? { latitude: pickupLat, longitude: pickupLng } : null,
     deliveryCoordinates:
       dropLat != null && dropLng != null ? { latitude: dropLat, longitude: dropLng } : null,
     grandTotal: Math.round(order.grandTotal || 0),
@@ -128,7 +130,7 @@ export function formatOrderPacket(order: any, _legacyStore?: any, explicitTryAnd
       actorRole: h.actorRole ?? null,
       createdAt: h.createdAt ? new Date(h.createdAt).toISOString() : null,
     })),
-    earnings: 55,
+    earnings: Number(order.driverPayout ?? process.env.DRIVER_BASE_PAYOUT_RUPEES) || 55,
     tryAndBuyStage: stage,
     trialDurationMinutes: tnb?.trialDurationMinutes ?? 10,
     handoverConfirmedAt: tnb?.handoverConfirmedAt?.toISOString?.() ?? null,

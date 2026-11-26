@@ -4,7 +4,8 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 
-const BASE_DELIVERY_PAYOUT_RUPEES = 55;
+const DEFAULT_DELIVERY_PAYOUT_RUPEES = Number(process.env.DRIVER_BASE_PAYOUT_RUPEES) || 55;
+const DEFAULT_FLOATING_CASH_LIMIT = Number(process.env.DRIVER_COD_CASH_LIMIT) || 2500;
 const DAY_SHORT_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 const MONTH_SHORT_NAMES = [
   'Jan',
@@ -78,8 +79,9 @@ export class DriverEarningsService {
 
   private computeWeekStats(
     weekIndex: number,
-    orders: Array<{ id: string; deliveredAt: Date | null; updatedAt: Date }>,
+    orders: Array<{ id: string; createdAt?: Date; deliveredAt: Date | null; updatedAt: Date }>,
     ledgerEntries: Array<{
+      orderId?: string | null;
       entryType: string;
       amount: number;
       createdAt: Date;
@@ -103,22 +105,39 @@ export class DriverEarningsService {
     });
 
     const dayByIso = new Map(dayBuckets.map((d) => [d.isoKey, d]));
+    const payoutByOrderId = new Map<string, number>();
+    for (const entry of ledgerEntries) {
+      if (entry.entryType === 'DRIVER_PAYOUT' && entry.orderId) {
+        payoutByOrderId.set(
+          entry.orderId,
+          (payoutByOrderId.get(entry.orderId) || 0) + Math.max(0, Math.round(entry.amount || 0)),
+        );
+      }
+    }
 
     let orderPay = 0;
     let bonus = 0;
     let deliveries = 0;
+    let totalDurationHours = 0;
 
     for (const order of orders) {
       const ts = order.deliveredAt || order.updatedAt;
       if (ts >= monday && ts <= sunday) {
         const key = ts.toISOString().slice(0, 10);
         const bucket = dayByIso.get(key);
+        const pay = payoutByOrderId.get(order.id) ?? DEFAULT_DELIVERY_PAYOUT_RUPEES;
         deliveries += 1;
-        orderPay += BASE_DELIVERY_PAYOUT_RUPEES;
+        orderPay += pay;
+        if (order.deliveredAt && order.createdAt) {
+          const diffHrs = (order.deliveredAt.getTime() - order.createdAt.getTime()) / 3_600_000;
+          totalDurationHours += diffHrs >= 0.05 && diffHrs <= 8 ? diffHrs : 0.45;
+        } else {
+          totalDurationHours += 0.45;
+        }
         if (bucket) {
           bucket.deliveries += 1;
-          bucket.orderPay += BASE_DELIVERY_PAYOUT_RUPEES;
-          bucket.earnings += BASE_DELIVERY_PAYOUT_RUPEES;
+          bucket.orderPay += pay;
+          bucket.earnings += pay;
         }
       }
     }
@@ -139,7 +158,7 @@ export class DriverEarningsService {
     }
 
     const totalEarnings = orderPay + bonus;
-    const activeHours = deliveries > 0 ? Number((deliveries * 0.45).toFixed(1)) : 0;
+    const activeHours = deliveries > 0 ? Number(totalDurationHours.toFixed(1)) : 0;
 
     return {
       id: weekIndex,
@@ -200,16 +219,31 @@ export class DriverEarningsService {
       ledgerWhere.driverId = driverId;
     }
 
-    const [orders, ledgerEntries] = await Promise.all([
+    const [orders, ledgerEntries, codOrders] = await Promise.all([
       this.prisma.order.findMany({
         where: orderWhere,
-        select: { id: true, deliveredAt: true, updatedAt: true },
+        select: { id: true, createdAt: true, deliveredAt: true, updatedAt: true },
       }),
       this.prisma.ledgerEntry.findMany({
         where: ledgerWhere,
-        select: { entryType: true, amount: true, createdAt: true },
+        select: { orderId: true, entryType: true, amount: true, createdAt: true },
       }),
+      driver
+        ? this.prisma.order.findMany({
+            where: {
+              OR: [{ driverProfileId: driver.id }, { driverId: driver.userId }],
+              paymentMethod: 'COD',
+              status: { in: ['DELIVERED', 'RETURNED'] },
+              paymentStatus: 'COMPLETED',
+            },
+            select: { grandTotal: true },
+          })
+        : Promise.resolve([]),
     ]);
+
+    const cashInHandCod = Math.round(
+      codOrders.reduce((sum, o) => sum + (Number(o.grandTotal) || 0), 0),
+    );
 
     const weeks = [0, 1, 2, 3].map((idx) =>
       this.computeWeekStats(idx, orders, ledgerEntries),
@@ -224,6 +258,9 @@ export class DriverEarningsService {
       bonus: targetWeek.bonus,
       deliveries: targetWeek.deliveries,
       activeHours: targetWeek.activeHours,
+      cashInHandCod,
+      floatingCashLimit: DEFAULT_FLOATING_CASH_LIMIT,
+      basePayoutPerOrder: DEFAULT_DELIVERY_PAYOUT_RUPEES,
       days: targetWeek.days,
       availableWeeks: weeks.map((w) => ({
         id: w.id,
@@ -328,35 +365,14 @@ export class DriverEarningsService {
       orderBy: { createdAt: 'desc' },
     });
 
-    if (activeSurges.length > 0) {
-      return activeSurges.map((s) => ({
-        id: s.id,
-        title: s.title,
-        timeWindow: s.timeWindow,
-        bonusText: `+₹${s.bonusAmount} bonus per eligible delivery`,
-        zone: s.area,
-        urgency: 'High Demand',
-      }));
-    }
-
-    return [
-      {
-        id: 'opp-1',
-        title: 'Peak Dinner Rush',
-        timeWindow: '07:00 PM – 10:00 PM',
-        bonusText: '+₹100 bonus on 5 deliveries',
-        zone: 'Indiranagar & Koramangala Hubs',
-        urgency: 'High Demand',
-      },
-      {
-        id: 'opp-2',
-        title: 'Weekend Super-Booster',
-        timeWindow: 'Saturday & Sunday All Day',
-        bonusText: 'Earn up to ₹1,200 extra this weekend',
-        zone: 'All Bengaluru Hubs',
-        urgency: 'Top Incentive',
-      },
-    ];
+    return activeSurges.map((s) => ({
+      id: s.id,
+      title: s.title,
+      timeWindow: s.timeWindow,
+      bonusText: `+₹${s.bonusAmount} bonus per eligible delivery`,
+      zone: s.area,
+      urgency: 'High Demand',
+    }));
   }
 
   async getSurges() {

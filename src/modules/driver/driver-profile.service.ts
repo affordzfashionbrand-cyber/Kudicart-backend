@@ -85,6 +85,26 @@ export class DriverProfileService {
     const driver = await this.resolveDriver(driverId);
     const docs = this.groupDocuments(driver.documents, driver.selfieUrl);
 
+    const [activeHub, codOrders] = await Promise.all([
+      this.prisma.darkStoreHub.findFirst({
+        where: { isActive: true },
+        orderBy: { deliveryMinutes: 'asc' },
+      }),
+      this.prisma.order.findMany({
+        where: {
+          OR: [{ driverProfileId: driver.id }, { driverId: driver.userId }],
+          paymentMethod: 'COD',
+          status: { in: ['DELIVERED', 'RETURNED'] },
+          paymentStatus: 'COMPLETED',
+        },
+        select: { grandTotal: true },
+      }),
+    ]);
+
+    const cashInHandCod = Math.round(
+      codOrders.reduce((sum, o) => sum + (Number(o.grandTotal) || 0), 0),
+    );
+
     return {
       id: driver.id,
       userId: driver.userId,
@@ -98,6 +118,16 @@ export class DriverProfileService {
       completedDeliveries: driver.completedDeliveries,
       isOnline: driver.isOnline,
       availableSince: driver.availableSince ? driver.availableSince.toISOString() : null,
+      assignedHub: activeHub
+        ? {
+            id: activeHub.id,
+            name: activeHub.name,
+            locality: activeHub.locality,
+            address: activeHub.address,
+          }
+        : null,
+      cashInHandCod,
+      floatingCashLimit: Number(process.env.DRIVER_COD_CASH_LIMIT) || 2500,
       kycStatus: driver.kycStatus,
       rejectionReason: driver.rejectionReason,
       aadhaarNumber: maskAadhaar(driver.aadhaarNumber),

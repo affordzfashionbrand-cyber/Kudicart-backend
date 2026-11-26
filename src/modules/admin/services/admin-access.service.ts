@@ -2,9 +2,10 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { randomUUID } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
 import {
@@ -13,10 +14,14 @@ import {
   UpdateRolePermissionsDto,
 } from '../dto/admin-domain.dto';
 import { hashPassword } from '../../../common/utils/crypto.util';
+import { FirebaseAdminService } from '../../auth/firebase-admin.service';
 
 @Injectable()
 export class AdminAccessService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly firebaseAdmin?: FirebaseAdminService,
+  ) {}
 
   private ensureDb() {
     if (!this.prisma.isConnectedToDb) {
@@ -153,7 +158,9 @@ export class AdminAccessService {
       );
     }
 
-    const defaultHash = hashPassword('Affordz#Admin2026!');
+    const tempPassword =
+      process.env.ADMIN_DEFAULT_PASSWORD || `Afz!${randomBytes(6).toString('base64url')}9#`;
+    const defaultHash = hashPassword(tempPassword);
     const initials = dto.name
       .split(' ')
       .filter(Boolean)
@@ -163,9 +170,33 @@ export class AdminAccessService {
       .toUpperCase();
 
     const adminId = `ADM-${(creds.length + 1).toString().padStart(3, '0')}`;
+    let firebaseUid = `fb-admin-${adminId.toLowerCase()}-${randomUUID().slice(0, 6)}`;
+    let firebaseProvisioned = false;
+
+    if (this.firebaseAdmin?.isInitialized?.()) {
+      const fbUser = await this.firebaseAdmin.createAuthUser({
+        email: cleanEmail,
+        password: tempPassword,
+        displayName: dto.name.trim(),
+      });
+      await this.firebaseAdmin.setUserClaims(fbUser.uid, {
+        role: 'ADMIN',
+        adminRole: dto.role,
+      });
+      firebaseUid = fbUser.uid;
+      firebaseProvisioned = true;
+    } else if (
+      (process.env.APP_ENV || '').toLowerCase() === 'production' ||
+      (process.env.NODE_ENV || '').toLowerCase() === 'production'
+    ) {
+      throw new ServiceUnavailableException(
+        'Firebase Admin SDK must be initialized before inviting administrators in production.',
+      );
+    }
+
     const createdUser = await this.prisma.user.create({
       data: {
-        firebaseUid: `fb-admin-${adminId.toLowerCase()}-${randomUUID().slice(0, 6)}`,
+        firebaseUid,
         name: dto.name.trim(),
         email: cleanEmail,
         role: 'ADMIN',

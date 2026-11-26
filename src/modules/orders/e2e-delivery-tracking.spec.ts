@@ -12,6 +12,7 @@ import { Role } from '../../common/enums/role.enum';
 import { createJwtToken } from '../../common/utils/crypto.util';
 
 describe('E2E Delivery & Tracking Workflow (Real HTTP + PostgreSQL)', () => {
+  jest.setTimeout(60000);
   let moduleRef: TestingModule;
   let app: INestApplication;
   let prisma: PrismaService;

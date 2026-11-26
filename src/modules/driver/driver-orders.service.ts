@@ -102,7 +102,27 @@ export class DriverOrdersService {
       (o) => o.status === 'DELIVERED' || o.status === 'RETURNED',
     );
 
-    const todayEarnings = completedOrders.length * 55;
+    const defaultPayout = Number(process.env.DRIVER_BASE_PAYOUT_RUPEES) || 55;
+    const payoutEntries =
+      completedOrders.length > 0
+        ? await this.prisma.ledgerEntry.findMany({
+            where: {
+              orderId: { in: completedOrders.map((o) => o.id) },
+              entryType: { in: ['DRIVER_PAYOUT', 'DRIVER_BONUS', 'SURGE_BONUS'] },
+            },
+            select: { orderId: true, amount: true },
+          })
+        : [];
+    const payoutByOrder = new Map<string, number>();
+    for (const p of payoutEntries) {
+      if (p.orderId) {
+        payoutByOrder.set(p.orderId, (payoutByOrder.get(p.orderId) || 0) + (Number(p.amount) || 0));
+      }
+    }
+    const todayEarnings = completedOrders.reduce(
+      (sum, o) => sum + (payoutByOrder.get(o.id) ?? defaultPayout),
+      0,
+    );
 
     return {
       driver: {

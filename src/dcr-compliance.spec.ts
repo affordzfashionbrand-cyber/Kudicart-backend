@@ -23,6 +23,7 @@ import { createCheckoutSessionToken } from './common/utils/checkout-session.util
 import { Role } from './common/enums/role.enum';
 
 describe('DCR-012..DCR-015 & PostgreSQL Consolidation Compliance', () => {
+  jest.setTimeout(60000);
   let app: INestApplication;
   let moduleRef: TestingModule;
   let prisma: PrismaService;

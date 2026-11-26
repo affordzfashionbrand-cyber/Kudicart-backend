@@ -42,6 +42,16 @@ export class CatalogController {
     return this.catalogService.getDarkStores();
   }
 
+  @Get('stores')
+  async getStores() {
+    return this.catalogService.getStores();
+  }
+
+  @Get('catalog/stores')
+  async getCatalogStores() {
+    return this.catalogService.getStores();
+  }
+
   @Get('coupons/active')
   async getActiveCoupons() {
     return this.catalogService.getActiveCoupons();

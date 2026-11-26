@@ -322,13 +322,33 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
   });
 
   describe('6. Driver Authentication Service', () => {
+    const uniqueSuffix = Date.now().toString().slice(-6);
+    const driverOtpPhone = `9777${uniqueSuffix}`;
+    const driverFbPhone = `+919666${uniqueSuffix}`;
+
+    afterAll(async () => {
+      const cleanupUsers = await prisma.user.findMany({
+        where: {
+          OR: [
+            { phone: { in: [driverOtpPhone, `+91 ${driverOtpPhone}`, `+91${driverOtpPhone}`, driverFbPhone] } },
+            { firebaseUid: `fb-drv-sec-${uniqueSuffix}` },
+          ],
+        },
+        select: { id: true },
+      });
+      const userIds = cleanupUsers.map((u) => u.id);
+      if (userIds.length > 0) {
+        await prisma.driverProfile.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
+        await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
+      }
+    });
+
     it('verifies driver OTP and returns signed JWT with Role.DRIVER', async () => {
-      const phone = '9876543210';
-      await driverAuthService.sendOtp(phone);
-      const testOtp = driverAuthService.getOtpForTesting(phone);
+      await driverAuthService.sendOtp(driverOtpPhone);
+      const testOtp = driverAuthService.getOtpForTesting(driverOtpPhone);
       expect(testOtp).toBeDefined();
 
-      const res = await driverAuthService.verifyOtp(phone, testOtp!);
+      const res = await driverAuthService.verifyOtp(driverOtpPhone, testOtp!);
       expect(res.success).toBe(true);
       expect(res.role).toBe(Role.DRIVER);
 
@@ -339,7 +359,7 @@ describe('Phase 1 — Authentication, RBAC & Security Specification', () => {
     });
 
     it('logs in driver via Firebase ID token and returns signed JWT with Role.DRIVER', async () => {
-      const testToken = 'test-firebase-id-token:fb-drv-888:+919876543210:driver@kudicart.in';
+      const testToken = `test-firebase-id-token:fb-drv-sec-${uniqueSuffix}:${driverFbPhone}:driver.${uniqueSuffix}@affordz.in`;
       const res = await driverAuthService.loginFirebase(testToken);
       expect(res.success).toBe(true);
       expect(res.role).toBe(Role.DRIVER);

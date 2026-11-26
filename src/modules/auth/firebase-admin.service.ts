@@ -27,8 +27,18 @@ export class FirebaseAdminService implements OnModuleInit {
     this.initializeFirebase();
   }
 
+  isInitialized(): boolean {
+    return this.initialized;
+  }
+
   isReady(): boolean {
     return this.initialized || Boolean(this.getWebApiKey());
+  }
+
+  private isProductionRuntime(): boolean {
+    const appEnv = (process.env.APP_ENV || '').toLowerCase();
+    const nodeEnv = (process.env.NODE_ENV || '').toLowerCase();
+    return appEnv === 'production' || (nodeEnv === 'production' && appEnv !== 'development' && appEnv !== 'test');
   }
 
   private getWebApiKey(): string | undefined {
@@ -36,7 +46,7 @@ export class FirebaseAdminService implements OnModuleInit {
       process.env.FIREBASE_WEB_API_KEY ||
       process.env.VITE_FIREBASE_API_KEY ||
       process.env.NEXT_PUBLIC_FIREBASE_API_KEY ||
-      'AIzaSyDNrOgdNcWwL4RxN9f-3Ktp7e73rSlOifc'
+      undefined
     );
   }
 
@@ -238,8 +248,14 @@ export class FirebaseAdminService implements OnModuleInit {
     }
 
     if (!this.initialized) {
+      if (this.isProductionRuntime()) {
+        this.logger.error(
+          `Firebase Admin SDK is not initialized in production. Cannot dispatch FCM push to ${tokens.length} recipients.`,
+        );
+        return { successCount: 0, failureCount: tokens.length, invalidTokens: [] };
+      }
       this.logger.warn(
-        `Firebase not initialized. Simulating FCM push for ${tokens.length} recipients: ${payload.title}`,
+        `Firebase not initialized in non-production runtime. Skipping live FCM push for ${tokens.length} recipients: ${payload.title}`,
       );
       return { successCount: tokens.length, failureCount: 0, invalidTokens: [] };
     }

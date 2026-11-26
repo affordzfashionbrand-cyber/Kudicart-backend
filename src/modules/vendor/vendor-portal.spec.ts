@@ -205,8 +205,8 @@ describe('Vendor Management & Operations Suite', () => {
       // Verified Category Commissions insertion
       expect(mockPrisma.vendorCategoryCommission.createMany).toHaveBeenCalledWith({
         data: [
-          { vendorId: 'vnd-1', categoryId: 'cat-saree', commission: 15.0 },
-          { vendorId: 'vnd-1', categoryId: 'cat-kurti', commission: 12.0 },
+          { vendorId: 'vnd-1', categoryId: 'cat-saree', commission: 15.0, commissionRate: 15.0 },
+          { vendorId: 'vnd-1', categoryId: 'cat-kurti', commission: 12.0, commissionRate: 12.0 },
         ],
       });
 

@@ -13,6 +13,11 @@ jest.mock('firebase-admin/auth', () => ({
       name: 'Operations Admin',
       role: 'ADMIN',
     })),
+    createUser: jest.fn(async (input: { email?: string }) => ({
+      uid: `fb-mock-${Date.now()}`,
+      email: input?.email,
+    })),
+    setCustomUserClaims: jest.fn(async () => undefined),
   })),
 }));
 

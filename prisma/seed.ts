@@ -71,21 +71,36 @@ async function upsertUserSafely(input: {
     return existingById;
   }
 
-  if (input.email) {
-    const emailOwner = await prisma.user.findUnique({ where: { email: input.email } });
+  let safeEmail = input.email;
+  let safePhone = input.phone;
+  let safeFirebaseUid = input.firebaseUid;
+
+  if (safeEmail) {
+    const emailOwner = await prisma.user.findUnique({ where: { email: safeEmail } });
     if (emailOwner) {
-      return emailOwner;
+      safeEmail = `${input.id}@seed.affordz.in`;
     }
   }
-  if (input.phone) {
-    const phoneOwner = await prisma.user.findUnique({ where: { phone: input.phone } });
+  if (safePhone) {
+    const phoneOwner = await prisma.user.findUnique({ where: { phone: safePhone } });
     if (phoneOwner) {
-      return phoneOwner;
+      safePhone = null;
+    }
+  }
+  if (safeFirebaseUid) {
+    const uidOwner = await prisma.user.findUnique({ where: { firebaseUid: safeFirebaseUid } });
+    if (uidOwner) {
+      safeFirebaseUid = `${safeFirebaseUid}-${Date.now()}`;
     }
   }
 
   return prisma.user.create({
-    data: input,
+    data: {
+      ...input,
+      email: safeEmail,
+      phone: safePhone,
+      firebaseUid: safeFirebaseUid,
+    },
   });
 }
 
@@ -372,48 +387,117 @@ async function main() {
     });
   }
 
+  const categoryIdMap = new Map<string, string>();
+  const existingDbCats = await prisma.category.findMany({ select: { id: true, slug: true } });
+  const existingCatIds = new Set(existingDbCats.map((c) => c.id));
+  for (const c of existingDbCats) {
+    categoryIdMap.set(c.id, c.id);
+    if (c.slug) categoryIdMap.set(c.slug, c.id);
+  }
   const orderedHierarchy = [...INITIAL_CATEGORIES_HIERARCHY].sort((a, b) => a.level - b.level);
   for (const cat of orderedHierarchy) {
     const anyCat = cat as any;
+    const rawParentId = cat.parentId ? (categoryIdMap.get(cat.parentId) ?? cat.parentId) : null;
+    const resolvedParentId = rawParentId && existingCatIds.has(rawParentId) ? rawParentId : null;
     try {
-      await prisma.category.upsert({
-        where: { id: cat.id },
-        update: {
-          code: anyCat.code ?? null,
-          name: cat.name,
-          slug: cat.slug,
-          description: anyCat.description ?? null,
-          level: cat.level,
-          parentId: cat.parentId,
-          countText: cat.countText,
-          icon: cat.icon,
-          image: cat.image,
-          banner: cat.banner,
-          gender: cat.gender,
-          displayOrder: cat.displayOrder,
-          isActive: cat.isActive,
-          isPopular: cat.isPopular,
+      const existingCat = await prisma.category.findFirst({
+        where: {
+          OR: [
+            { id: cat.id },
+            { slug: cat.slug },
+            ...(anyCat.code ? [{ code: anyCat.code }] : []),
+          ],
         },
-        create: {
-          id: cat.id,
-          code: anyCat.code ?? null,
-          name: cat.name,
-          slug: cat.slug,
-          description: anyCat.description ?? null,
-          level: cat.level,
-          parentId: cat.parentId,
-          countText: cat.countText,
-          icon: cat.icon,
-          image: cat.image,
-          banner: cat.banner,
-          gender: cat.gender,
-          displayOrder: cat.displayOrder,
-          isActive: cat.isActive,
-          isPopular: cat.isPopular,
-        },
+        select: { id: true },
       });
+      if (existingCat && ['kurtis', 'sarees', 'dresses', 'tops', 'bottoms'].includes(cat.id) && existingCat.id !== cat.id) {
+        const staleId = existingCat.id;
+        await prisma.category.update({
+          where: { id: staleId },
+          data: { slug: `stale_${staleId}` },
+        });
+        await prisma.category.create({
+          data: {
+            id: cat.id,
+            code: anyCat.code ?? null,
+            name: cat.name,
+            slug: cat.slug,
+            description: anyCat.description ?? null,
+            level: cat.level,
+            parentId: resolvedParentId,
+            countText: cat.countText,
+            icon: cat.icon,
+            image: cat.image,
+            banner: cat.banner,
+            gender: cat.gender,
+            displayOrder: cat.displayOrder,
+            isActive: cat.isActive,
+            isPopular: cat.isPopular,
+          },
+        });
+        await prisma.category.updateMany({ where: { parentId: staleId }, data: { parentId: cat.id } });
+        await prisma.product.updateMany({ where: { categoryId: staleId }, data: { categoryId: cat.id } });
+        await prisma.vendorCategoryCommission.updateMany({ where: { categoryId: staleId }, data: { categoryId: cat.id } });
+        await prisma.homeBanner.updateMany({ where: { categoryId: staleId }, data: { categoryId: cat.id } });
+        await prisma.category.delete({ where: { id: staleId } });
+        categoryIdMap.set(cat.id, cat.id);
+        categoryIdMap.set(cat.slug, cat.id);
+        existingCatIds.delete(staleId);
+        existingCatIds.add(cat.id);
+      } else if (existingCat) {
+        categoryIdMap.set(cat.id, existingCat.id);
+        categoryIdMap.set(cat.slug, existingCat.id);
+        existingCatIds.add(existingCat.id);
+        await prisma.category.update({
+          where: { id: existingCat.id },
+          data: {
+            name: cat.name,
+            description: anyCat.description ?? null,
+            level: cat.level,
+            parentId: resolvedParentId,
+            countText: cat.countText,
+            icon: cat.icon,
+            image: cat.image,
+            banner: cat.banner,
+            gender: cat.gender,
+            displayOrder: cat.displayOrder,
+            isActive: cat.isActive,
+            isPopular: cat.isPopular,
+          },
+        });
+      } else {
+        await prisma.category.create({
+          data: {
+            id: cat.id,
+            code: anyCat.code ?? null,
+            name: cat.name,
+            slug: cat.slug,
+            description: anyCat.description ?? null,
+            level: cat.level,
+            parentId: resolvedParentId,
+            countText: cat.countText,
+            icon: cat.icon,
+            image: cat.image,
+            banner: cat.banner,
+            gender: cat.gender,
+            displayOrder: cat.displayOrder,
+            isActive: cat.isActive,
+            isPopular: cat.isPopular,
+          },
+        });
+        categoryIdMap.set(cat.id, cat.id);
+        categoryIdMap.set(cat.slug, cat.id);
+        existingCatIds.add(cat.id);
+      }
     } catch {
-      // Ignore if category slug or id already exists
+      const fallback = await prisma.category.findFirst({
+        where: { OR: [{ id: cat.id }, { slug: cat.slug }] },
+        select: { id: true },
+      });
+      if (fallback) {
+        categoryIdMap.set(cat.id, fallback.id);
+        existingCatIds.add(fallback.id);
+      }
     }
   }
 
@@ -867,12 +951,14 @@ async function main() {
   ];
 
   for (const p of productsToSeed) {
+    const mappedCat = categoryIdMap.get(p.categoryId) ?? p.categoryId;
+    const resolvedCategoryId = existingCatIds.has(mappedCat) ? mappedCat : 'cat-1';
     await prisma.product.upsert({
       where: { id: p.id },
       update: {
         sku: p.sku,
         vendorId: p.vendorId,
-        categoryId: p.categoryId,
+        categoryId: resolvedCategoryId,
         brand: p.brand,
         title: p.title,
         description: p.description,
@@ -897,7 +983,10 @@ async function main() {
         darkStoreHubId: p.darkStoreHubId,
         tryAndBuyEligible: p.tryAndBuyEligible,
       },
-      create: p,
+      create: {
+        ...p,
+        categoryId: resolvedCategoryId,
+      },
     });
   }
 
@@ -948,8 +1037,28 @@ async function main() {
     });
   }
 
-  // 8. Driver Profiles
-  await prisma.driverProfile.upsert({
+  // 8. Driver Profiles — ensure fixed seed IDs exist even if earlier smoke runs created alternate UUIDs
+  for (const [fixedId, uid] of [
+    ['drv-1', 'usr-driver-1'],
+    ['drv-104', 'usr-driver-104'],
+    ['drv-118', 'usr-driver-118'],
+  ] as const) {
+    const stale = await prisma.driverProfile.findUnique({ where: { userId: uid } });
+    if (stale && stale.id !== fixedId) {
+      await prisma.driverDocument.deleteMany({ where: { driverId: stale.id } });
+      await prisma.order.updateMany({ where: { driverProfileId: stale.id }, data: { driverProfileId: null } });
+      await prisma.tryAndBuySession.updateMany({
+        where: { driverProfileId: stale.id },
+        data: { driverProfileId: null },
+      });
+      await prisma.dispatchAssignment.updateMany({
+        where: { driverProfileId: stale.id },
+        data: { driverProfileId: null },
+      });
+      await prisma.driverProfile.delete({ where: { id: stale.id } });
+    }
+  }
+  const drv1 = await prisma.driverProfile.upsert({
     where: { id: 'drv-1' },
     update: {
       fullName: 'Rajesh Kumar',
@@ -1007,7 +1116,7 @@ async function main() {
     },
   });
   await prisma.driverProfile.upsert({
-    where: { id: 'drv-118' },
+    where: { userId: 'usr-driver-118' },
     update: {
       fullName: 'Suraj Verma',
       phone: '+91 98201 55412',
@@ -1124,7 +1233,7 @@ async function main() {
         orderNumber: 'KC-89241',
         customerId: 'usr-1',
         driverId: 'usr-driver-1',
-        driverProfileId: 'drv-1',
+        driverProfileId: drv1.id,
         addressId: 'addr-1',
         vendorId: 'vend-1',
         fulfillmentType: FulfillmentType.DARK_STORE,
@@ -1177,7 +1286,7 @@ async function main() {
         orderNumber: 'KC-89200',
         customerId: 'usr-1',
         driverId: 'usr-driver-1',
-        driverProfileId: 'drv-1',
+        driverProfileId: drv1.id,
         addressId: 'addr-1',
         vendorId: 'vend-1',
         fulfillmentType: FulfillmentType.VENDOR,

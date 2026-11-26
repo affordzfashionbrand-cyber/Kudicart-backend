@@ -7,12 +7,10 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
-import * as Sentry from '@sentry/nestjs';
 
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(HttpExceptionFilter.name);
-  private readonly sentryDsn = process.env.SENTRY_DSN || '';
   private readonly isProduction = process.env.APP_ENV === 'production';
 
   catch(exception: unknown, host: ArgumentsHost) {
@@ -41,9 +39,9 @@ export class HttpExceptionFilter implements ExceptionFilter {
       this.logger.error(`Unhandled error: ${exception.message}`, exception.stack);
     }
 
-    // Capture 5xx / unhandled exceptions to Sentry (Checklist Item 16 & D-023)
+    // Log 5xx / unhandled exceptions locally to container stdout (DCR-016)
     if (status >= 500) {
-      this.captureSentryEvent(exception, request, status);
+      this.logServerException(exception, request, status);
     }
 
     // In production, never expose raw internal crash stack traces or unhandled error messages to the client
@@ -65,43 +63,19 @@ export class HttpExceptionFilter implements ExceptionFilter {
   }
 
   /**
-   * Sentry capture with graceful offline fallback (D-023)
+   * Native structured error logging to stdout (AWS CloudWatch / container logs) per DCR-016
    */
-  private captureSentryEvent(exception: unknown, request: Request, status: number) {
-    const errObj =
-      exception instanceof Error
-        ? { name: exception.name, message: exception.message }
-        : { name: 'UnknownError', message: String(exception) };
+  private logServerException(exception: unknown, request: Request, status: number) {
+    const errMessage =
+      exception instanceof Error ? exception.message : String(exception);
+    const stack = exception instanceof Error ? exception.stack : undefined;
+    const userId = (request as any)?.user?.id || 'anonymous';
+    const method = request?.method || 'UNKNOWN';
+    const url = request?.url || '';
 
-    const event = {
-      timestamp: new Date().toISOString(),
-      level: 'error',
-      statusCode: status,
-      url: request?.url,
-      method: request?.method,
-      ip: request?.headers?.['x-forwarded-for'] || request?.socket?.remoteAddress,
-      userId: (request as any)?.user?.id || 'anonymous',
-      exception: errObj,
-    };
-
-    if (this.sentryDsn) {
-      Sentry.withScope((scope) => {
-        scope.setTag('statusCode', String(status));
-        if (request?.method) scope.setTag('method', request.method);
-        if (request?.url) scope.setExtra('url', request.url);
-        if ((request as any)?.user?.id) {
-          scope.setUser({ id: (request as any).user.id });
-        }
-        Sentry.captureException(
-          exception instanceof Error ? exception : new Error(errObj.message),
-        );
-      });
-      this.logger.log(`[Sentry] Event transmitted to Sentry: ${event.url} (${status})`);
-    } else {
-      // Graceful local telemetry fallback
-      this.logger.warn(
-        `[SentryTelemetry] 5xx event captured (Sentry standby - awaiting SENTRY_DSN): ${event.method} ${event.url} - ${errObj.message}`,
-      );
-    }
+    this.logger.error(
+      `[HTTP 5xx] ${method} ${url} (User: ${userId}, Status: ${status}) - ${errMessage}`,
+      stack,
+    );
   }
 }

@@ -1,7 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import * as Sentry from '@sentry/nestjs';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
@@ -19,14 +18,6 @@ async function bootstrap() {
       throw new Error('FATAL: DATABASE_URL environment variable is strictly required in production mode');
     }
     validateJwtSecret();
-  }
-
-  if (process.env.SENTRY_DSN) {
-    Sentry.init({
-      dsn: process.env.SENTRY_DSN,
-      environment: process.env.APP_ENV || process.env.NODE_ENV || 'development',
-      tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE || 0.1),
-    });
   }
 
   const app = await NestFactory.create(AppModule, { rawBody: true });

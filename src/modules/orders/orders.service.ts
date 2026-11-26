@@ -822,7 +822,7 @@ export class OrdersService {
       }
 
       return { createdGroup: grp, createdOrders: created };
-    });
+    }, { maxWait: 15000, timeout: 30000 });
 
     // Step 2: External Razorpay gateway creation outside DB lock with compensating rollback on failure
     let razorpayOrderId: string | null = null;
@@ -967,7 +967,9 @@ export class OrdersService {
       if (freshOrd.fulfillmentType === 'VENDOR' && freshOrd.vendor) {
         const recipientEmail = freshOrd.vendor.notificationEmail || (freshOrd.vendor as any).user?.email;
         if (recipientEmail && this.emailService) {
-          const portalUrl = `${process.env.VENDOR_PORTAL_URL || 'http://localhost:3000'}/vendor/orders`;
+          const defaultPortalOrigin =
+            process.env.APP_ENV === 'production' ? 'https://admin.affordz.com' : 'http://localhost:3000';
+          const portalUrl = `${(process.env.VENDOR_PORTAL_URL || defaultPortalOrigin).replace(/\/login\/?$/, '').replace(/\/+$/, '')}/vendor/orders`;
           this.emailService
             .sendVendorOrderNotificationEmail({
               to: recipientEmail,

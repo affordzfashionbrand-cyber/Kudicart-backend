@@ -267,6 +267,62 @@ export class CatalogService {
     });
   }
 
+  async getStores() {
+    this.ensureDbConnected();
+    const [hubs, vendors] = await Promise.all([
+      this.prisma.darkStoreHub.findMany({
+        where: { isActive: true },
+        include: {
+          _count: { select: { products: true } },
+        },
+        orderBy: [{ deliveryMinutes: 'asc' }, { name: 'asc' }],
+      }),
+      this.prisma.vendor.findMany({
+        where: { status: 'ACTIVE' },
+        include: {
+          _count: { select: { products: true } },
+        },
+        orderBy: [{ createdAt: 'desc' }],
+      }),
+    ]);
+
+    const darkStores = hubs.map((h) => ({
+      id: h.id,
+      name: h.name,
+      type: 'DARK_STORE' as const,
+      subtitle: `${h.locality} • ${h.deliveryMinutes}-Min Express Drop`,
+      badge: `${h.deliveryMinutes}-MIN DROP`,
+      eta: `${h.deliveryMinutes} mins`,
+      locality: h.locality,
+      address: h.address,
+      lat: h.lat,
+      lng: h.lng,
+      deliveryMinutes: h.deliveryMinutes,
+      productsCount: h._count?.products ?? 0,
+      isOnline: h.isActive,
+    }));
+
+    const boutiques = vendors
+      .filter((v) => v.id !== 'vend-affordz-official')
+      .map((v) => ({
+        id: v.id,
+        name: v.storeName,
+        type: 'VENDOR' as const,
+        subtitle: v.category || v.operatingHub || 'Partner Boutique',
+        badge: 'BOUTIQUE PARTNER',
+        eta: '2-4 days',
+        locality: v.operatingHub || '',
+        address: v.address || '',
+        lat: v.latitude ?? null,
+        lng: v.longitude ?? null,
+        deliveryMinutes: null,
+        productsCount: v._count?.products ?? 0,
+        isOnline: v.isOnline,
+      }));
+
+    return [...darkStores, ...boutiques];
+  }
+
   async getActiveCoupons() {
     this.ensureDbConnected();
     const now = new Date();
