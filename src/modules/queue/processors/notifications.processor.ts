@@ -66,6 +66,7 @@ export class NotificationsProcessor implements OnModuleInit, OnModuleDestroy {
 
     switch (name) {
       case QueueJobType.DRIVER_ASSIGNMENT_NOTIFICATION:
+      case QueueJobType.DELIVERY_ASSIGNMENT_CREATED:
         return this.notificationsService.sendNotification({
           recipientUserId: data.driverUserId || data.userId || data.driverId,
           recipientRole: Role.DRIVER,
@@ -74,7 +75,25 @@ export class NotificationsProcessor implements OnModuleInit, OnModuleDestroy {
             data.message ||
             `Order #${data.orderNumber || data.orderId} has been assigned to you.`,
           category: 'DELIVERY',
-          data: this.toStringMap(data, { event: name, status: 'ASSIGNED' }),
+          data: this.toStringMap(data, {
+            event: name,
+            status: data.status ? String(data.status) : 'ACCEPTED',
+            deliveryAssignmentStatus: data.deliveryAssignmentStatus
+              ? String(data.deliveryAssignmentStatus)
+              : 'ASSIGNED',
+          }),
+        });
+
+      case QueueJobType.DELIVERY_ASSIGNMENT_FAILED:
+        return this.notificationsService.sendNotification({
+          recipientUserId: data.vendorUserId || data.userId,
+          recipientRole: (data.recipientRole as Role) || Role.ADMIN,
+          title: data.title || 'Delivery Partner Assignment Failed',
+          body:
+            data.message ||
+            `No delivery partner could be assigned to Order #${data.orderNumber || data.orderId}.`,
+          category: 'DELIVERY',
+          data: this.toStringMap(data, { event: name }),
         });
 
       case QueueJobType.ASSIGNMENT_CANCELLATION_NOTIFICATION:
@@ -128,6 +147,7 @@ export class NotificationsProcessor implements OnModuleInit, OnModuleDestroy {
           data: this.toStringMap(data, { event: name }),
         });
 
+      case QueueJobType.TRY_AND_BUY_STARTED:
       case QueueJobType.TRY_AND_BUY_HANDOVER:
       case QueueJobType.TRY_AND_BUY_DECISION:
       case QueueJobType.TRY_AND_BUY_EXPIRY_CHECK:
@@ -143,6 +163,8 @@ export class NotificationsProcessor implements OnModuleInit, OnModuleDestroy {
       case QueueJobType.ORDER_STATUS_NOTIFICATION:
       case QueueJobType.CUSTOMER_ORDER_PLACED:
       case QueueJobType.CUSTOMER_ORDER_DELIVERED:
+      case QueueJobType.ORDER_DELIVERED:
+      case QueueJobType.ORDER_RETURNED:
       case 'ORDER_ARRIVED':
         return this.notificationsService.sendNotification({
           recipientUserId: data.userId || data.customerId,

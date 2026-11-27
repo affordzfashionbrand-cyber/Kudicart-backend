@@ -25,8 +25,20 @@ export class DriverShiftsController {
   constructor(private readonly shiftsService: DriverShiftsService) {}
 
   @Get()
-  async getShifts() {
-    return this.shiftsService.getShifts();
+  async getShifts(@CurrentUser() user: AuthenticatedUser) {
+    return this.shiftsService.getShifts(user.driverId || user.id);
+  }
+
+  @Get('history')
+  async getHistory(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query('weekIndex') weekIndex?: string,
+  ) {
+    const idx = weekIndex !== undefined ? parseInt(weekIndex, 10) : 0;
+    return this.shiftsService.getHistory(
+      user.driverId || user.id,
+      Number.isNaN(idx) ? 0 : idx,
+    );
   }
 
   @Get('slots')

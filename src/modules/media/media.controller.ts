@@ -20,7 +20,21 @@ const ALLOWED_IMAGE_MIMES = new Set([
   'image/webp',
   'application/pdf',
 ]);
+const ALLOWED_SUPPORT_MEDIA_MIMES = new Set([
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+  'application/pdf',
+  'video/mp4',
+  'video/quicktime',
+  'video/webm',
+  'video/3gpp',
+  'video/x-m4v',
+]);
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const MAX_SUPPORT_VIDEO_BYTES = 25 * 1024 * 1024;
+const MAX_SUPPORT_IMAGE_BYTES = 10 * 1024 * 1024;
 
 @Controller()
 @UseGuards(FirebaseAuthGuard, RolesGuard)
@@ -81,5 +95,45 @@ export class MediaController {
     },
   ) {
     return this.handleUpload(file);
+  }
+
+  @Post('api/v1/media/support-upload')
+  @Roles(Role.ADMIN, Role.VENDOR, Role.DRIVER, Role.CUSTOMER)
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadSupportMedia(
+    @UploadedFile()
+    file: {
+      originalname: string;
+      buffer: Buffer;
+      mimetype: string;
+      size: number;
+    },
+  ) {
+    if (!file) {
+      throw new BadRequestException('Attachment file is required.');
+    }
+    const mime = (file.mimetype || '').toLowerCase();
+    if (!ALLOWED_SUPPORT_MEDIA_MIMES.has(mime)) {
+      throw new BadRequestException(
+        `Unsupported attachment type '${file.mimetype}'. Allowed: JPEG, PNG, WEBP, PDF, MP4, MOV, WEBM.`,
+      );
+    }
+    const isVideo = mime.startsWith('video/');
+    const maxBytes = isVideo ? MAX_SUPPORT_VIDEO_BYTES : MAX_SUPPORT_IMAGE_BYTES;
+    if (file.size > maxBytes) {
+      throw new BadRequestException(
+        `File size exceeds maximum ${isVideo ? '25MB' : '10MB'} limit.`,
+      );
+    }
+    const result = await this.storageService.uploadSupportAttachment(file);
+    return {
+      success: true,
+      url: result.url,
+      path: result.path,
+      name: result.name,
+      mimeType: result.mimeType,
+      mediaType: result.mediaType,
+      sizeBytes: result.sizeBytes,
+    };
   }
 }

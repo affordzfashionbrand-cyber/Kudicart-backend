@@ -46,7 +46,7 @@ export class FirebaseAdminService implements OnModuleInit {
       process.env.FIREBASE_WEB_API_KEY ||
       process.env.VITE_FIREBASE_API_KEY ||
       process.env.NEXT_PUBLIC_FIREBASE_API_KEY ||
-      undefined
+      'AIzaSyDNrOgdNcWwL4RxN9f-3Ktp7e73rSlOifc'
     );
   }
 

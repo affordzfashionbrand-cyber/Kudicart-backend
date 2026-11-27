@@ -121,19 +121,40 @@ export class SupportService {
         where: {
           OR: [{ id: dto.orderId.trim() }, { orderNumber: dto.orderId.trim() }],
         },
-        select: { id: true, customerId: true },
+        select: {
+          id: true,
+          customerId: true,
+          driverId: true,
+          driverProfile: { select: { userId: true } },
+        },
       });
 
       if (!order) {
         throw new NotFoundException(`Order '${dto.orderId}' not found.`);
       }
 
-      if (order.customerId !== canonicalUserId) {
+      const isOwner =
+        order.customerId === canonicalUserId ||
+        order.driverId === canonicalUserId ||
+        order.driverProfile?.userId === canonicalUserId;
+      if (!isOwner) {
         throw new ForbiddenException('You can only open order support tickets for your own orders.');
       }
 
       resolvedOrderId = order.id;
     }
+
+    const attachments = Array.isArray(dto.attachments)
+      ? dto.attachments.map((att) => ({
+          url: att.url,
+          path: att.path || undefined,
+          name: att.name,
+          mimeType: att.mimeType,
+          mediaType:
+            att.mediaType || (att.mimeType?.toLowerCase().startsWith('video/') ? 'video' : 'image'),
+          sizeBytes: att.sizeBytes ?? undefined,
+        }))
+      : undefined;
 
     const created = await this.prisma.supportTicket.create({
       data: {
@@ -145,6 +166,7 @@ export class SupportService {
         category,
         priority,
         status: 'OPEN',
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       },
     });
 

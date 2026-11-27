@@ -49,7 +49,12 @@ export class DriverController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: UpdateDriverStatusDto,
   ) {
-    return this.driverService.updateAvailability(user.driverId || user.id, body.isOnline);
+    return this.driverService.updateAvailability(user.driverId || user.id, body.isOnline, {
+      latitude: body.latitude,
+      longitude: body.longitude,
+      accuracy: body.accuracy,
+      enforceHubProximity: true,
+    });
   }
 
   @Post('location')

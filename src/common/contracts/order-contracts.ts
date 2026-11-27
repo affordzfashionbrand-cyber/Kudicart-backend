@@ -7,14 +7,31 @@
 export type KudiRole = 'CUSTOMER' | 'DRIVER' | 'VENDOR' | 'ADMIN';
 export type TransitionActorRole = KudiRole | 'SYSTEM';
 
+export const ORDER_TYPES = ['STANDARD', 'TRY_AND_BUY'] as const;
+export type OrderType = (typeof ORDER_TYPES)[number];
+
+export const DELIVERY_ASSIGNMENT_STATUSES = [
+  'NOT_ASSIGNED',
+  'ASSIGNMENT_PENDING',
+  'ASSIGNED',
+  'ACCEPTED_BY_DELIVERY_PARTNER',
+  'REJECTED_BY_DELIVERY_PARTNER',
+  'REASSIGNMENT_PENDING',
+  'COMPLETED',
+  'FAILED',
+] as const;
+export type DeliveryAssignmentStatus = (typeof DELIVERY_ASSIGNMENT_STATUSES)[number];
+
 export const CANONICAL_ORDER_STATUSES = [
   'PLACED',
   'ACCEPTED',
+  'PACKING',
   'PREPARING',
   'READY_FOR_PICKUP',
   'ASSIGNED',
   'PICKED_UP',
   'OUT_FOR_DELIVERY',
+  'TRY_AND_BUY',
   'DELIVERED',
   'RETURNING',
   'RETURNED',
@@ -56,6 +73,8 @@ export type ReturnCondition = 'GOOD' | 'DAMAGED' | 'TAG_MISSING';
 export const LIVE_TRACKING_ACTIVE_STATUSES: readonly OrderStatus[] = [
   'PICKED_UP',
   'OUT_FOR_DELIVERY',
+  'TRY_AND_BUY',
+  'RETURNING',
 ];
 
 export const TERMINAL_ORDER_STATUSES: readonly OrderStatus[] = [
@@ -67,12 +86,14 @@ export const TERMINAL_ORDER_STATUSES: readonly OrderStatus[] = [
 
 export const VALID_ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
   PLACED: ['ACCEPTED', 'CANCELLED', 'FAILED'],
-  ACCEPTED: ['PREPARING', 'CANCELLED'],
-  PREPARING: ['READY_FOR_PICKUP', 'CANCELLED'],
-  READY_FOR_PICKUP: ['ASSIGNED', 'CANCELLED'],
-  ASSIGNED: ['PICKED_UP', 'CANCELLED'],
+  ACCEPTED: ['PACKING', 'PREPARING', 'READY_FOR_PICKUP', 'CANCELLED'],
+  PACKING: ['READY_FOR_PICKUP', 'CANCELLED'],
+  PREPARING: ['PACKING', 'READY_FOR_PICKUP', 'CANCELLED'],
+  READY_FOR_PICKUP: ['OUT_FOR_DELIVERY', 'PICKED_UP', 'ASSIGNED', 'CANCELLED'],
+  ASSIGNED: ['PICKED_UP', 'OUT_FOR_DELIVERY', 'CANCELLED'],
   PICKED_UP: ['OUT_FOR_DELIVERY'],
-  OUT_FOR_DELIVERY: ['DELIVERED', 'RETURNING'],
+  OUT_FOR_DELIVERY: ['TRY_AND_BUY', 'DELIVERED', 'RETURNING', 'CANCELLED'],
+  TRY_AND_BUY: ['DELIVERED', 'RETURNING', 'RETURNED', 'CANCELLED'],
   DELIVERED: [],
   RETURNING: ['RETURNED'],
   RETURNED: [],
@@ -85,19 +106,88 @@ export const ORDER_TRANSITION_ROLES: Record<string, readonly TransitionActorRole
   'PLACED->ACCEPTED': ['VENDOR', 'ADMIN'],
   'PLACED->CANCELLED': ['CUSTOMER', 'VENDOR', 'ADMIN'],
   'PLACED->FAILED': ['SYSTEM', 'ADMIN'],
+  'ACCEPTED->PACKING': ['VENDOR', 'ADMIN'],
   'ACCEPTED->PREPARING': ['VENDOR', 'ADMIN'],
-  'ACCEPTED->CANCELLED': ['CUSTOMER', 'ADMIN'],
+  'ACCEPTED->READY_FOR_PICKUP': ['VENDOR', 'ADMIN'],
+  'ACCEPTED->CANCELLED': ['CUSTOMER', 'VENDOR', 'ADMIN'],
+  'PACKING->READY_FOR_PICKUP': ['VENDOR', 'ADMIN'],
+  'PACKING->CANCELLED': ['VENDOR', 'ADMIN'],
+  'PREPARING->PACKING': ['VENDOR', 'ADMIN', 'SYSTEM'],
   'PREPARING->READY_FOR_PICKUP': ['VENDOR', 'ADMIN'],
-  'PREPARING->CANCELLED': ['ADMIN'],
+  'PREPARING->CANCELLED': ['VENDOR', 'ADMIN'],
+  'READY_FOR_PICKUP->OUT_FOR_DELIVERY': ['DRIVER', 'ADMIN'],
+  'READY_FOR_PICKUP->PICKED_UP': ['DRIVER', 'ADMIN'],
   'READY_FOR_PICKUP->ASSIGNED': ['ADMIN'],
   'READY_FOR_PICKUP->CANCELLED': ['ADMIN'],
   'ASSIGNED->PICKED_UP': ['DRIVER', 'ADMIN'],
+  'ASSIGNED->OUT_FOR_DELIVERY': ['DRIVER', 'ADMIN'],
   'ASSIGNED->CANCELLED': ['ADMIN'],
   'PICKED_UP->OUT_FOR_DELIVERY': ['DRIVER', 'ADMIN'],
+  'OUT_FOR_DELIVERY->TRY_AND_BUY': ['DRIVER', 'ADMIN'],
   'OUT_FOR_DELIVERY->DELIVERED': ['DRIVER', 'ADMIN'],
   'OUT_FOR_DELIVERY->RETURNING': ['DRIVER', 'ADMIN'],
-  'RETURNING->RETURNED': ['DRIVER', 'ADMIN'],
+  'OUT_FOR_DELIVERY->CANCELLED': ['ADMIN'],
+  'TRY_AND_BUY->DELIVERED': ['DRIVER', 'ADMIN'],
+  'TRY_AND_BUY->RETURNING': ['DRIVER', 'ADMIN'],
+  'TRY_AND_BUY->RETURNED': ['DRIVER', 'ADMIN', 'VENDOR'],
+  'TRY_AND_BUY->CANCELLED': ['ADMIN'],
+  'RETURNING->RETURNED': ['DRIVER', 'ADMIN', 'VENDOR'],
 };
+
+export function getCustomerOrderStatusLabel(
+  status?: string | null,
+  _isTryAndBuy?: boolean,
+): string {
+  switch (String(status || '').toUpperCase()) {
+    case 'PLACED':
+      return 'Order placed';
+    case 'ACCEPTED':
+    case 'PACKING':
+    case 'PREPARING':
+    case 'READY_FOR_PICKUP':
+    case 'ASSIGNED':
+      return 'Order is getting packed';
+    case 'PICKED_UP':
+    case 'OUT_FOR_DELIVERY':
+      return 'Out for delivery';
+    case 'TRY_AND_BUY':
+      return 'Try & Buy';
+    case 'DELIVERED':
+      return 'Order delivered';
+    case 'RETURNING':
+    case 'RETURNED':
+      return 'Order return';
+    case 'CANCELLED':
+      return 'Order cancelled';
+    case 'FAILED':
+      return 'Order failed';
+    default:
+      return 'Order placed';
+  }
+}
+
+export function getDeliveryAssignmentLabel(status?: string | null): string {
+  switch (String(status || '').toUpperCase()) {
+    case 'NOT_ASSIGNED':
+      return 'Not Assigned';
+    case 'ASSIGNMENT_PENDING':
+      return 'Assignment Pending';
+    case 'ASSIGNED':
+      return 'Assigned to Partner';
+    case 'ACCEPTED_BY_DELIVERY_PARTNER':
+      return 'Accepted by Partner';
+    case 'REJECTED_BY_DELIVERY_PARTNER':
+      return 'Rejected by Partner';
+    case 'REASSIGNMENT_PENDING':
+      return 'Reassignment Pending';
+    case 'COMPLETED':
+      return 'Completed';
+    case 'FAILED':
+      return 'Assignment Failed';
+    default:
+      return 'Not Assigned';
+  }
+}
 
 export interface OrderItemContract {
   id: string;
@@ -136,6 +226,22 @@ export interface TryAndBuySessionContract {
   storeReconciledAt?: string | null;
 }
 
+export interface DispatchAssignmentContract {
+  id: string;
+  orderId: string;
+  driverProfileId?: string | null;
+  status: string;
+  assignmentStatus: DeliveryAssignmentStatus;
+  assignmentSource: string;
+  offeredAt?: string | null;
+  acceptedAt?: string | null;
+  rejectedAt?: string | null;
+  rejectionReason?: string | null;
+  failureReason?: string | null;
+  completedAt?: string | null;
+  attempts: number;
+}
+
 export interface OrderContract {
   id: string;
   orderNumber: string;
@@ -148,7 +254,10 @@ export interface OrderContract {
   driverId?: string | null;
   driverProfileId?: string | null;
   fulfillmentType: FulfillmentType;
+  orderType: OrderType;
   status: OrderStatus;
+  deliveryAssignmentStatus: DeliveryAssignmentStatus;
+  assignmentFailureReason?: string | null;
   paymentMethod: PaymentMethod;
   paymentStatus: PaymentStatus;
   razorpayOrderId?: string | null;
@@ -164,8 +273,16 @@ export interface OrderContract {
   etaMinutes: number;
   isTryAndBuy: boolean;
   deliveryAddress?: Record<string, any> | null;
+  acceptedAt?: string | null;
+  packingStartedAt?: string | null;
+  readyForPickupAt?: string | null;
+  pickedUpAt?: string | null;
+  pickedUpByDriverId?: string | null;
+  tryAndBuyStartedAt?: string | null;
   arrivedAt?: string | null;
   deliveredAt?: string | null;
+  returnedAt?: string | null;
+  returnReason?: string | null;
   cancelledAt?: string | null;
   cancellationReason?: string | null;
   rejectedByVendor?: boolean;
@@ -179,6 +296,7 @@ export interface OrderContract {
   updatedAt: string;
   items: OrderItemContract[];
   tryAndBuySession?: TryAndBuySessionContract | null;
+  dispatchAssignment?: DispatchAssignmentContract | null;
 }
 
 export interface CheckoutRequestContract {
@@ -234,8 +352,17 @@ export type TrackingRealtimeEventType =
   | 'PONG'
   | 'DRIVER_LOCATION'
   | 'ORDER_STATUS_UPDATE'
+  | 'ORDER_ACCEPTED'
+  | 'DELIVERY_ASSIGNMENT_CREATED'
+  | 'DELIVERY_ASSIGNMENT_FAILED'
+  | 'ORDER_READY_FOR_PICKUP'
+  | 'ORDER_PICKED_UP'
+  | 'ORDER_OUT_FOR_DELIVERY'
+  | 'TRY_AND_BUY_STARTED'
   | 'TRY_AND_BUY_UPDATED'
   | 'ORDER_ARRIVED'
+  | 'ORDER_DELIVERED'
+  | 'ORDER_RETURNED'
   | 'ERROR';
 
 export interface TrackingRealtimeMessageContract {
@@ -244,6 +371,8 @@ export interface TrackingRealtimeMessageContract {
   orderId?: string;
   orderNumber?: string;
   status?: OrderStatus;
+  orderType?: OrderType;
+  deliveryAssignmentStatus?: DeliveryAssignmentStatus;
   stage?: string;
   items?: OrderItemContract[];
   tryAndBuySession?: TryAndBuySessionContract | null;

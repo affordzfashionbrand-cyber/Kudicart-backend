@@ -24,8 +24,17 @@ export class DriverService {
     return this.profileService.getKycStatus(driverId);
   }
 
-  async updateAvailability(driverId: string | undefined, isOnline: boolean) {
-    return this.profileService.updateAvailability(driverId, isOnline);
+  async updateAvailability(
+    driverId: string | undefined,
+    isOnline: boolean,
+    options?: {
+      latitude?: number;
+      longitude?: number;
+      accuracy?: number;
+      enforceHubProximity?: boolean;
+    },
+  ) {
+    return this.profileService.updateAvailability(driverId, isOnline, options);
   }
 
   async getAssignedOrders(driverId?: string, statusFilter?: string) {

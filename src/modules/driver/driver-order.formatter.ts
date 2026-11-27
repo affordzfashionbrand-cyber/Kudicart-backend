@@ -50,13 +50,30 @@ export function formatOrderPacket(order: any, _legacyStore?: any, explicitTryAnd
     orderNumber: order.orderNumber,
     version: order.version ?? 1,
     fulfillmentType: order.fulfillmentType || 'DARK_STORE',
-    orderType: isTryAndBuy ? 'TRY_AND_BUY' : 'STANDARD',
+    orderType: order.orderType || (isTryAndBuy ? 'TRY_AND_BUY' : 'STANDARD'),
     isTryAndBuy,
     deliveryInstructions: order.deliveryInstructions ?? null,
     status: order.status,
+    deliveryAssignmentStatus: order.deliveryAssignmentStatus || 'NOT_ASSIGNED',
+    assignmentFailureReason: order.assignmentFailureReason ?? null,
+    accepted:
+      order.deliveryAssignmentStatus === 'ACCEPTED_BY_DELIVERY_PARTNER' ||
+      order.deliveryAssignmentStatus === 'COMPLETED' ||
+      ['PICKED_UP', 'OUT_FOR_DELIVERY', 'TRY_AND_BUY', 'DELIVERED', 'RETURNING', 'RETURNED'].includes(
+        String(order.status || ''),
+      ),
+    acceptedAt: order.acceptedAt ? new Date(order.acceptedAt).toISOString() : null,
+    packingStartedAt: order.packingStartedAt ? new Date(order.packingStartedAt).toISOString() : null,
+    readyForPickupAt: order.readyForPickupAt ? new Date(order.readyForPickupAt).toISOString() : null,
+    pickedUpAt: order.pickedUpAt ? new Date(order.pickedUpAt).toISOString() : null,
+    pickedUpByDriverId: order.pickedUpByDriverId ?? null,
+    tryAndBuyStartedAt: order.tryAndBuyStartedAt ? new Date(order.tryAndBuyStartedAt).toISOString() : null,
     arrivedAt: order.arrivedAt ? new Date(order.arrivedAt).toISOString() : null,
     isArrived: Boolean(order.arrivedAt),
     deliveredAt: order.deliveredAt ? new Date(order.deliveredAt).toISOString() : null,
+    returnedAt: order.returnedAt ? new Date(order.returnedAt).toISOString() : null,
+    returnReason: order.returnReason ?? null,
+    dispatchAssignment: order.dispatchAssignment || null,
     verificationPhotos: Array.isArray(order.verificationPhotos)
       ? order.verificationPhotos
       : [],

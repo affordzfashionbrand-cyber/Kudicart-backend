@@ -9,6 +9,7 @@ import {
 import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrderTransitionService } from '../orders/order-transition.service';
+import { DeliveryAssignmentService } from '../orders/delivery-assignment.service';
 import { TrackingRealtimeGateway } from '../orders/tracking-realtime.gateway';
 import { QueueJobType } from '../queue/queue.constants';
 import { Role } from '../../common/enums/role.enum';
@@ -30,6 +31,7 @@ const TNB_ORDER_INCLUDE = {
   vendor: { include: { user: { select: { id: true, name: true, phone: true } } } },
   address: true,
   tryAndBuySession: true,
+  dispatchAssignment: true,
 };
 
 @Injectable()
@@ -38,6 +40,7 @@ export class DriverTryAndBuyService {
     private readonly prisma: PrismaService,
     private readonly orderTransition: OrderTransitionService,
     @Optional() private readonly trackingGateway?: TrackingRealtimeGateway,
+    @Optional() private readonly deliveryAssignment?: DeliveryAssignmentService,
   ) {}
 
   private ensureDbConnected() {
@@ -91,9 +94,9 @@ export class DriverTryAndBuyService {
   ) {
     const { driver, order } = await this.resolveOrderAndDriver(driverId, orderId);
 
-    if (order.status !== 'OUT_FOR_DELIVERY') {
+    if (order.status !== 'TRY_AND_BUY' && order.status !== 'OUT_FOR_DELIVERY') {
       throw new BadRequestException(
-        `Doorstep Try & Buy handover requires order status OUT_FOR_DELIVERY (current: ${order.status})`,
+        `Doorstep Try & Buy handover requires order status TRY_AND_BUY or OUT_FOR_DELIVERY (current: ${order.status})`,
       );
     }
 
@@ -104,6 +107,23 @@ export class DriverTryAndBuyService {
 
     const now = new Date();
     const trialEnds = new Date(now.getTime() + 10 * 60 * 1000);
+
+    // Ensure Order.status advances cleanly to TRY_AND_BUY if not already transitioned on arrival
+    if (order.status === 'OUT_FOR_DELIVERY') {
+      await this.orderTransition.executeTransition({
+        orderId: order.id,
+        nextStatus: 'TRY_AND_BUY',
+        actorRole: Role.DRIVER,
+        actorId: driver.userId,
+        actorName: driver.fullName,
+        note: 'Doorstep Try & Buy OTP verified; trial started',
+        auditAction: 'TRY_AND_BUY_STARTED',
+        extraOrderUpdate: {
+          arrivedAt: order.arrivedAt || now,
+          tryAndBuyStartedAt: order.tryAndBuyStartedAt || now,
+        },
+      });
+    }
 
     await this.prisma.$transaction(async (tx) => {
       if (!order.arrivedAt) {
@@ -196,9 +216,12 @@ export class DriverTryAndBuyService {
   ) {
     const { driver, order } = await this.resolveOrderAndDriver(driverId, orderId);
 
-    if (order.status !== 'OUT_FOR_DELIVERY') {
+    if (
+      order.status !== 'TRY_AND_BUY' &&
+      !(order.status === 'OUT_FOR_DELIVERY' && Boolean(order.arrivedAt))
+    ) {
       throw new BadRequestException(
-        `Try & Buy selections require order status OUT_FOR_DELIVERY (current: ${order.status})`,
+        `Try & Buy selections require order status TRY_AND_BUY (current: ${order.status})`,
       );
     }
 
@@ -391,6 +414,24 @@ export class DriverTryAndBuyService {
   ) {
     const { driver, order } = await this.resolveOrderAndDriver(driverId, orderId);
 
+    if (
+      order.status !== 'TRY_AND_BUY' &&
+      order.status !== 'OUT_FOR_DELIVERY'
+    ) {
+      throw new BadRequestException(
+        `Payment settlement applies only during TRY_AND_BUY (current: ${order.status})`,
+      );
+    }
+
+    const hasExplicitDecisions =
+      Boolean(order.tryAndBuySession?.customerSelectionAt) ||
+      order.items.some((it) => it.tryAndBuyDecision === 'KEEP' || it.tryAndBuyDecision === 'RETURN');
+    if (!hasExplicitDecisions) {
+      throw new BadRequestException(
+        'Customer Keep/Return decision must be recorded before settling Try & Buy order',
+      );
+    }
+
     const selections: Record<string, 'KEEP' | 'RETURN'> = {};
     for (const it of order.items) {
       selections[it.id] = (it.tryAndBuyDecision === 'RETURN' ? 'RETURN' : 'KEEP');
@@ -459,6 +500,8 @@ export class DriverTryAndBuyService {
           data: { completedDeliveries: { increment: 1 }, availableSince: new Date() },
         });
       });
+
+      this.deliveryAssignment?.retryPendingAssignments().catch(() => 0);
 
       return {
         success: true,
@@ -565,6 +608,18 @@ export class DriverTryAndBuyService {
   ) {
     const { driver, order } = await this.resolveOrderAndDriver(driverId, orderId);
 
+    if (order.status === 'RETURNED' && order.tryAndBuySession?.storeReconciliationStatus === 'RECONCILED') {
+      return {
+        success: true,
+        message: 'Store return already reconciled.',
+        reconciledAt: order.tryAndBuySession?.storeReconciledAt?.toISOString?.() || new Date().toISOString(),
+        restoredItemsCount: (order.tryAndBuySession?.returnedItemIds || []).length,
+        refundQueued: false,
+        refundAmount: order.tryAndBuySession?.refundAmount ?? 0,
+        order: formatOrderPacket(order, undefined, true),
+      };
+    }
+
     if (order.status !== 'RETURNING') {
       throw new BadRequestException(
         `Store return reconciliation requires order status RETURNING (current: ${order.status})`,
@@ -597,52 +652,54 @@ export class DriverTryAndBuyService {
       selections,
     });
 
-    // Restore returned items inventory inside a transaction BEFORE transitioning
-    await this.prisma.$transaction(async (tx) => {
-      for (const returnedItem of financials.returnedItems) {
-        const orderItemRow = order.items.find((i) => i.id === returnedItem.id);
-        if (orderItemRow) {
-          await tx.product.updateMany({
-            where: { id: orderItemRow.productId },
-            data: { stockQuantity: { increment: orderItemRow.quantity || 1 } },
-          });
+    if (!order.tryAndBuySession || order.tryAndBuySession.storeReconciliationStatus !== 'RECONCILED') {
+      // Restore returned items inventory inside a transaction ONLY once
+      await this.prisma.$transaction(async (tx) => {
+        for (const returnedItem of financials.returnedItems) {
+          const orderItemRow = order.items.find((i) => i.id === returnedItem.id);
+          if (orderItemRow) {
+            await tx.product.updateMany({
+              where: { id: orderItemRow.productId },
+              data: { stockQuantity: { increment: orderItemRow.quantity || 1 } },
+            });
+          }
         }
-      }
 
-      await tx.tryAndBuySession.upsert({
-        where: { orderId: order.id },
-        update: {
-          stage: 'COMPLETED',
-          storeReconciliationStatus: 'RECONCILED',
-          storeReconciledAt: new Date(),
-          finalPayableTotal: financials.finalPayableTotal,
-          refundAmount: financials.refundAmount,
-          paymentStatus:
-            order.paymentMethod === 'RAZORPAY' && financials.refundAmount > 0
-              ? 'REFUND_PENDING'
-              : 'COMPLETED',
-        },
-        create: {
-          orderId: order.id,
-          driverId: driver.userId,
-          driverProfileId: driver.id,
-          stage: 'COMPLETED',
-          storeReconciliationStatus: 'RECONCILED',
-          storeReconciledAt: new Date(),
-          finalPayableTotal: financials.finalPayableTotal,
-          refundAmount: financials.refundAmount,
-          paymentStatus:
-            order.paymentMethod === 'RAZORPAY' && financials.refundAmount > 0
-              ? 'REFUND_PENDING'
-              : 'COMPLETED',
-        },
-      });
+        await tx.tryAndBuySession.upsert({
+          where: { orderId: order.id },
+          update: {
+            stage: 'COMPLETED',
+            storeReconciliationStatus: 'RECONCILED',
+            storeReconciledAt: new Date(),
+            finalPayableTotal: financials.finalPayableTotal,
+            refundAmount: financials.refundAmount,
+            paymentStatus:
+              order.paymentMethod === 'RAZORPAY' && financials.refundAmount > 0
+                ? 'REFUND_PENDING'
+                : 'COMPLETED',
+          },
+          create: {
+            orderId: order.id,
+            driverId: driver.userId,
+            driverProfileId: driver.id,
+            stage: 'COMPLETED',
+            storeReconciliationStatus: 'RECONCILED',
+            storeReconciledAt: new Date(),
+            finalPayableTotal: financials.finalPayableTotal,
+            refundAmount: financials.refundAmount,
+            paymentStatus:
+              order.paymentMethod === 'RAZORPAY' && financials.refundAmount > 0
+                ? 'REFUND_PENDING'
+                : 'COMPLETED',
+          },
+        });
 
-      await tx.driverProfile.update({
-        where: { id: driver.id },
-        data: { completedDeliveries: { increment: 1 }, availableSince: new Date() },
+        await tx.driverProfile.update({
+          where: { id: driver.id },
+          data: { completedDeliveries: { increment: 1 }, availableSince: new Date() },
+        });
       });
-    });
+    }
 
     const extraOutboxEvents =
       order.paymentMethod === 'RAZORPAY' && financials.refundAmount > 0
@@ -675,10 +732,12 @@ export class DriverTryAndBuyService {
       netKeptSubtotalForLedger: financials.netKeptSubtotalForCommission,
       extraOrderUpdate:
         order.paymentMethod === 'RAZORPAY' && financials.refundAmount > 0
-          ? { paymentStatus: 'REFUND_PENDING' }
-          : undefined,
+          ? { paymentStatus: 'REFUND_PENDING', returnReason: dto.note?.trim() || 'Customer rejected Try & Buy items' }
+          : { returnReason: dto.note?.trim() || 'Customer rejected Try & Buy items' },
       extraOutboxEvents,
     });
+
+    this.deliveryAssignment?.retryPendingAssignments().catch(() => 0);
 
     return {
       success: true,

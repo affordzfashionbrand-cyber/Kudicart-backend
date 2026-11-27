@@ -180,9 +180,10 @@ describe('E2E Delivery & Tracking Workflow (Real HTTP + PostgreSQL)', () => {
       'usr-admin-1',
       'Amara',
     );
-    expect(assigned.order.status).toBe('ASSIGNED');
+    expect(assigned.order.status).toBe('READY_FOR_PICKUP');
+    expect(assigned.order.deliveryAssignmentStatus).toBe('ASSIGNED');
 
-    // Driver picks up & starts delivery
+    // Driver picks up & starts delivery (pickup transitions READY_FOR_PICKUP -> OUT_FOR_DELIVERY; outForDelivery is idempotent)
     await driverOrdersService.pickupOrder(drvProfId, order.id);
     await driverOrdersService.outForDelivery(drvProfId, order.id);
 

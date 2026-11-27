@@ -71,6 +71,24 @@ export class FirebaseAuthGuard implements CanActivate {
       throw new UnauthorizedException('Authentication token has expired');
     }
 
+    // Check if token is an internal HMAC-SHA256 token (alg: HS256)
+    // If an internal token failed signature verification, reject directly without forwarding to Firebase Admin
+    let isInternalJwt = false;
+    try {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const headerJson = Buffer.from(parts[0], 'base64url').toString('utf8');
+        const header = JSON.parse(headerJson);
+        if (header?.alg === 'HS256') {
+          isInternalJwt = true;
+        }
+      }
+    } catch {}
+
+    if (isInternalJwt) {
+      throw new UnauthorizedException(jwtResult.error || 'Invalid or malformed authentication token');
+    }
+
     if (this.firebaseAdmin) {
       return this.verifyFirebaseToken(request, token);
     }

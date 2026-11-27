@@ -5,10 +5,14 @@ import {
   Post,
   Patch,
   Body,
+  Param,
+  Query,
+  Res,
   UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { DriverProfileService } from './driver-profile.service';
 import { UpdateDriverProfileDto } from './dto/update-driver-profile.dto';
 import { UpdateVehicleDto } from './dto/update-vehicle.dto';
@@ -88,13 +92,55 @@ export class DriverProfileController {
     return this.profileService.submitKyc(user.driverId || user.id);
   }
 
+  @Get('app-version')
+  async getAppVersionStatus(@Query('currentVersion') currentVersion?: string) {
+    return this.profileService.getAppVersionStatus(currentVersion);
+  }
+
+  @Post('approval-acknowledge')
+  @HttpCode(HttpStatus.OK)
+  async acknowledgeApproval(@CurrentUser() user: AuthenticatedUser) {
+    return this.profileService.acknowledgeApproval(user.driverId || user.id);
+  }
+
+  @Get('documents/:docType/:side/file')
+  async getDocumentFile(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('docType') docType: string,
+    @Param('side') side: string,
+    @Query('download') download: string | undefined,
+    @Res() res: Response,
+  ) {
+    const file = await this.profileService.getDocumentFile(
+      user.driverId || user.id,
+      docType,
+      side,
+    );
+    const safeName = file.fileName.replace(/["\\\r\n]/g, '_');
+    const disposition =
+      download === '1' || download === 'true' ? 'attachment' : 'inline';
+    res.setHeader('Content-Type', file.mimeType);
+    res.setHeader('Content-Disposition', `${disposition}; filename="${safeName}"`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.send(file.buffer);
+  }
+
   @Patch('availability')
   @RateLimit({ points: 10, duration: 60 })
   async updateAvailability(
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: UpdateDriverStatusDto,
   ) {
-    return this.profileService.updateAvailability(user.driverId || user.id, body.isOnline);
+    return this.profileService.updateAvailability(
+      user.driverId || user.id,
+      body.isOnline,
+      {
+        latitude: body.latitude,
+        longitude: body.longitude,
+        accuracy: body.accuracy,
+        enforceHubProximity: true,
+      },
+    );
   }
 
   @Put('availability')
@@ -103,7 +149,16 @@ export class DriverProfileController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: UpdateDriverStatusDto,
   ) {
-    return this.profileService.updateAvailability(user.driverId || user.id, body.isOnline);
+    return this.profileService.updateAvailability(
+      user.driverId || user.id,
+      body.isOnline,
+      {
+        latitude: body.latitude,
+        longitude: body.longitude,
+        accuracy: body.accuracy,
+        enforceHubProximity: true,
+      },
+    );
   }
 
   @Post('location')

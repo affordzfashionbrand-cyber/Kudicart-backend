@@ -1179,6 +1179,7 @@ async function main() {
     await prisma.driverShift.upsert({
       where: { id: sh.id },
       update: {
+        driverId: 'drv-104',
         dayOfWeek,
         day: sh.day,
         dateStr: mappedDate,
@@ -1194,6 +1195,7 @@ async function main() {
       },
       create: {
         id: sh.id,
+        driverId: 'drv-104',
         dayOfWeek,
         day: sh.day,
         dateStr: mappedDate,

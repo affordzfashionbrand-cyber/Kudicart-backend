@@ -1009,7 +1009,8 @@ describe('KudiCart Admin Backend — Complete Domain, RBAC & Security Test Suite
       );
 
       expect(assignRes.success).toBe(true);
-      expect(assignRes.order.status).toBe('ASSIGNED');
+      expect(assignRes.order.status).toBe('READY_FOR_PICKUP');
+      expect(assignRes.order.deliveryAssignmentStatus).toBe('ASSIGNED');
       expect(assignRes.order.driverName).toBe('Deepak Solanki');
 
       // Verify audit log

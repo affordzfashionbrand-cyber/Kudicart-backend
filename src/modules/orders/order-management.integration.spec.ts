@@ -828,7 +828,7 @@ describe('Order Management End-to-End HTTP + WS + PostgreSQL Integration', () =>
         .send()
         .expect(200);
 
-      expect(arrivedRes.body.order.status).toBe('OUT_FOR_DELIVERY');
+      expect(arrivedRes.body.order.status).toBe('TRY_AND_BUY');
       expect(arrivedRes.body.arrivedAt).toBeTruthy();
 
       // Customer reads authoritative handoverOtp from GET /api/v1/orders/:id
@@ -922,9 +922,8 @@ describe('Order Management End-to-End HTTP + WS + PostgreSQL Integration', () =>
         'ACCEPTED',
         'PREPARING',
         'READY_FOR_PICKUP',
-        'ASSIGNED',
-        'PICKED_UP',
         'OUT_FOR_DELIVERY',
+        'TRY_AND_BUY',
         'RETURNING',
         'RETURNED',
       ]);
@@ -937,7 +936,7 @@ describe('Order Management End-to-End HTTP + WS + PostgreSQL Integration', () =>
       // Wait briefly for final WS broadcasts if any are in flight
       await new Promise((r) => setTimeout(r, 150));
       expect(receivedWsStatuses).toEqual(
-        expect.arrayContaining(['ACCEPTED', 'READY_FOR_PICKUP', 'ASSIGNED', 'OUT_FOR_DELIVERY', 'RETURNED']),
+        expect.arrayContaining(['ACCEPTED', 'READY_FOR_PICKUP', 'OUT_FOR_DELIVERY', 'TRY_AND_BUY', 'RETURNED']),
       );
     } finally {
       ws.close();

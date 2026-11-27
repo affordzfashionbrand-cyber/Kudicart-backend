@@ -68,6 +68,7 @@ export class AdminSupportService {
       category: t.category,
       priority: t.priority || 'MEDIUM',
       status: t.status,
+      attachments: Array.isArray(t.attachments) ? t.attachments : [],
       assignee: t.assignee || 'Unassigned',
       resolutionRemarks: t.resolutionRemarks || null,
       resolutionNote: t.resolutionRemarks || null,

@@ -11,6 +11,7 @@ import {
 import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StateMachineService } from './state-machine.service';
+import { DeliveryAssignmentService } from './delivery-assignment.service';
 import { OrderTransitionService } from './order-transition.service';
 import { RazorpayClientService } from '../payments/razorpay-client.service';
 import { CartService } from '../cart/cart.service';
@@ -23,11 +24,13 @@ import { Role } from '../../common/enums/role.enum';
 import { EmailService } from '../notifications/email.service';
 import {
   CheckoutResponseContract,
+  DeliveryAssignmentStatus,
   LIVE_TRACKING_ACTIVE_STATUSES,
   OrderContract,
   OrderStatus,
   TERMINAL_ORDER_STATUSES,
   TryAndBuyDecision,
+  getCustomerOrderStatusLabel,
 } from '../../common/contracts/order-contracts';
 import {
   GIFT_WRAP_FEE,
@@ -81,6 +84,7 @@ const ORDER_WITH_RELATIONS = {
   },
   driverProfile: true,
   tryAndBuySession: true,
+  dispatchAssignment: true,
   checkoutGroup: true,
 };
 
@@ -98,6 +102,7 @@ export class OrdersService {
     @Optional() private readonly trackingGateway?: TrackingRealtimeGateway,
     @Optional() private readonly queueService?: QueueService,
     @Optional() private readonly emailService?: EmailService,
+    @Optional() private readonly deliveryAssignment?: DeliveryAssignmentService,
   ) {}
 
   private ensureDbConnected() {
@@ -203,7 +208,11 @@ export class OrdersService {
         ? `${order.driverProfile.vehicleType || 'Vehicle'} (${order.driverProfile.vehicleRegistration})`
         : (order.driverProfile?.vehicleType || null),
       fulfillmentType: order.fulfillmentType || 'DARK_STORE',
+      orderType: order.orderType || (order.isTryAndBuy ? 'TRY_AND_BUY' : 'STANDARD'),
       status: order.status,
+      deliveryAssignmentStatus: (order.deliveryAssignmentStatus || 'NOT_ASSIGNED') as DeliveryAssignmentStatus,
+      assignmentFailureReason: order.assignmentFailureReason ?? null,
+      customerStatusLabel: getCustomerOrderStatusLabel(order.status, order.isTryAndBuy),
       paymentMethod: order.paymentMethod,
       paymentStatus: order.paymentStatus,
       razorpayOrderId: order.razorpayOrderId ?? null,
@@ -224,8 +233,16 @@ export class OrdersService {
       gstBusinessName: order.gstBusinessName ?? null,
       verificationPhotos: Array.isArray(order.verificationPhotos) ? order.verificationPhotos : [],
       deliveryAddress: formattedDeliveryAddress,
+      acceptedAt: order.acceptedAt ? new Date(order.acceptedAt).toISOString() : null,
+      packingStartedAt: order.packingStartedAt ? new Date(order.packingStartedAt).toISOString() : null,
+      readyForPickupAt: order.readyForPickupAt ? new Date(order.readyForPickupAt).toISOString() : null,
+      pickedUpAt: order.pickedUpAt ? new Date(order.pickedUpAt).toISOString() : null,
+      pickedUpByDriverId: order.pickedUpByDriverId ?? null,
+      tryAndBuyStartedAt: order.tryAndBuyStartedAt ? new Date(order.tryAndBuyStartedAt).toISOString() : null,
       arrivedAt: order.arrivedAt ? new Date(order.arrivedAt).toISOString() : null,
       deliveredAt: order.deliveredAt ? new Date(order.deliveredAt).toISOString() : null,
+      returnedAt: order.returnedAt ? new Date(order.returnedAt).toISOString() : null,
+      returnReason: order.returnReason ?? null,
       cancelledAt: order.cancelledAt ? new Date(order.cancelledAt).toISOString() : null,
       cancellationReason: order.cancellationReason ?? null,
       rejectedByVendor: Boolean(order.rejectedByVendor),
@@ -267,6 +284,23 @@ export class OrdersService {
             returnImages: order.tryAndBuySession.returnImages || [],
             storeReconciliationStatus: order.tryAndBuySession.storeReconciliationStatus ?? null,
             storeReconciledAt: order.tryAndBuySession.storeReconciledAt?.toISOString?.() ?? null,
+          }
+        : null,
+      dispatchAssignment: order.dispatchAssignment
+        ? {
+            id: order.dispatchAssignment.id,
+            orderId: order.dispatchAssignment.orderId,
+            driverProfileId: order.dispatchAssignment.driverProfileId ?? null,
+            status: order.dispatchAssignment.status,
+            assignmentStatus: order.dispatchAssignment.assignmentStatus || order.deliveryAssignmentStatus || 'NOT_ASSIGNED',
+            assignmentSource: order.dispatchAssignment.assignmentSource || 'AUTO',
+            offeredAt: order.dispatchAssignment.offeredAt?.toISOString?.() ?? null,
+            acceptedAt: order.dispatchAssignment.acceptedAt?.toISOString?.() ?? null,
+            rejectedAt: order.dispatchAssignment.rejectedAt?.toISOString?.() ?? null,
+            rejectionReason: order.dispatchAssignment.rejectionReason ?? null,
+            failureReason: order.dispatchAssignment.failureReason ?? null,
+            completedAt: order.dispatchAssignment.completedAt?.toISOString?.() ?? null,
+            attempts: order.dispatchAssignment.attempts ?? 0,
           }
         : null,
       history: (order.history || []).map((h: any) => ({
@@ -782,7 +816,9 @@ export class OrdersService {
             addressId: address.id,
             deliveryAddress: addressSnapshot,
             fulfillmentType: plan.bucket.fulfillmentType,
+            orderType: plan.bucket.isTryAndBuy ? 'TRY_AND_BUY' : 'STANDARD',
             status: 'PLACED',
+            deliveryAssignmentStatus: 'NOT_ASSIGNED',
             paymentMethod: dto.paymentMethod,
             paymentStatus: 'PENDING',
             itemTotal: plan.totals.itemTotal,
@@ -982,6 +1018,17 @@ export class OrdersService {
     const formattedOrders = freshOrders.map((o) =>
       this.formatOrderResponse(o, Role.CUSTOMER, userId),
     );
+
+    for (const o of freshOrders) {
+      this.trackingGateway?.broadcastStatusUpdate(o.id, 'PLACED', {
+        eventType: 'ORDER_STATUS_UPDATE',
+        orderNumber: o.orderNumber,
+        orderType: o.orderType,
+        deliveryAssignmentStatus: o.deliveryAssignmentStatus,
+        vendorId: o.vendorId ?? null,
+        customerId: o.customerId,
+      });
+    }
 
     const checkoutSessionToken =
       dto.paymentMethod === 'RAZORPAY' && groupGrandTotal > 0
@@ -1645,27 +1692,42 @@ export class OrdersService {
 
     const formatted = this.formatOrderResponse(order, role, userId);
     const driverVisibleStatuses: OrderStatus[] = [
+      'ACCEPTED',
+      'PACKING',
+      'PREPARING',
+      'READY_FOR_PICKUP',
       'ASSIGNED',
       'PICKED_UP',
       'OUT_FOR_DELIVERY',
+      'TRY_AND_BUY',
       'DELIVERED',
       'RETURNING',
       'RETURNED',
     ];
+    const hasActiveAssignment =
+      order.deliveryAssignmentStatus === 'ASSIGNED' ||
+      order.deliveryAssignmentStatus === 'ACCEPTED_BY_DELIVERY_PARTNER' ||
+      order.deliveryAssignmentStatus === 'COMPLETED';
     const canShowDriver =
-      driverVisibleStatuses.includes(order.status as OrderStatus) &&
-      Boolean(order.driverProfile);
+      Boolean(order.driverProfile) &&
+      (hasActiveAssignment || driverVisibleStatuses.includes(order.status as OrderStatus));
 
     return {
       orderId: order.id,
       orderNumber: order.orderNumber,
       version: order.version,
       fulfillmentType: order.fulfillmentType || 'DARK_STORE',
+      orderType: order.orderType || (order.isTryAndBuy ? 'TRY_AND_BUY' : 'STANDARD'),
+      deliveryAssignmentStatus: order.deliveryAssignmentStatus || 'NOT_ASSIGNED',
+      customerStatusLabel: getCustomerOrderStatusLabel(order.status, order.isTryAndBuy),
       hubName,
       status: order.status,
       trackingActive: isLive,
       isArrived: Boolean(order.arrivedAt),
+      pickedUpAt: order.pickedUpAt ? order.pickedUpAt.toISOString() : null,
+      tryAndBuyStartedAt: order.tryAndBuyStartedAt ? order.tryAndBuyStartedAt.toISOString() : null,
       arrivedAt: order.arrivedAt ? order.arrivedAt.toISOString() : null,
+      returnedAt: order.returnedAt ? order.returnedAt.toISOString() : null,
       etaMinutes: computedEtaMinutes,
       driverLocation:
         isLive && driverLat != null && driverLng != null
@@ -1699,7 +1761,9 @@ export class OrdersService {
           }
         : null,
       route: routeData,
-      milestones: this.stateMachine.getMilestones(order.status as OrderStatus),
+      milestones: this.stateMachine.getMilestones(order.status as OrderStatus, {
+        isTryAndBuy: Boolean(order.isTryAndBuy),
+      }),
       handoverOtp: formatted.handoverOtp,
       isTryAndBuy: formatted.isTryAndBuy,
       tryAndBuySession: formatted.tryAndBuySession,
@@ -1778,6 +1842,7 @@ export class OrdersService {
       actorId,
       note,
       expectedVersion,
+      triggerAutoAssignment: nextStatus === 'ACCEPTED',
     });
 
     return this.formatOrderResponse(updated, actorRole, actorId);
@@ -1850,9 +1915,12 @@ export class OrdersService {
       throw new BadRequestException('This order is not enabled for Try & Buy');
     }
 
-    if (order.status !== 'OUT_FOR_DELIVERY') {
+    if (
+      order.status !== 'TRY_AND_BUY' &&
+      !(order.status === 'OUT_FOR_DELIVERY' && Boolean(order.arrivedAt))
+    ) {
       throw new BadRequestException(
-        `Try & Buy selections can only be submitted while order is OUT_FOR_DELIVERY (current: ${order.status})`,
+        `Try & Buy selections can only be submitted while order is in TRY_AND_BUY stage (current: ${order.status})`,
       );
     }
 
@@ -2024,50 +2092,45 @@ export class OrdersService {
       throw new ForbiddenException('Only ADMIN can manually assign a delivery driver (D-006).');
     }
 
-    const driver = await this.prisma.driverProfile.findFirst({
-      where: {
-        OR: [{ id: driverIdOrProfileId }, { userId: driverIdOrProfileId }],
-      },
-      include: { user: true },
-    });
-
-    if (!driver) {
-      throw new NotFoundException(`Driver '${driverIdOrProfileId}' not found`);
-    }
-
-    if (driver.kycStatus !== 'APPROVED') {
-      throw new BadRequestException(
-        `Driver '${driver.fullName}' cannot be assigned because KYC status is '${driver.kycStatus}'.`,
+    if (this.deliveryAssignment) {
+      const { order } = await this.deliveryAssignment.assignManually(
+        id,
+        driverIdOrProfileId,
+        { actorId, actorRole, actorName },
       );
+      return this.formatOrderResponse(order, Role.ADMIN, actorId);
     }
 
-    const updated = await this.orderTransition.executeTransition({
-      orderId: id,
-      nextStatus: 'ASSIGNED',
-      actorRole: Role.ADMIN,
-      actorId,
-      actorName,
-      note: `Admin ${actorName || actorId || ''} manually assigned rider ${driver.fullName}`.trim(),
-      auditAction: 'ADMIN_MANUAL_DRIVER_ASSIGNED',
-      extraOrderUpdate: {
-        driverId: driver.userId,
-        driverProfileId: driver.id,
-      },
-    });
-
-    return this.formatOrderResponse(updated, Role.ADMIN, actorId);
+    throw new ServiceUnavailableException('Delivery assignment service is unavailable.');
   }
 
   async vendorAccept(id: string, actorRole: string = Role.VENDOR, actorId?: string) {
-    return this.updateStatus(id, 'ACCEPTED', actorRole, 'Vendor accepted order', actorId);
+    const cleanId = id.trim().replace(/^#/, '');
+    const order = await this.prisma.order.findFirst({
+      where: { OR: [{ id }, { id: cleanId }, { orderNumber: cleanId }] },
+    });
+    if (!order) {
+      throw new NotFoundException(`Order '${id}' not found`);
+    }
+    await this.assertOrderAccess(order, actorId, actorRole);
+    const updated = await this.orderTransition.executeTransition({
+      orderId: order.id,
+      nextStatus: 'ACCEPTED',
+      actorRole,
+      actorId,
+      note: 'Order accepted; automatic delivery partner assignment triggered',
+      auditAction: 'VENDOR_ORDER_ACCEPTED',
+      triggerAutoAssignment: true,
+    });
+    return this.formatOrderResponse(updated, actorRole, actorId);
   }
 
   async vendorPrepare(id: string, actorRole: string = Role.VENDOR, actorId?: string) {
     return this.updateStatus(
       id,
-      'PREPARING',
+      'PACKING',
       actorRole,
-      'Vendor started packing items',
+      'Order is getting packed',
       actorId,
     );
   }
@@ -2077,7 +2140,7 @@ export class OrdersService {
       id,
       'READY_FOR_PICKUP',
       actorRole,
-      'Order packed and ready for manual admin dispatch',
+      'Order packed and ready for pickup',
       actorId,
     );
   }

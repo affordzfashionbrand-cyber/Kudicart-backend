@@ -38,10 +38,65 @@ export class DriverShiftsService {
     return new Date().toISOString().slice(0, 10);
   }
 
-  async getShifts() {
+  private getWeekBounds(weekIndex: number) {
+    const now = new Date();
+    const currentDay = now.getDay();
+    const diffToMonday = currentDay === 0 ? -6 : 1 - currentDay;
+
+    const monday = new Date(now);
+    monday.setHours(0, 0, 0, 0);
+    monday.setDate(now.getDate() + diffToMonday - weekIndex * 7);
+
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+    sunday.setHours(23, 59, 59, 999);
+
+    const formatShort = (d: Date) =>
+      `${String(d.getDate()).padStart(2, '0')} ${MONTH_SHORTS[d.getMonth()]}`;
+
+    return {
+      monday,
+      sunday,
+      mondayIso: monday.toISOString().slice(0, 10),
+      sundayIso: sunday.toISOString().slice(0, 10),
+      label:
+        weekIndex === 0
+          ? `This Week (${formatShort(monday)} – ${formatShort(sunday)})`
+          : weekIndex === 1
+            ? `Last Week (${formatShort(monday)} – ${formatShort(sunday)})`
+            : `${formatShort(monday)} – ${formatShort(sunday)}`,
+    };
+  }
+
+  private parseDurationHours(rangeOrDuration?: string | null): number {
+    if (!rangeOrDuration) return 0;
+    const hrMatch = rangeOrDuration.match(/(\d+(?:\.\d+)?)\s*(?:hr|hrs|hour|hours|h)\b/i);
+    if (hrMatch) return parseFloat(hrMatch[1]) || 0;
+
+    const times = rangeOrDuration.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/gi);
+    if (times && times.length >= 2) {
+      const toMinutes = (raw: string) => {
+        const m = raw.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+        if (!m) return 0;
+        let h = parseInt(m[1], 10);
+        const min = parseInt(m[2], 10);
+        const mer = (m[3] || '').toUpperCase();
+        if (mer === 'PM' && h < 12) h += 12;
+        if (mer === 'AM' && h === 12) h = 0;
+        return h * 60 + min;
+      };
+      let diff = toMinutes(times[1]) - toMinutes(times[0]);
+      if (diff <= 0) diff += 24 * 60;
+      return Math.round((diff / 60) * 10) / 10;
+    }
+    return 0;
+  }
+
+  async getShifts(driverId?: string) {
     this.ensureDbConnected();
 
     const shifts = await this.prisma.driverShift.findMany({
+      where: driverId ? { driverId } : undefined,
       orderBy: [{ displayOrder: 'asc' }, { dayOfWeek: 'asc' }],
     });
 
@@ -50,6 +105,7 @@ export class DriverShiftsService {
 
     const weekSchedule = shifts.map((shift) => ({
       id: shift.id,
+      driverId: shift.driverId ?? null,
       dayOfWeek: shift.dayOfWeek,
       day: shift.day,
       dateStr: shift.dateStr,
@@ -69,6 +125,174 @@ export class DriverShiftsService {
     return {
       todayShift,
       weekSchedule,
+    };
+  }
+
+  async getHistory(driverId: string, weekIndex = 0) {
+    this.ensureDbConnected();
+
+    const normalizedWeek = Math.max(0, Math.min(12, Math.floor(weekIndex || 0)));
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { OR: [{ id: driverId }, { userId: driverId }] },
+      select: { id: true, userId: true, workPreference: true },
+    });
+
+    const effectiveDriverId = driver?.id || driverId;
+    const workPreference =
+      (driver?.workPreference || 'FULL_TIME').toUpperCase() === 'PART_TIME'
+        ? 'PART_TIME'
+        : 'FULL_TIME';
+
+    const { monday, sunday, mondayIso, sundayIso, label } =
+      this.getWeekBounds(normalizedWeek);
+
+    const weekOptions = [0, 1, 2, 3].map((idx) => {
+      const b = this.getWeekBounds(idx);
+      return { weekIndex: idx, label: b.label };
+    });
+
+    const basePayout = Number(process.env.DRIVER_BASE_PAYOUT_RUPEES) || 55;
+    const orders = await this.prisma.order.findMany({
+      where: {
+        status: { in: ['DELIVERED', 'RETURNED'] },
+        AND: [
+          {
+            OR: [
+              { driverProfileId: effectiveDriverId },
+              ...(driver?.userId ? [{ driverId: driver.userId }] : []),
+            ],
+          },
+          {
+            OR: [
+              { deliveredAt: { gte: monday, lte: sunday } },
+              { AND: [{ deliveredAt: null }, { updatedAt: { gte: monday, lte: sunday } }] },
+            ],
+          },
+        ],
+      },
+      select: { id: true, deliveredAt: true, updatedAt: true },
+    });
+
+    const orderIds = orders.map((o) => o.id);
+    const ledgerEntries = orderIds.length
+      ? await this.prisma.ledgerEntry.findMany({
+          where: {
+            orderId: { in: orderIds },
+            entryType: 'DRIVER_PAYOUT',
+          },
+          select: { orderId: true, amount: true },
+        })
+      : [];
+
+    const payoutByOrder = new Map<string, number>();
+    for (const l of ledgerEntries) {
+      if (l.orderId) {
+        payoutByOrder.set(
+          l.orderId,
+          (payoutByOrder.get(l.orderId) || 0) + Math.max(0, Math.round(l.amount || 0)),
+        );
+      }
+    }
+
+    const totalEarnings = orders.reduce(
+      (sum, o) => sum + (payoutByOrder.get(o.id) ?? basePayout),
+      0,
+    );
+
+    if (workPreference === 'FULL_TIME') {
+      const shifts = await this.prisma.driverShift.findMany({
+        where: {
+          driverId: effectiveDriverId,
+          ...(normalizedWeek > 0
+            ? {
+                shiftDate: { gte: monday, lte: sunday },
+              }
+            : {}),
+        },
+        orderBy: [{ displayOrder: 'asc' }, { dayOfWeek: 'asc' }],
+      });
+
+      const items = shifts.map((s) => ({
+        id: s.id,
+        day: s.day,
+        dateLabel: s.dateStr,
+        timeRange: s.timeRange,
+        duration: s.duration,
+        hub: s.hub,
+        hubAddress: s.hubAddress,
+        status: s.status,
+        statusLabel: s.statusLabel,
+        attendance: s.attendance || (s.status === 'COMPLETED' ? 'Present' : s.statusLabel),
+        breakTime: s.breakTime || null,
+        hours: this.parseDurationHours(s.duration) || this.parseDurationHours(s.timeRange),
+      }));
+
+      const totalHours = Math.round(items.reduce((sum, i) => sum + i.hours, 0) * 10) / 10;
+      const presentCount = items.filter((i) =>
+        (i.attendance || '').toLowerCase().includes('present') ||
+        (i.status || '').toUpperCase() === 'COMPLETED',
+      ).length;
+
+      return {
+        mode: 'SHIFT_HISTORY',
+        workPreference,
+        weekIndex: normalizedWeek,
+        label,
+        totalShifts: items.length,
+        completedShifts: presentCount,
+        totalHours,
+        deliveries: orders.length,
+        totalEarnings,
+        items,
+        availableWeeks: weekOptions,
+      };
+    }
+
+    const bookings = await this.prisma.driverSlotBooking.findMany({
+      where: {
+        driverId: effectiveDriverId,
+        status: 'BOOKED',
+        slot: {
+          dateKey: { gte: mondayIso, lte: sundayIso },
+        },
+      },
+      include: { slot: true },
+      orderBy: [{ bookedAt: 'desc' }],
+    });
+
+    const items = bookings.map((b) => {
+      const d = new Date(`${b.slot.dateKey}T00:00:00`);
+      const valid = !Number.isNaN(d.getTime());
+      const hours = this.parseDurationHours(b.slot.timeRange);
+      return {
+        id: b.id,
+        slotId: b.slotId,
+        day: valid ? DAY_SHORTS[d.getDay()] : b.slot.dateKey,
+        dateLabel: valid ? `${d.getDate()} ${MONTH_SHORTS[d.getMonth()]}` : b.slot.dateKey,
+        dateKey: b.slot.dateKey,
+        timeRange: b.slot.timeRange,
+        duration: hours > 0 ? `${hours} hrs` : '',
+        demand: b.slot.demand,
+        bonusText: b.slot.bonusText || null,
+        status: b.status,
+        statusLabel: 'Booked',
+        hours,
+      };
+    });
+
+    const bookedHours = Math.round(items.reduce((sum, i) => sum + i.hours, 0) * 10) / 10;
+
+    return {
+      mode: 'SLOT_HISTORY',
+      workPreference,
+      weekIndex: normalizedWeek,
+      label,
+      completedSlots: items.length,
+      bookedHours,
+      deliveries: orders.length,
+      totalEarnings,
+      items,
+      availableWeeks: weekOptions,
     };
   }
 

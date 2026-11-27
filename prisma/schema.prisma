@@ -25,15 +25,33 @@ enum UserStatus {
 enum OrderStatus {
   PLACED
   ACCEPTED
+  PACKING
   PREPARING
   READY_FOR_PICKUP
   ASSIGNED
   PICKED_UP
   OUT_FOR_DELIVERY
+  TRY_AND_BUY
   DELIVERED
   RETURNING
   RETURNED
   CANCELLED
+  FAILED
+}
+
+enum OrderType {
+  STANDARD
+  TRY_AND_BUY
+}
+
+enum DeliveryAssignmentStatus {
+  NOT_ASSIGNED
+  ASSIGNMENT_PENDING
+  ASSIGNED
+  ACCEPTED_BY_DELIVERY_PARTNER
+  REJECTED_BY_DELIVERY_PARTNER
+  REASSIGNMENT_PENDING
+  COMPLETED
   FAILED
 }
 
@@ -371,36 +389,47 @@ model Order {
   addressId          String?
   address            Address?             @relation(fields: [addressId], references: [id], onDelete: SetNull)
   deliveryAddress    Json?
-  fulfillmentType    FulfillmentType      @default(DARK_STORE)
-  status             OrderStatus          @default(PLACED)
+  fulfillmentType    FulfillmentType          @default(DARK_STORE)
+  orderType          OrderType                @default(STANDARD)
+  status             OrderStatus              @default(PLACED)
+  deliveryAssignmentStatus DeliveryAssignmentStatus @default(NOT_ASSIGNED)
   paymentMethod      PaymentMethod
-  paymentStatus      PaymentStatus        @default(PENDING)
+  paymentStatus      PaymentStatus            @default(PENDING)
   razorpayOrderId    String?
   razorpayPaymentId  String?
   itemTotal          Float
-  deliveryFee        Float                @default(40.0)
+  deliveryFee        Float                    @default(40.0)
   taxes              Float
-  giftWrapFee        Float                @default(0)
-  donationAmount     Float                @default(0)
+  giftWrapFee        Float                    @default(0)
+  donationAmount     Float                    @default(0)
   grandTotal         Float
-  etaMinutes         Int                  @default(35)
-  isTryAndBuy        Boolean              @default(false)
+  etaMinutes         Int                      @default(35)
+  isTryAndBuy        Boolean                  @default(false)
   couponCode           String?
-  discountAmount       Float                @default(0)
+  discountAmount       Float                    @default(0)
   deliveryInstructions String?
-  needGstInvoice       Boolean              @default(false)
+  needGstInvoice       Boolean                  @default(false)
   customerGstin        String?
   gstBusinessName      String?
-  verificationPhotos   String[]             @default([])
+  verificationPhotos   String[]                 @default([])
   deliveryOtpHash      String?
-  arrivedAt          DateTime?
-  deliveredAt        DateTime?
-  cancelledAt        DateTime?
-  cancellationReason String?
-  rejectedByVendor   Boolean              @default(false)
-  expiresAt          DateTime?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
+  acceptedAt                DateTime?
+  packingStartedAt          DateTime?
+  readyForPickupAt          DateTime?
+  pickedUpAt                DateTime?
+  pickedUpByDriverId        String?
+  tryAndBuyStartedAt        DateTime?
+  arrivedAt                 DateTime?
+  deliveredAt               DateTime?
+  returnedAt                DateTime?
+  returnReason              String?
+  assignmentFailureReason   String?
+  cancelledAt               DateTime?
+  cancellationReason        String?
+  rejectedByVendor          Boolean                  @default(false)
+  expiresAt                 DateTime?
+  createdAt                 DateTime                 @default(now())
+  updatedAt                 DateTime                 @updatedAt
 
   items              OrderItem[]
   history            OrderStatusHistory[]
@@ -417,6 +446,8 @@ model Order {
   @@index([driverId])
   @@index([driverProfileId])
   @@index([status])
+  @@index([deliveryAssignmentStatus])
+  @@index([orderType])
   @@index([paymentStatus, expiresAt])
   @@index([createdAt])
 }
@@ -465,6 +496,7 @@ model SupportTicket {
   status            SupportTicketStatus @default(OPEN)
   assignee          String?
   resolutionRemarks String?
+  attachments       Json?
   resolvedAt        DateTime?
   createdAt         DateTime            @default(now())
   updatedAt         DateTime            @updatedAt
@@ -508,8 +540,10 @@ model DriverProfile {
   completedDeliveries Int              @default(0)
   isOnline            Boolean          @default(false)
   availableSince      DateTime?
-  kycStatus           String           @default("PENDING")
-  rejectionReason     String?
+  kycStatus              String           @default("PENDING")
+  approvalAcknowledgedAt DateTime?
+  assignedHubId          String?
+  rejectionReason        String?
   vehicleRegistration String?
   vehicleType         String?
   vehicleMake         String?
@@ -614,20 +648,31 @@ model TryAndBuySession {
 }
 
 model DispatchAssignment {
-  id              String         @id @default(uuid())
-  orderId         String         @unique
-  order           Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  driverProfileId String?
-  driverProfile   DriverProfile? @relation(fields: [driverProfileId], references: [id], onDelete: SetNull)
-  status          String         @default("PENDING") // PENDING, OFFERED, ACCEPTED, REJECTED, EXPIRED, CANCELLED
-  offeredAt       DateTime?
-  expiresAt       DateTime?
-  respondedAt     DateTime?
-  attempts        Int            @default(0)
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  id                 String                   @id @default(uuid())
+  orderId            String                   @unique
+  order              Order                    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  driverProfileId    String?
+  driverProfile      DriverProfile?           @relation(fields: [driverProfileId], references: [id], onDelete: SetNull)
+  status             String                   @default("PENDING") // Legacy compatibility mirror
+  assignmentStatus   DeliveryAssignmentStatus @default(NOT_ASSIGNED)
+  assignmentSource   String                   @default("AUTO") // AUTO | MANUAL
+  assignedByActorId  String?
+  assignedByRole     String?
+  offeredAt          DateTime?
+  expiresAt          DateTime?
+  respondedAt        DateTime?
+  acceptedAt         DateTime?
+  rejectedAt         DateTime?
+  rejectionReason    String?
+  failureReason      String?
+  completedAt        DateTime?
+  rejectedDriverIds  String[]                 @default([])
+  attempts           Int                      @default(0)
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
 
   @@index([status])
+  @@index([assignmentStatus])
   @@index([driverProfileId])
   @@index([createdAt])
 }
@@ -781,21 +826,25 @@ model Notification {
 }
 
 model DriverShift {
-  id           String   @id @default(uuid())
+  id           String    @id @default(uuid())
+  driverId     String?
+  shiftDate    DateTime?
   dayOfWeek    Int
   day          String
   dateStr      String
   timeRange    String
   duration     String
   hub          String
-  hubAddress   String   @default("")
-  status       String   @default("CONFIRMED")
+  hubAddress   String    @default("")
+  status       String    @default("CONFIRMED")
   statusLabel  String
   breakTime    String?
   attendance   String?
-  displayOrder Int      @default(0)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  displayOrder Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([driverId])
 }
 
 model DriverSurge {

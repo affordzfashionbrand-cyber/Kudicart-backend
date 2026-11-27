@@ -39,28 +39,47 @@ export class StateMachineService {
     return true;
   }
 
-  getMilestones(currentStatus: OrderStatus) {
+  getMilestones(
+    currentStatus: OrderStatus,
+    options?: { isTryAndBuy?: boolean },
+  ) {
+    const isTryAndBuy = Boolean(options?.isTryAndBuy || currentStatus === 'TRY_AND_BUY');
+
     const timeline = [
-      { id: 1, key: 'PLACED', title: 'Order Placed', description: 'Confirmed by customer', icon: 'shopping_bag' },
-      { id: 2, key: 'ACCEPTED', title: 'Vendor Accepted', description: 'Boutique accepted order', icon: 'storefront' },
-      { id: 3, key: 'PREPARING', title: 'Preparing', description: 'Quality check & packaging', icon: 'package_2' },
-      { id: 4, key: 'READY_FOR_PICKUP', title: 'Ready for Pickup', description: 'Packed at store counter', icon: 'inventory_2' },
-      { id: 5, key: 'ASSIGNED', title: 'Rider Assigned', description: 'Assigned to delivery partner', icon: 'person_pin_circle' },
-      { id: 6, key: 'PICKED_UP', title: 'Picked Up', description: 'Rider collected item from boutique', icon: 'moped' },
-      { id: 7, key: 'OUT_FOR_DELIVERY', title: 'Out for Delivery', description: 'Express delivery in progress', icon: 'local_shipping' },
-      { id: 8, key: 'DELIVERED', title: 'Delivered', description: 'Handed to customer', icon: 'verified' },
+      { id: 1, key: 'PLACED', title: 'Order Placed', description: 'Order confirmed and awaiting acceptance', icon: 'shopping_bag' },
+      { id: 2, key: 'PACKING', title: 'Order is getting packed', description: 'Accepted by store and items are being packed', icon: 'package_2' },
+      { id: 3, key: 'READY_FOR_PICKUP', title: 'Ready for Pickup', description: 'Packed and waiting for rider collection', icon: 'inventory_2' },
+      { id: 4, key: 'OUT_FOR_DELIVERY', title: 'Out for Delivery', description: 'Picked up by delivery partner', icon: 'local_shipping' },
     ];
+
+    if (isTryAndBuy) {
+      timeline.push({
+        id: 5,
+        key: 'TRY_AND_BUY',
+        title: 'Try & Buy',
+        description: '10-minute doorstep trial in progress',
+        icon: 'checkroom',
+      });
+    }
 
     if (currentStatus === 'RETURNING' || currentStatus === 'RETURNED') {
       timeline.push({
-        id: 9,
+        id: isTryAndBuy ? 6 : 5,
         key: currentStatus,
-        title: currentStatus === 'RETURNING' ? 'Returning to Hub' : 'Returned & Reconciled',
+        title: 'Order Return',
         description:
           currentStatus === 'RETURNING'
-            ? 'Rider returning Try & Buy items to dark store'
-            : 'Returned items inspected and reconciled',
+            ? 'Returning items to store hub'
+            : 'Order returned and reconciled',
         icon: 'assignment_return',
+      });
+    } else {
+      timeline.push({
+        id: isTryAndBuy ? 6 : 5,
+        key: 'DELIVERED',
+        title: 'Order Delivered',
+        description: 'Handed over to customer',
+        icon: 'verified',
       });
     }
 
@@ -72,22 +91,24 @@ export class StateMachineService {
       }));
     }
 
-    const orderMap: Record<OrderStatus, number> = {
+    const activeStepByStatus: Record<OrderStatus, number> = {
       CANCELLED: 0,
       FAILED: 0,
       PLACED: 1,
       ACCEPTED: 2,
-      PREPARING: 3,
-      READY_FOR_PICKUP: 4,
-      ASSIGNED: 5,
-      PICKED_UP: 6,
-      OUT_FOR_DELIVERY: 7,
-      DELIVERED: 8,
-      RETURNING: 9,
-      RETURNED: 9,
+      PACKING: 2,
+      PREPARING: 2,
+      READY_FOR_PICKUP: 3,
+      ASSIGNED: 3, // Legacy compatibility: assigned partner does NOT show Out for Delivery
+      PICKED_UP: 4,
+      OUT_FOR_DELIVERY: 4,
+      TRY_AND_BUY: 5,
+      DELIVERED: isTryAndBuy ? 6 : 5,
+      RETURNING: isTryAndBuy ? 6 : 5,
+      RETURNED: isTryAndBuy ? 6 : 5,
     };
 
-    const activeIndex = orderMap[currentStatus] || 1;
+    const activeIndex = activeStepByStatus[currentStatus] || 1;
 
     return timeline.map((item) => {
       if (currentStatus === 'DELIVERED' || currentStatus === 'RETURNED') {

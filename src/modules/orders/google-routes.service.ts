@@ -5,6 +5,17 @@ export interface LatLng {
   longitude: number;
 }
 
+export interface RouteManeuverStep {
+  maneuver: string;
+  instruction: string;
+  streetName: string;
+  distanceMeters: number;
+  durationSeconds: number;
+  startLocation: { latitude: number; longitude: number };
+  endLocation: { latitude: number; longitude: number };
+  coordinates: [number, number][];
+}
+
 export interface RouteResult {
   encodedPolyline: string;
   coordinates: [number, number][]; // [latitude, longitude][]
@@ -17,6 +28,7 @@ export interface RouteResult {
   isRealRoute: boolean; // true for verified Google Routes road geometry, false for straight-line reference
   isStraightLineReference?: boolean;
   routeUnavailable?: boolean;
+  steps?: RouteManeuverStep[];
   computedAt: string;
 }
 
@@ -157,6 +169,8 @@ export class GoogleRoutesService {
       computeAlternativeRoutes: false,
       polylineQuality: 'HIGH_QUALITY',
       polylineEncoding: 'ENCODED_POLYLINE',
+      languageCode: 'en-US',
+      units: 'METRIC',
     };
 
     const response = await fetch(url, {
@@ -165,10 +179,10 @@ export class GoogleRoutesService {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
         'X-Goog-FieldMask':
-          'routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline',
+          'routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs.steps.distanceMeters,routes.legs.steps.staticDuration,routes.legs.steps.navigationInstruction,routes.legs.steps.startLocation,routes.legs.steps.endLocation,routes.legs.steps.polyline.encodedPolyline',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(10000),
     });
 
     if (!response.ok) {
@@ -190,6 +204,46 @@ export class GoogleRoutesService {
       ? parseInt(route.duration.replace('s', ''), 10)
       : Math.round(distanceMeters / 6.94); // default ~25km/h city speed in seconds
 
+    const rawSteps = Array.isArray(route.legs?.[0]?.steps) ? route.legs[0].steps : [];
+    const steps: RouteManeuverStep[] = rawSteps.map((s: any) => {
+      const instruction = String(
+        s?.navigationInstruction?.instructions || 'Continue straight',
+      ).trim();
+      const maneuver = String(
+        s?.navigationInstruction?.maneuver || 'STRAIGHT',
+      ).trim();
+      const streetMatch = instruction.match(
+        /\b(?:onto|on|along|toward|towards)\s+([^,\n]+)/i,
+      );
+      const streetName = streetMatch?.[1]?.trim() || instruction;
+      const stepPolyline = s?.polyline?.encodedPolyline
+        ? this.decodePolyline(s.polyline.encodedPolyline)
+        : [];
+      const startLat = s?.startLocation?.latLng?.latitude ?? origin.latitude;
+      const startLng = s?.startLocation?.latLng?.longitude ?? origin.longitude;
+      const endLat = s?.endLocation?.latLng?.latitude ?? destination.latitude;
+      const endLng = s?.endLocation?.latLng?.longitude ?? destination.longitude;
+
+      return {
+        maneuver,
+        instruction,
+        streetName,
+        distanceMeters: Number(s?.distanceMeters) || 0,
+        durationSeconds: s?.staticDuration
+          ? parseInt(String(s.staticDuration).replace('s', ''), 10) || 0
+          : 0,
+        startLocation: { latitude: startLat, longitude: startLng },
+        endLocation: { latitude: endLat, longitude: endLng },
+        coordinates:
+          stepPolyline.length >= 2
+            ? stepPolyline
+            : [
+                [startLat, startLng],
+                [endLat, endLng],
+              ],
+      };
+    });
+
     return {
       encodedPolyline,
       coordinates,
@@ -200,6 +254,7 @@ export class GoogleRoutesService {
       travelMode,
       isRealRoute: true,
       isStraightLineReference: false,
+      steps,
       computedAt: new Date().toISOString(),
     };
   }

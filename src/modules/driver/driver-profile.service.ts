@@ -6,6 +6,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { DeliveryAssignmentService } from '../orders/delivery-assignment.service';
 import { TrackingRealtimeGateway } from '../orders/tracking-realtime.gateway';
 import { LIVE_TRACKING_ACTIVE_STATUSES, OrderStatus } from '../../common/contracts/order-contracts';
 import { UpdateDriverProfileDto } from './dto/update-driver-profile.dto';
@@ -13,11 +14,76 @@ import { UpdateVehicleDto } from './dto/update-vehicle.dto';
 import { DocumentUploadDto } from './dto/document-upload.dto';
 import { UpdateLocationDto } from './dto/update-location.dto';
 
+const DEFAULT_HUB_LOGIN_RADIUS_METERS =
+  Number(process.env.DRIVER_HUB_LOGIN_RADIUS_METERS) || 50;
+const MAX_GPS_ACCURACY_METERS = Number(process.env.DRIVER_MAX_GPS_ACCURACY_METERS) || 150;
+
 function maskAadhaar(aadhaar?: string | null): string | null {
   if (!aadhaar) return null;
   const digits = aadhaar.replace(/\D/g, '');
   if (digits.length < 4) return 'XXXX-XXXX-XXXX';
   return `XXXX-XXXX-${digits.slice(-4)}`;
+}
+
+export function haversineDistanceMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const earthRadiusM = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusM * c;
+}
+
+function compareSemver(a: string, b: string): number {
+  const pa = String(a || '0.0.0')
+    .replace(/^v/i, '')
+    .split('.')
+    .map((n) => parseInt(n.replace(/[^0-9]/g, ''), 10) || 0);
+  const pb = String(b || '0.0.0')
+    .replace(/^v/i, '')
+    .split('.')
+    .map((n) => parseInt(n.replace(/[^0-9]/g, ''), 10) || 0);
+  const maxLen = Math.max(pa.length, pb.length, 3);
+  for (let i = 0; i < maxLen; i++) {
+    const va = pa[i] || 0;
+    const vb = pb[i] || 0;
+    if (va > vb) return 1;
+    if (va < vb) return -1;
+  }
+  return 0;
+}
+
+function isDisallowedPrivateHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase();
+  if (
+    lower === 'localhost' ||
+    lower === '127.0.0.1' ||
+    lower === '::1' ||
+    lower === '0.0.0.0' ||
+    lower.endsWith('.local') ||
+    lower.startsWith('169.254.') ||
+    lower.startsWith('10.') ||
+    lower.startsWith('192.168.')
+  ) {
+    return true;
+  }
+  const match172 = lower.match(/^172\.(\d+)\./);
+  if (match172) {
+    const second = Number(match172[1]);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return false;
 }
 
 @Injectable()
@@ -27,6 +93,7 @@ export class DriverProfileService {
   constructor(
     private readonly prisma: PrismaService,
     @Optional() private readonly trackingGateway?: TrackingRealtimeGateway,
+    @Optional() private readonly deliveryAssignment?: DeliveryAssignmentService,
   ) {}
 
   private ensureDbConnected() {
@@ -81,15 +148,25 @@ export class DriverProfileService {
     return grouped;
   }
 
+  private async resolveActiveHub(assignedHubId?: string | null) {
+    if (assignedHubId) {
+      const assigned = await this.prisma.darkStoreHub.findFirst({
+        where: { id: assignedHubId, isActive: true },
+      });
+      if (assigned) return assigned;
+    }
+    return this.prisma.darkStoreHub.findFirst({
+      where: { isActive: true },
+      orderBy: { deliveryMinutes: 'asc' },
+    });
+  }
+
   async getProfile(driverId?: string) {
     const driver = await this.resolveDriver(driverId);
     const docs = this.groupDocuments(driver.documents, driver.selfieUrl);
 
-    const [activeHub, codOrders] = await Promise.all([
-      this.prisma.darkStoreHub.findFirst({
-        where: { isActive: true },
-        orderBy: { deliveryMinutes: 'asc' },
-      }),
+    const [activeHub, codOrders, supportSetting] = await Promise.all([
+      this.resolveActiveHub((driver as any).assignedHubId),
       this.prisma.order.findMany({
         where: {
           OR: [{ driverProfileId: driver.id }, { driverId: driver.userId }],
@@ -99,11 +176,26 @@ export class DriverProfileService {
         },
         select: { grandTotal: true },
       }),
+      this.prisma.workspaceSetting.findUnique({
+        where: { key: 'driverSupportConfig' },
+      }),
     ]);
 
     const cashInHandCod = Math.round(
       codOrders.reduce((sum, o) => sum + (Number(o.grandTotal) || 0), 0),
     );
+    const supportValue =
+      supportSetting?.value && typeof supportSetting.value === 'object'
+        ? (supportSetting.value as Record<string, any>)
+        : {};
+    const supportPhone =
+      (typeof supportValue.phone === 'string' && supportValue.phone.trim()) ||
+      process.env.DRIVER_SUPPORT_PHONE?.trim() ||
+      null;
+    const supportEmail =
+      (typeof supportValue.email === 'string' && supportValue.email.trim()) ||
+      process.env.DRIVER_SUPPORT_EMAIL?.trim() ||
+      null;
 
     return {
       id: driver.id,
@@ -118,14 +210,26 @@ export class DriverProfileService {
       completedDeliveries: driver.completedDeliveries,
       isOnline: driver.isOnline,
       availableSince: driver.availableSince ? driver.availableSince.toISOString() : null,
+      createdAt: driver.createdAt.toISOString(),
+      hasSeenApproval: Boolean((driver as any).approvalAcknowledgedAt),
+      approvalAcknowledgedAt: (driver as any).approvalAcknowledgedAt
+        ? new Date((driver as any).approvalAcknowledgedAt).toISOString()
+        : null,
       assignedHub: activeHub
         ? {
             id: activeHub.id,
             name: activeHub.name,
             locality: activeHub.locality,
             address: activeHub.address,
+            lat: activeHub.lat,
+            lng: activeHub.lng,
+            deliveryMinutes: activeHub.deliveryMinutes,
           }
         : null,
+      supportConfig: {
+        phone: supportPhone,
+        email: supportEmail,
+      },
       cashInHandCod,
       floatingCashLimit: Number(process.env.DRIVER_COD_CASH_LIMIT) || 2500,
       kycStatus: driver.kycStatus,
@@ -334,7 +438,178 @@ export class DriverProfileService {
     };
   }
 
-  async updateAvailability(driverId: string | undefined, isOnline: boolean) {
+  async acknowledgeApproval(driverId: string | undefined) {
+    const driver = await this.resolveDriver(driverId);
+    if (driver.kycStatus !== 'APPROVED') {
+      throw new BadRequestException('Approval acknowledgment is only valid for approved accounts.');
+    }
+
+    const acknowledgedAt = (driver as any).approvalAcknowledgedAt
+      ? new Date((driver as any).approvalAcknowledgedAt)
+      : new Date();
+
+    if (!(driver as any).approvalAcknowledgedAt) {
+      await this.prisma.driverProfile.update({
+        where: { id: driver.id },
+        data: { approvalAcknowledgedAt: acknowledgedAt },
+      });
+    }
+
+    return {
+      success: true,
+      driverId: driver.id,
+      hasSeenApproval: true,
+      approvalAcknowledgedAt: acknowledgedAt.toISOString(),
+    };
+  }
+
+  async getAppVersionStatus(currentVersion?: string) {
+    this.ensureDbConnected();
+    const setting = await this.prisma.workspaceSetting.findUnique({
+      where: { key: 'driverAppRelease' },
+    });
+    const config =
+      setting?.value && typeof setting.value === 'object'
+        ? (setting.value as Record<string, any>)
+        : {};
+
+    const normalizedCurrent = (currentVersion || '').trim() || null;
+    const latestVersion =
+      (typeof config.latestVersion === 'string' && config.latestVersion.trim()) ||
+      process.env.DRIVER_APP_LATEST_VERSION?.trim() ||
+      null;
+    const minSupportedVersion =
+      (typeof config.minSupportedVersion === 'string' && config.minSupportedVersion.trim()) ||
+      process.env.DRIVER_APP_MIN_VERSION?.trim() ||
+      null;
+    const updateUrl =
+      (typeof config.updateUrl === 'string' && config.updateUrl.trim()) ||
+      process.env.DRIVER_APP_UPDATE_URL?.trim() ||
+      null;
+    const releaseNotes =
+      (typeof config.releaseNotes === 'string' && config.releaseNotes.trim()) ||
+      process.env.DRIVER_APP_RELEASE_NOTES?.trim() ||
+      null;
+
+    const updateAvailable =
+      Boolean(latestVersion && normalizedCurrent) &&
+      compareSemver(latestVersion!, normalizedCurrent!) > 0;
+    const forceUpdate =
+      Boolean(config.forceUpdate) ||
+      process.env.DRIVER_APP_FORCE_UPDATE === 'true' ||
+      (Boolean(minSupportedVersion && normalizedCurrent) &&
+        compareSemver(minSupportedVersion!, normalizedCurrent!) > 0);
+
+    return {
+      currentVersion: normalizedCurrent,
+      latestVersion: latestVersion || normalizedCurrent,
+      minSupportedVersion,
+      updateAvailable,
+      forceUpdate: updateAvailable ? forceUpdate : false,
+      updateUrl,
+      releaseNotes,
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  async getDocumentFile(driverId: string | undefined, docType: string, side = 'front') {
+    const driver = await this.resolveDriver(driverId);
+    const normalizedType = docType.trim();
+    const normalizedSide = (side || 'front').trim().toLowerCase();
+
+    let rawUrl: string | null = null;
+    let fileName = `${normalizedType}_${normalizedSide}`;
+    let mimeType = 'application/octet-stream';
+
+    if (normalizedType === 'selfie') {
+      rawUrl = driver.selfieUrl || null;
+      fileName = 'selfie.jpg';
+      mimeType = 'image/jpeg';
+    } else {
+      const doc = (driver.documents || []).find(
+        (d: any) =>
+          d.type.toLowerCase() === normalizedType.toLowerCase() &&
+          (d.side || 'front').toLowerCase() === normalizedSide,
+      );
+      if (doc) {
+        rawUrl = doc.fileUrl;
+        fileName = doc.fileName || fileName;
+        mimeType = doc.mimeType || mimeType;
+      }
+    }
+
+    if (!rawUrl) {
+      throw new NotFoundException(`No uploaded file found for ${normalizedType} (${normalizedSide}).`);
+    }
+
+    if (rawUrl.startsWith('data:')) {
+      const match = rawUrl.match(/^data:([^;,]+);base64,(.+)$/i);
+      if (!match) {
+        throw new BadRequestException('Stored document data URI is invalid.');
+      }
+      return {
+        buffer: Buffer.from(match[2], 'base64'),
+        mimeType: match[1] || mimeType,
+        fileName,
+      };
+    }
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(rawUrl);
+    } catch {
+      throw new BadRequestException(
+        'Document file was saved only as a local device path and must be re-uploaded to view or download.',
+      );
+    }
+
+    if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') {
+      throw new BadRequestException(
+        'Document file is not hosted on cloud storage and must be re-uploaded.',
+      );
+    }
+
+    const supabaseHost = (() => {
+      try {
+        return process.env.SUPABASE_URL ? new URL(process.env.SUPABASE_URL).hostname : null;
+      } catch {
+        return null;
+      }
+    })();
+
+    if (
+      isDisallowedPrivateHost(parsedUrl.hostname) &&
+      (!supabaseHost || parsedUrl.hostname !== supabaseHost)
+    ) {
+      throw new BadRequestException('Blocked unsafe document URL.');
+    }
+
+    const response = await fetch(parsedUrl.toString());
+    if (!response.ok) {
+      throw new NotFoundException(
+        `Unable to retrieve stored document file (upstream status ${response.status}).`,
+      );
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const headerType = response.headers.get('content-type');
+    return {
+      buffer: Buffer.from(arrayBuffer),
+      mimeType: headerType || mimeType,
+      fileName,
+    };
+  }
+
+  async updateAvailability(
+    driverId: string | undefined,
+    isOnline: boolean,
+    options?: {
+      latitude?: number;
+      longitude?: number;
+      accuracy?: number;
+      enforceHubProximity?: boolean;
+    },
+  ) {
     const driver = await this.resolveDriver(driverId);
 
     if (isOnline && driver.kycStatus !== 'APPROVED') {
@@ -343,20 +618,88 @@ export class DriverProfileService {
       );
     }
 
+    let hubDistanceMeters: number | null = null;
+    let hubName: string | null = null;
+    const hasCoords =
+      options?.latitude !== undefined || options?.longitude !== undefined;
+
+    if (isOnline && (options?.enforceHubProximity || hasCoords)) {
+      if (
+        typeof options?.latitude !== 'number' ||
+        typeof options?.longitude !== 'number' ||
+        !Number.isFinite(options.latitude) ||
+        !Number.isFinite(options.longitude)
+      ) {
+        throw new BadRequestException(
+          'Live GPS coordinates are required to go online. Enable location access and try again.',
+        );
+      }
+
+      if (
+        typeof options.accuracy === 'number' &&
+        Number.isFinite(options.accuracy) &&
+        options.accuracy > MAX_GPS_ACCURACY_METERS
+      ) {
+        throw new BadRequestException(
+          `GPS accuracy is too weak (${Math.round(options.accuracy)}m). Move to an open area near your hub and retry.`,
+        );
+      }
+
+      const activeHub = await this.resolveActiveHub((driver as any).assignedHubId);
+      if (
+        !activeHub ||
+        typeof activeHub.lat !== 'number' ||
+        typeof activeHub.lng !== 'number'
+      ) {
+        throw new BadRequestException(
+          'Assigned hub coordinates are unavailable. Please contact Operations Support.',
+        );
+      }
+
+      hubDistanceMeters = haversineDistanceMeters(
+        options.latitude,
+        options.longitude,
+        activeHub.lat,
+        activeHub.lng,
+      );
+      hubName = activeHub.name;
+
+      if (hubDistanceMeters > DEFAULT_HUB_LOGIN_RADIUS_METERS) {
+        throw new BadRequestException(
+          `You are ${Math.round(hubDistanceMeters)}m away from ${activeHub.name}. Move within ${DEFAULT_HUB_LOGIN_RADIUS_METERS}m of your assigned hub to go online.`,
+        );
+      }
+    }
+
     const now = isOnline ? new Date() : null;
     const updated = await this.prisma.driverProfile.update({
       where: { id: driver.id },
       data: {
         isOnline,
         availableSince: now,
+        ...(isOnline &&
+        typeof options?.latitude === 'number' &&
+        typeof options?.longitude === 'number'
+          ? {
+              currentLat: options.latitude,
+              currentLng: options.longitude,
+            }
+          : {}),
       },
     });
+
+    if (isOnline && updated.kycStatus === 'APPROVED') {
+      this.deliveryAssignment?.retryPendingAssignments().catch(() => 0);
+    }
 
     return {
       success: true,
       driverId: updated.id,
       isOnline: updated.isOnline,
       availableSince: updated.availableSince ? updated.availableSince.toISOString() : null,
+      hubDistanceMeters:
+        hubDistanceMeters !== null ? Math.round(hubDistanceMeters) : null,
+      hubName,
       message: `Driver status set to ${isOnline ? 'Online (Ready for assignments)' : 'Offline'}`,
     };
   }

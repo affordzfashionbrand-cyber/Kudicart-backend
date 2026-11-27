@@ -35,4 +35,9 @@ export class DriverEarningsController {
   async getSurges() {
     return this.earningsService.getSurges();
   }
+
+  @Get('rate-card')
+  async getRateCard() {
+    return this.earningsService.getRateCard();
+  }
 }

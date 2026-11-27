@@ -10,8 +10,10 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
 import { DriverOrdersService } from './driver-orders.service';
+import { GoogleRoutesService } from '../orders/google-routes.service';
 import { OrderPickupDto, OrderDeliverDto } from './dto/order-action.dto';
 import {
   TryAndBuyHandoverDto,
@@ -37,7 +39,52 @@ export class DriverOrdersController {
   constructor(
     private readonly ordersService: DriverOrdersService,
     @Optional() private readonly prisma?: PrismaService,
+    @Optional() private readonly googleRoutesService?: GoogleRoutesService,
   ) {}
+
+  @Get('route')
+  async computeRoute(
+    @Query('originLat') originLatRaw?: string,
+    @Query('originLng') originLngRaw?: string,
+    @Query('destLat') destLatRaw?: string,
+    @Query('destLng') destLngRaw?: string,
+  ) {
+    const originLat = Number(originLatRaw);
+    const originLng = Number(originLngRaw);
+    const destLat = Number(destLatRaw);
+    const destLng = Number(destLngRaw);
+
+    if (
+      ![originLat, originLng, destLat, destLng].every((v) => Number.isFinite(v))
+    ) {
+      throw new BadRequestException(
+        'Valid numeric originLat, originLng, destLat, and destLng query parameters are required.',
+      );
+    }
+
+    if (!this.googleRoutesService) {
+      return {
+        coordinates: [
+          [originLat, originLng],
+          [destLat, destLng],
+        ],
+        encodedPolyline: '',
+        distanceMeters: 0,
+        distanceKm: '0.00',
+        durationSeconds: 0,
+        durationMinutes: 0,
+        travelMode: 'TWO_WHEELER',
+        isRealRoute: false,
+        routeUnavailable: true,
+        computedAt: new Date().toISOString(),
+      };
+    }
+
+    return this.googleRoutesService.computeRoute(
+      { latitude: originLat, longitude: originLng },
+      { latitude: destLat, longitude: destLng },
+    );
+  }
 
   private withIdempotency<T>(
     user: AuthenticatedUser,
@@ -92,6 +139,20 @@ export class DriverOrdersController {
   ) {
     return this.withIdempotency(user, `driver:accept:${id}`, idempotencyKey, { id }, () =>
       this.ordersService.acceptOrder(user.driverId || user.id, id),
+    );
+  }
+
+  @Post('orders/:id/reject')
+  @HttpCode(HttpStatus.OK)
+  @RateLimit({ points: 15, duration: 60 })
+  async rejectOrder(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body?: { reason?: string },
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    return this.withIdempotency(user, `driver:reject:${id}`, idempotencyKey, { id, body }, () =>
+      this.ordersService.rejectOrder(user.driverId || user.id, id, body?.reason),
     );
   }
 

@@ -138,6 +138,18 @@ export class VendorController {
     );
   }
 
+  @Post('orders/:id/reconcile-return')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async reconcileReturn(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() body?: { note?: string },
+  ) {
+    return this.vendorService.reconcileReturn(user.id, user.role, id, body?.note);
+  }
+
   // --- Store Availability & Timings ---
 
   @Get('store/status')

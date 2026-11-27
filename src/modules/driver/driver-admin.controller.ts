@@ -130,6 +130,9 @@ export class DriverAdminController {
           kycStatus: dto.status,
           rejectionReason:
             dto.status === 'REJECTED' ? dto.rejectionReason!.trim() : null,
+          ...(dto.status === 'APPROVED' || dto.status === 'REJECTED'
+            ? { approvalAcknowledgedAt: null }
+            : {}),
         },
       });
 

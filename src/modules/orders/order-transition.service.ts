@@ -1,5 +1,6 @@
 import {
   Injectable,
+  BadRequestException,
   NotFoundException,
   ConflictException,
   ServiceUnavailableException,
@@ -8,11 +9,18 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { StateMachineService } from './state-machine.service';
+import {
+  AutoAssignResult,
+  DeliveryAssignmentService,
+} from './delivery-assignment.service';
 import { TrackingRealtimeGateway } from './tracking-realtime.gateway';
 import { OutboxService } from '../queue/outbox.service';
 import { QueueJobType } from '../queue/queue.constants';
 import { Role } from '../../common/enums/role.enum';
-import { OrderStatus } from '../../common/contracts/order-contracts';
+import {
+  OrderStatus,
+  getCustomerOrderStatusLabel,
+} from '../../common/contracts/order-contracts';
 import {
   computeCommissionBreakdown,
   DEFAULT_COMMISSION_RATE,
@@ -37,6 +45,7 @@ export interface TransitionOrderInput {
   extraOrderUpdate?: Record<string, any>;
   netKeptSubtotalForLedger?: number;
   extraOutboxEvents?: OutboxDispatchInput[];
+  triggerAutoAssignment?: boolean;
 }
 
 @Injectable()
@@ -48,6 +57,7 @@ export class OrderTransitionService {
     private readonly stateMachine: StateMachineService,
     @Optional() private readonly trackingGateway?: TrackingRealtimeGateway,
     @Optional() private readonly outboxService?: OutboxService,
+    @Optional() private readonly deliveryAssignment?: DeliveryAssignmentService,
   ) {}
 
   async executeTransition(input: TransitionOrderInput) {
@@ -62,10 +72,12 @@ export class OrderTransitionService {
       const existing = await tx.order.findFirst({
         where: { OR: [{ id: input.orderId }, { id: cleanLookup }, { orderNumber: cleanLookup }] },
         include: {
-          items: true,
-          vendor: true,
+          items: { include: { product: { include: { darkStoreHub: true } } } },
+          vendor: { include: { user: true } },
           driver: true,
+          driverProfile: true,
           tryAndBuySession: true,
+          dispatchAssignment: true,
         },
       });
 
@@ -78,6 +90,34 @@ export class OrderTransitionService {
         input.nextStatus,
         input.actorRole,
       );
+
+      // Strict isolation between Standard and Try & Buy order lifecycles
+      if (input.nextStatus === 'TRY_AND_BUY' && !existing.isTryAndBuy) {
+        throw new BadRequestException(
+          `Standard Order #${existing.orderNumber} cannot enter TRY_AND_BUY status.`,
+        );
+      }
+      if (
+        existing.isTryAndBuy &&
+        existing.status === 'OUT_FOR_DELIVERY' &&
+        input.nextStatus === 'DELIVERED'
+      ) {
+        throw new BadRequestException(
+          `Try & Buy Order #${existing.orderNumber} cannot be marked DELIVERED directly before customer Try & Buy verification.`,
+        );
+      }
+      if (
+        existing.isTryAndBuy &&
+        input.nextStatus === 'DELIVERED' &&
+        !existing.tryAndBuySession?.customerSelectionAt &&
+        !(existing.items || []).some(
+          (i: any) => i.tryAndBuyDecision === 'KEEP' || i.tryAndBuyDecision === 'RETURN',
+        )
+      ) {
+        throw new BadRequestException(
+          `Try & Buy Order #${existing.orderNumber} requires an explicit customer Keep/Return decision before marking DELIVERED.`,
+        );
+      }
 
       if (
         input.expectedVersion !== undefined &&
@@ -95,14 +135,47 @@ export class OrderTransitionService {
         ...(input.extraOrderUpdate || {}),
       };
 
+      if (input.nextStatus === 'ACCEPTED') {
+        updateData.acceptedAt = existing.acceptedAt || now;
+      }
+
+      if (input.nextStatus === 'PACKING' || input.nextStatus === 'PREPARING') {
+        updateData.packingStartedAt = existing.packingStartedAt || now;
+      }
+
+      if (input.nextStatus === 'READY_FOR_PICKUP') {
+        updateData.readyForPickupAt = existing.readyForPickupAt || now;
+      }
+
+      if (input.nextStatus === 'OUT_FOR_DELIVERY') {
+        updateData.pickedUpAt = existing.pickedUpAt || now;
+        if (existing.driverProfileId && !updateData.deliveryAssignmentStatus) {
+          updateData.deliveryAssignmentStatus = 'ACCEPTED_BY_DELIVERY_PARTNER';
+        }
+      }
+
+      if (input.nextStatus === 'TRY_AND_BUY') {
+        updateData.arrivedAt = existing.arrivedAt || now;
+        updateData.tryAndBuyStartedAt = existing.tryAndBuyStartedAt || now;
+        updateData.etaMinutes = 0;
+      }
+
       if (input.nextStatus === 'DELIVERED') {
         updateData.deliveredAt = now;
         updateData.etaMinutes = 0;
+        updateData.deliveryAssignmentStatus = 'COMPLETED';
+      }
+
+      if (input.nextStatus === 'RETURNED') {
+        updateData.returnedAt = now;
+        updateData.etaMinutes = 0;
+        updateData.deliveryAssignmentStatus = 'COMPLETED';
       }
 
       if (input.nextStatus === 'CANCELLED') {
         updateData.cancelledAt = now;
         updateData.etaMinutes = 0;
+        updateData.deliveryAssignmentStatus = existing.driverProfileId ? 'FAILED' : 'NOT_ASSIGNED';
         if (!updateData.cancellationReason && input.note) {
           updateData.cancellationReason = input.note;
         }
@@ -113,6 +186,7 @@ export class OrderTransitionService {
 
       if (input.nextStatus === 'FAILED') {
         updateData.etaMinutes = 0;
+        updateData.deliveryAssignmentStatus = existing.driverProfileId ? 'FAILED' : 'NOT_ASSIGNED';
         if (existing.paymentStatus === 'PENDING') {
           updateData.paymentStatus = 'FAILED';
         }
@@ -130,6 +204,69 @@ export class OrderTransitionService {
       if (casUpdate.count === 0) {
         throw new ConflictException(
           `Concurrent state modification detected on Order #${existing.orderNumber}. Please retry.`,
+        );
+      }
+
+      // Sync DispatchAssignment terminal/active state cleanly inside same transaction
+      if (input.nextStatus === 'DELIVERED' || input.nextStatus === 'RETURNED') {
+        await tx.dispatchAssignment.updateMany({
+          where: { orderId: existing.id },
+          data: {
+            status: 'COMPLETED',
+            assignmentStatus: 'COMPLETED',
+            completedAt: now,
+          },
+        });
+      } else if (input.nextStatus === 'CANCELLED' || input.nextStatus === 'FAILED') {
+        await tx.dispatchAssignment.updateMany({
+          where: { orderId: existing.id },
+          data: {
+            status: 'CANCELLED',
+            assignmentStatus: 'FAILED',
+            failureReason: updateData.cancellationReason || input.note || `Order ${input.nextStatus}`,
+          },
+        });
+      } else if (
+        input.nextStatus === 'OUT_FOR_DELIVERY' &&
+        existing.driverProfileId
+      ) {
+        await tx.dispatchAssignment.upsert({
+          where: { orderId: existing.id },
+          update: {
+            status: 'ACCEPTED',
+            assignmentStatus: 'ACCEPTED_BY_DELIVERY_PARTNER',
+            acceptedAt: existing.dispatchAssignment?.acceptedAt || now,
+            respondedAt: existing.dispatchAssignment?.respondedAt || now,
+          },
+          create: {
+            orderId: existing.id,
+            driverProfileId: existing.driverProfileId,
+            status: 'ACCEPTED',
+            assignmentStatus: 'ACCEPTED_BY_DELIVERY_PARTNER',
+            assignmentSource: 'MANUAL',
+            offeredAt: now,
+            respondedAt: now,
+            acceptedAt: now,
+            attempts: 1,
+          },
+        });
+      }
+
+      // Trigger automatic delivery partner assignment when accepting an order inside the same atomic transaction
+      let autoAssignResult: AutoAssignResult | null = null;
+      if (input.triggerAutoAssignment && this.deliveryAssignment) {
+        autoAssignResult = await this.deliveryAssignment.assignOrderInTransaction(
+          tx,
+          {
+            ...existing,
+            status: input.nextStatus,
+            version: existing.version + 1,
+          },
+          {
+            actorId: input.actorId,
+            actorRole: String(input.actorRole || 'SYSTEM'),
+            actorName: input.actorName,
+          },
         );
       }
 
@@ -336,33 +473,77 @@ export class OrderTransitionService {
         });
       }
 
-      return tx.order.findUnique({
-        where: { id: existing.id },
-        include: {
-          items: true,
-          history: { orderBy: { createdAt: 'asc' } },
-          address: true,
-          vendor: true,
-          driver: true,
-          tryAndBuySession: true,
-        },
-      });
+      return {
+        autoAssignResult,
+        order: await tx.order.findUnique({
+          where: { id: existing.id },
+          include: {
+            items: true,
+            history: { orderBy: { createdAt: 'asc' } },
+            address: true,
+            vendor: true,
+            driver: true,
+            driverProfile: true,
+            tryAndBuySession: true,
+            dispatchAssignment: true,
+          },
+        }),
+      };
     });
 
-    if (txResult) {
-      this.trackingGateway?.broadcastStatusUpdate(txResult.id, input.nextStatus, {
-        orderNumber: txResult.orderNumber,
-        version: txResult.version,
-        arrivedAt: txResult.arrivedAt?.toISOString?.() || null,
-        deliveredAt: txResult.deliveredAt?.toISOString?.() || null,
+    if (txResult?.order) {
+      const ord = txResult.order;
+      const semanticEventType =
+        input.nextStatus === 'ACCEPTED'
+          ? 'ORDER_ACCEPTED'
+          : input.nextStatus === 'READY_FOR_PICKUP'
+            ? 'ORDER_READY_FOR_PICKUP'
+            : input.nextStatus === 'OUT_FOR_DELIVERY'
+              ? 'ORDER_OUT_FOR_DELIVERY'
+              : input.nextStatus === 'TRY_AND_BUY'
+                ? 'TRY_AND_BUY_STARTED'
+                : input.nextStatus === 'DELIVERED'
+                  ? 'ORDER_DELIVERED'
+                  : input.nextStatus === 'RETURNED'
+                    ? 'ORDER_RETURNED'
+                    : 'ORDER_STATUS_UPDATE';
+
+      this.trackingGateway?.broadcastStatusUpdate(ord.id, input.nextStatus, {
+        eventType: semanticEventType,
+        orderNumber: ord.orderNumber,
+        orderType: ord.orderType,
+        deliveryAssignmentStatus: ord.deliveryAssignmentStatus,
+        vendorId: ord.vendorId ?? null,
+        driverId: ord.driverId ?? null,
+        driverProfileId: ord.driverProfileId ?? null,
+        version: ord.version,
+        pickedUpAt: ord.pickedUpAt?.toISOString?.() || null,
+        tryAndBuyStartedAt: ord.tryAndBuyStartedAt?.toISOString?.() || null,
+        arrivedAt: ord.arrivedAt?.toISOString?.() || null,
+        deliveredAt: ord.deliveredAt?.toISOString?.() || null,
+        returnedAt: ord.returnedAt?.toISOString?.() || null,
       });
+
+      if (txResult.autoAssignResult) {
+        this.trackingGateway?.broadcastStatusUpdate(ord.id, ord.status, {
+          eventType: txResult.autoAssignResult.assigned
+            ? 'DELIVERY_ASSIGNMENT_CREATED'
+            : 'DELIVERY_ASSIGNMENT_FAILED',
+          orderNumber: ord.orderNumber,
+          orderType: ord.orderType,
+          deliveryAssignmentStatus: ord.deliveryAssignmentStatus,
+          vendorId: ord.vendorId ?? null,
+          driverId: ord.driverId ?? null,
+          driverProfileId: ord.driverProfileId ?? null,
+        });
+      }
 
       this.outboxService?.dispatchPendingEvents().catch((err) => {
         this.logger.warn(`Post-transition outbox dispatch deferred: ${err?.message}`);
       });
     }
 
-    return txResult;
+    return txResult.order;
   }
 
   private buildDefaultOutboxEvents(
@@ -385,15 +566,32 @@ export class OrderTransitionService {
     const customerEventType =
       nextStatus === 'DELIVERED'
         ? QueueJobType.CUSTOMER_ORDER_DELIVERED
-        : QueueJobType.ORDER_STATUS_NOTIFICATION;
+        : nextStatus === 'TRY_AND_BUY'
+          ? QueueJobType.TRY_AND_BUY_STARTED
+          : nextStatus === 'RETURNED'
+            ? QueueJobType.ORDER_RETURNED
+            : QueueJobType.ORDER_STATUS_NOTIFICATION;
+
+    const customerFriendlyTitle =
+      nextStatus === 'DELIVERED'
+        ? `Order #${order.orderNumber} Delivered`
+        : nextStatus === 'OUT_FOR_DELIVERY'
+          ? `Order #${order.orderNumber} Out for Delivery`
+          : nextStatus === 'TRY_AND_BUY'
+            ? `Try & Buy Started #${order.orderNumber}`
+            : nextStatus === 'RETURNED' || nextStatus === 'RETURNING'
+              ? `Order Return Update #${order.orderNumber}`
+              : `Order #${order.orderNumber} Update`;
+
+    const customerMessage = getCustomerOrderStatusLabel(nextStatus, order.isTryAndBuy);
 
     events.push({
       eventType: customerEventType,
       payload: {
         ...basePayload,
         userId: order.customerId,
-        title: `Order #${order.orderNumber} ${nextStatus.replace(/_/g, ' ')}`,
-        message: note,
+        title: customerFriendlyTitle,
+        message: `${customerMessage} • #${order.orderNumber}`,
       },
     });
 
@@ -435,25 +633,53 @@ export class OrderTransitionService {
     }
 
     if (nextStatus === 'READY_FOR_PICKUP') {
+      if (order.driverId) {
+        events.push({
+          eventType: QueueJobType.DRIVER_ASSIGNMENT_NOTIFICATION,
+          payload: {
+            ...basePayload,
+            userId: order.driverId,
+            driverUserId: order.driverId,
+            title: `Ready for Pickup #${order.orderNumber}`,
+            message: `Order #${order.orderNumber} is packed and ready for collection.`,
+          },
+        });
+      } else {
+        events.push({
+          eventType: QueueJobType.ORDER_STATUS_NOTIFICATION,
+          payload: {
+            ...basePayload,
+            recipientRole: Role.ADMIN,
+            title: `Ready for Pickup (Needs Rider) #${order.orderNumber}`,
+            message: `Order #${order.orderNumber} is packed and awaiting partner assignment.`,
+          },
+        });
+      }
+    }
+
+    if (nextStatus === 'OUT_FOR_DELIVERY' && order.vendor?.userId) {
       events.push({
-        eventType: QueueJobType.ORDER_STATUS_NOTIFICATION,
+        eventType: QueueJobType.VENDOR_ORDER_NOTIFICATION,
         payload: {
           ...basePayload,
-          recipientRole: Role.ADMIN,
-          title: `Ready for Rider Assignment #${order.orderNumber}`,
-          message: `Order #${order.orderNumber} is packed and waiting for manual dispatch.`,
+          userId: order.vendor.userId,
+          title: `Order Picked Up #${order.orderNumber}`,
+          message: `Delivery partner confirmed pickup for #${order.orderNumber}.`,
         },
       });
     }
 
-    if (nextStatus === 'RETURNING' || nextStatus === 'RETURNED') {
+    if (nextStatus === 'RETURNING' || nextStatus === 'RETURNED' || nextStatus === 'DELIVERED') {
       if (order.vendor?.userId) {
         events.push({
           eventType: QueueJobType.VENDOR_ORDER_NOTIFICATION,
           payload: {
             ...basePayload,
             userId: order.vendor.userId,
-            title: `Try & Buy Return Update #${order.orderNumber}`,
+            title:
+              nextStatus === 'DELIVERED'
+                ? `Order Delivered #${order.orderNumber}`
+                : `Try & Buy Return Update #${order.orderNumber}`,
             message: note,
           },
         });

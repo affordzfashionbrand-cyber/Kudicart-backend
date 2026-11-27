@@ -22,6 +22,8 @@ interface OtpEntry {
   otp: string;
   expiresAt: number;
   attempts: number;
+  used?: boolean;
+  lockedOut?: boolean;
 }
 
 @Injectable()
@@ -83,6 +85,8 @@ export class DriverAuthService {
       otp,
       expiresAt: Date.now() + 5 * 60 * 1000,
       attempts: 0,
+      used: false,
+      lockedOut: false,
     });
 
     const runtimeEnv = (process.env.APP_ENV || process.env.NODE_ENV || 'development').toLowerCase();
@@ -120,41 +124,54 @@ export class DriverAuthService {
     if (!record) {
       throw new UnauthorizedException('No active OTP request found. Please request a new OTP.');
     }
+    if (record.used) {
+      throw new UnauthorizedException('This OTP has already been used. Please request a new OTP.');
+    }
+    if (record.lockedOut) {
+      throw new BadRequestException('Too many failed verification attempts. Please request a new OTP.');
+    }
     if (Date.now() > record.expiresAt) {
-      this.otpStore.delete(cleanPhone);
       throw new UnauthorizedException('OTP has expired. Please request a new OTP.');
     }
 
     record.attempts += 1;
     if (record.attempts > 5) {
-      this.otpStore.delete(cleanPhone);
+      record.lockedOut = true;
       throw new BadRequestException('Too many failed verification attempts. Please request a new OTP.');
     }
 
     if (record.otp !== trimmedOtp) {
-      throw new UnauthorizedException('Invalid OTP code entered.');
+      throw new UnauthorizedException('Invalid OTP. Please try again.');
     }
 
-    this.otpStore.delete(cleanPhone);
+    record.used = true;
 
     const formattedPhone = `+91 ${cleanPhone.slice(0, 5)} ${cleanPhone.slice(5)}`;
     const candidates = buildPhoneLookupCandidates(formattedPhone);
 
     let user = await this.prisma.user.findFirst({
       where: {
+        role: Role.DRIVER,
         OR: candidates.map((phone) => ({ phone })),
       },
       include: { driverProfile: true },
     });
 
-    if (user && user.status !== 'ACTIVE') {
-      throw new ForbiddenException('Driver account is inactive or suspended');
+    if (!user) {
+      const conflictingUser = await this.prisma.user.findFirst({
+        where: {
+          OR: candidates.map((phone) => ({ phone })),
+        },
+      });
+      if (conflictingUser && conflictingUser.role !== Role.DRIVER) {
+        throw new ForbiddenException(
+          `This phone is registered with role ${conflictingUser.role}, not DRIVER.`,
+        );
+      }
     }
 
-    if (user && user.role !== Role.DRIVER) {
-      throw new ForbiddenException(
-        `This phone is registered with role ${user.role}, not DRIVER.`,
-      );
+    if (user && user.status !== 'ACTIVE') {
+      throw new ForbiddenException('Driver account is inactive or suspended');
     }
 
     if (!user) {
@@ -219,6 +236,10 @@ export class DriverAuthService {
       role: Role.DRIVER,
       driverId: driver.id,
       kycStatus: driver.kycStatus,
+      hasSeenApproval: Boolean(driver.approvalAcknowledgedAt),
+      approvalAcknowledgedAt: driver.approvalAcknowledgedAt
+        ? driver.approvalAcknowledgedAt.toISOString()
+        : null,
       user: {
         id: user.id,
         driverId: driver.id,
@@ -226,6 +247,10 @@ export class DriverAuthService {
         phone: driver.phone,
         email: user.email,
         kycStatus: driver.kycStatus,
+        hasSeenApproval: Boolean(driver.approvalAcknowledgedAt),
+        approvalAcknowledgedAt: driver.approvalAcknowledgedAt
+          ? driver.approvalAcknowledgedAt.toISOString()
+          : null,
         tier: driver.tier,
         role: Role.DRIVER,
       },
@@ -259,17 +284,26 @@ export class DriverAuthService {
     }
 
     let user = await this.prisma.user.findFirst({
-      where: { OR: orClauses },
+      where: {
+        role: Role.DRIVER,
+        OR: orClauses,
+      },
       include: { driverProfile: true },
     });
 
+    if (!user) {
+      const conflictingUser = await this.prisma.user.findFirst({
+        where: { OR: orClauses },
+      });
+      if (conflictingUser && conflictingUser.role !== Role.DRIVER) {
+        throw new ForbiddenException(
+          `Account is registered as ${conflictingUser.role} and cannot sign in to the Driver portal`,
+        );
+      }
+    }
+
     if (user && user.status !== 'ACTIVE') {
       throw new ForbiddenException('Driver account is inactive or suspended');
-    }
-    if (user && user.role !== Role.DRIVER) {
-      throw new ForbiddenException(
-        `Account is registered as ${user.role} and cannot sign in to the Driver portal`,
-      );
     }
 
     let isNewDriver = false;
@@ -352,6 +386,10 @@ export class DriverAuthService {
       driverId: driver.id,
       isNewDriver,
       kycStatus: driver.kycStatus,
+      hasSeenApproval: Boolean(driver.approvalAcknowledgedAt),
+      approvalAcknowledgedAt: driver.approvalAcknowledgedAt
+        ? driver.approvalAcknowledgedAt.toISOString()
+        : null,
       user: {
         id: user.id,
         driverId: driver.id,
@@ -360,6 +398,10 @@ export class DriverAuthService {
         phone: driver.phone || user.phone,
         email: user.email,
         kycStatus: driver.kycStatus,
+        hasSeenApproval: Boolean(driver.approvalAcknowledgedAt),
+        approvalAcknowledgedAt: driver.approvalAcknowledgedAt
+          ? driver.approvalAcknowledgedAt.toISOString()
+          : null,
         tier: driver.tier,
         role: Role.DRIVER,
       },
@@ -383,6 +425,10 @@ export class DriverAuthService {
       fullName: driver.fullName,
       kycStatus: driver.kycStatus,
       isApproved: driver.kycStatus === 'APPROVED',
+      hasSeenApproval: Boolean(driver.approvalAcknowledgedAt),
+      approvalAcknowledgedAt: driver.approvalAcknowledgedAt
+        ? driver.approvalAcknowledgedAt.toISOString()
+        : null,
       rejectionReason: driver.rejectionReason || null,
       isOnline: driver.isOnline,
       rating: driver.rating,

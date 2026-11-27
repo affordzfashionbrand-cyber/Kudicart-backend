@@ -9,8 +9,11 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
+import { DeliveryAssignmentService } from '../orders/delivery-assignment.service';
 import { OrderTransitionService } from '../orders/order-transition.service';
 import { HomeContentService } from '../home-content/home-content.service';
+import { computeTryAndBuyFinancials } from '../orders/order-pricing.util';
+import { QueueJobType } from '../queue/queue.constants';
 import { Role } from '../../common/enums/role.enum';
 import { FirebaseAdminService } from '../auth/firebase-admin.service';
 import { createJwtToken } from '../../common/utils/crypto.util';
@@ -48,6 +51,7 @@ const VENDOR_ORDER_INCLUDE = {
     orderBy: { createdAt: 'asc' as const },
   },
   tryAndBuySession: true,
+  dispatchAssignment: true,
 };
 
 @Injectable()
@@ -58,6 +62,7 @@ export class VendorService {
     private readonly orderTransition: OrderTransitionService,
     @Optional() private readonly firebaseAdmin?: FirebaseAdminService,
     @Optional() private readonly homeContentService?: HomeContentService,
+    @Optional() private readonly deliveryAssignment?: DeliveryAssignmentService,
   ) {}
 
   private ensureDbConnected() {
@@ -330,8 +335,9 @@ export class VendorService {
       nextStatus: 'ACCEPTED',
       actorRole: role === Role.ADMIN ? Role.ADMIN : Role.VENDOR,
       actorId: userId,
-      note: 'Vendor accepted order',
+      note: 'Order accepted; delivery partner assignment triggered',
       auditAction: 'VENDOR_ORDER_ACCEPTED',
+      triggerAutoAssignment: true,
     });
     return this.ordersService.formatOrderResponse(updated, role, userId);
   }
@@ -340,25 +346,169 @@ export class VendorService {
     const order = await this.getAuthorizedOrder(userId, role, orderId);
     const updated = await this.orderTransition.executeTransition({
       orderId: order.id,
-      nextStatus: 'PREPARING',
+      nextStatus: 'PACKING',
       actorRole: role === Role.ADMIN ? Role.ADMIN : Role.VENDOR,
       actorId: userId,
-      note: 'Vendor started packing order',
-      auditAction: 'VENDOR_ORDER_PREPARING',
+      note: 'Order is getting packed',
+      auditAction: 'VENDOR_ORDER_PACKING',
     });
     return this.ordersService.formatOrderResponse(updated, role, userId);
   }
 
   async readyForPickup(userId: string, role: string, orderId: string) {
     const order = await this.getAuthorizedOrder(userId, role, orderId);
-    const updated = await this.orderTransition.executeTransition({
+    let updated = await this.orderTransition.executeTransition({
       orderId: order.id,
       nextStatus: 'READY_FOR_PICKUP',
       actorRole: role === Role.ADMIN ? Role.ADMIN : Role.VENDOR,
       actorId: userId,
-      note: 'Packed and ready at counter for manual Admin rider assignment',
+      note: 'Packed and ready for pickup by delivery partner',
       auditAction: 'VENDOR_ORDER_READY_FOR_PICKUP',
     });
+
+    if (
+      updated &&
+      this.deliveryAssignment &&
+      updated.deliveryAssignmentStatus !== 'ASSIGNED' &&
+      updated.deliveryAssignmentStatus !== 'ACCEPTED_BY_DELIVERY_PARTNER'
+    ) {
+      const retry = await this.deliveryAssignment
+        .retryOrderAssignment(updated.id, {
+          actorId: userId,
+          actorRole: role === Role.ADMIN ? Role.ADMIN : Role.VENDOR,
+        })
+        .catch(() => null);
+      if (retry?.order) {
+        updated = retry.order;
+      }
+    }
+
+    return this.ordersService.formatOrderResponse(updated, role, userId);
+  }
+
+  async reconcileReturn(
+    userId: string,
+    role: string,
+    orderId: string,
+    note?: string,
+  ) {
+    const order = await this.getAuthorizedOrder(userId, role, orderId);
+    if (order.status !== 'RETURNING') {
+      throw new BadRequestException(
+        `Store return reconciliation requires status RETURNING (current: ${order.status})`,
+      );
+    }
+
+    const selections: Record<string, 'KEEP' | 'RETURN'> = {};
+    for (const it of order.items || []) {
+      selections[it.id] = it.tryAndBuyDecision === 'RETURN' ? 'RETURN' : 'KEEP';
+    }
+
+    const financials = computeTryAndBuyFinancials({
+      order: {
+        itemTotal: order.itemTotal,
+        deliveryFee: order.deliveryFee,
+        taxes: order.taxes,
+        discountAmount: order.discountAmount,
+        giftWrapFee: order.giftWrapFee,
+        donationAmount: order.donationAmount,
+        grandTotal: order.grandTotal,
+        paymentMethod: order.paymentMethod,
+      },
+      items: (order.items || []).map((i: any) => ({
+        id: i.id,
+        price: i.price,
+        quantity: i.quantity,
+      })),
+      selections,
+    });
+
+    const alreadyReconciled = order.tryAndBuySession?.storeReconciliationStatus === 'RECONCILED';
+    const extraOutboxEvents =
+      order.paymentMethod === 'RAZORPAY' && financials.refundAmount > 0 && !alreadyReconciled
+        ? [
+            {
+              aggregateType: 'PAYMENT',
+              eventType: QueueJobType.REFUND_PROCESSING,
+              payload: {
+                orderId: order.id,
+                orderNumber: order.orderNumber,
+                paymentId: order.razorpayPaymentId,
+                refundAmount: financials.refundAmount,
+                reason: 'Try & Buy return reconciliation refund',
+                isTryAndBuy: true,
+              },
+            },
+          ]
+        : [];
+
+    if (!alreadyReconciled) {
+      await this.prisma.$transaction(async (tx) => {
+        for (const returnedItem of financials.returnedItems) {
+          const itemRow = (order.items || []).find((i: any) => i.id === returnedItem.id);
+          if (itemRow) {
+            await tx.product.updateMany({
+              where: { id: itemRow.productId },
+              data: { stockQuantity: { increment: itemRow.quantity || 1 } },
+            });
+          }
+        }
+        await tx.tryAndBuySession.upsert({
+          where: { orderId: order.id },
+          update: {
+            stage: 'COMPLETED',
+            storeReconciliationStatus: 'RECONCILED',
+            storeReconciledAt: new Date(),
+            finalPayableTotal: financials.finalPayableTotal,
+            refundAmount: financials.refundAmount,
+            paymentStatus:
+              order.paymentMethod === 'RAZORPAY' && financials.refundAmount > 0
+                ? 'REFUND_PENDING'
+                : 'COMPLETED',
+          },
+          create: {
+            orderId: order.id,
+            driverId: order.driverId || null,
+            driverProfileId: order.driverProfileId || null,
+            stage: 'COMPLETED',
+            storeReconciliationStatus: 'RECONCILED',
+            storeReconciledAt: new Date(),
+            finalPayableTotal: financials.finalPayableTotal,
+            refundAmount: financials.refundAmount,
+            paymentStatus:
+              order.paymentMethod === 'RAZORPAY' && financials.refundAmount > 0
+                ? 'REFUND_PENDING'
+                : 'COMPLETED',
+          },
+        });
+        if (order.driverProfileId) {
+          await tx.driverProfile.update({
+            where: { id: order.driverProfileId },
+            data: { completedDeliveries: { increment: 1 }, availableSince: new Date() },
+          });
+        }
+      });
+    }
+
+    const updated = await this.orderTransition.executeTransition({
+      orderId: order.id,
+      nextStatus: 'RETURNED',
+      actorRole: role === Role.ADMIN ? Role.ADMIN : Role.VENDOR,
+      actorId: userId,
+      note:
+        note?.trim() ||
+        `Store return reconciled (${financials.returnedItems.length} returned, ${financials.keptItems.length} kept).`,
+      auditAction: 'VENDOR_RETURN_RECONCILED',
+      netKeptSubtotalForLedger: financials.netKeptSubtotalForCommission,
+      extraOrderUpdate: {
+        ...(order.paymentMethod === 'RAZORPAY' && financials.refundAmount > 0
+          ? { paymentStatus: 'REFUND_PENDING' }
+          : {}),
+        ...(note?.trim() ? { returnReason: note.trim() } : {}),
+      },
+      extraOutboxEvents,
+    });
+
     return this.ordersService.formatOrderResponse(updated, role, userId);
   }
 

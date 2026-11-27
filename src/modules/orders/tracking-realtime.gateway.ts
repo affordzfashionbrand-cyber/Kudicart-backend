@@ -17,11 +17,13 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { FirebaseAdminService } from '../auth/firebase-admin.service';
 import { RedisService } from '../../common/redis/redis.service';
+import { verifyJwtToken } from '../../common/utils/crypto.util';
 
 interface TrackingClient {
   ws: WebSocket;
   orderId?: string;
   orderNumber?: string;
+  feedKeys?: string[];
   userId?: string;
   role?: string;
   isAlive: boolean;
@@ -258,26 +260,43 @@ export class TrackingRealtimeGateway
   }
 
   private async resolveAuthenticatedActor(token: string) {
-    if (!token || !this.firebaseAdmin || !this.prisma?.isConnectedToDb) {
+    if (!token || !this.prisma?.isConnectedToDb) {
       return null;
     }
 
-    let decoded: any = null;
-    try {
-      decoded = await this.firebaseAdmin.verifyIdToken(token);
-    } catch {
+    let userIdLookup: string | null = null;
+    let firebaseUidLookup: string | null = null;
+    let emailLookup: string | null = null;
+
+    const jwtRes = verifyJwtToken(token);
+    if (jwtRes.valid && jwtRes.payload) {
+      userIdLookup = jwtRes.payload.sub || jwtRes.payload.uid || null;
+      firebaseUidLookup = jwtRes.payload.firebaseUid || null;
+      emailLookup = jwtRes.payload.email || null;
+    } else if (this.firebaseAdmin) {
+      try {
+        const decoded: any = await this.firebaseAdmin.verifyIdToken(token);
+        if (decoded) {
+          firebaseUidLookup = decoded.uid || null;
+          userIdLookup = decoded.uid || null;
+          emailLookup = decoded.email || null;
+        }
+      } catch {
+        return null;
+      }
+    }
+
+    if (!userIdLookup && !firebaseUidLookup && !emailLookup) {
       return null;
     }
-    if (!decoded) return null;
+
+    const orClauses: any[] = [];
+    if (userIdLookup) orClauses.push({ id: userIdLookup });
+    if (firebaseUidLookup) orClauses.push({ firebaseUid: firebaseUidLookup });
+    if (emailLookup) orClauses.push({ email: emailLookup });
 
     const user = await this.prisma.user.findFirst({
-      where: {
-        OR: [
-          { firebaseUid: decoded.uid },
-          ...(decoded.email ? [{ email: decoded.email }] : []),
-          { id: decoded.uid },
-        ],
-      },
+      where: { OR: orClauses },
       include: {
         vendor: { select: { id: true } },
         driverProfile: { select: { id: true } },
@@ -368,6 +387,72 @@ export class TrackingRealtimeGateway
     if (msgType === 'PING') {
       ctx.isAlive = true;
       this.sendJson(ws, { type: 'PONG', timestamp: new Date().toISOString() });
+      return;
+    }
+
+    if (msgType === 'SUBSCRIBE_FEED') {
+      if (!this.prisma?.isConnectedToDb) {
+        this.sendJson(ws, {
+          type: 'ERROR',
+          code: 'SERVICE_UNAVAILABLE',
+          message: 'Tracking persistence service is unavailable',
+        });
+        ws.close(1013, 'Service unavailable');
+        return;
+      }
+
+      const token = this.extractBearerToken(req, msg?.token);
+      if (!token) {
+        this.sendJson(ws, {
+          type: 'ERROR',
+          code: 'UNAUTHORIZED',
+          message: 'Valid Bearer token required to subscribe to live order feed',
+        });
+        ws.close(4001, 'Unauthorized');
+        return;
+      }
+
+      const actor = await this.resolveAuthenticatedActor(token);
+      if (!actor) {
+        this.sendJson(ws, {
+          type: 'ERROR',
+          code: 'UNAUTHORIZED',
+          message: 'Authentication token invalid or expired',
+        });
+        ws.close(4001, 'Unauthorized');
+        return;
+      }
+
+      const feedKeys: string[] = [];
+      if (actor.role === 'ADMIN') {
+        feedKeys.push('feed:admin');
+      } else if (actor.role === 'VENDOR' && actor.vendorId) {
+        feedKeys.push(`feed:vendor:${actor.vendorId}`);
+      } else if (actor.role === 'DRIVER') {
+        feedKeys.push(`feed:driver-user:${actor.userId}`);
+        if (actor.driverProfileId) {
+          feedKeys.push(`feed:driver:${actor.driverProfileId}`);
+        }
+      } else if (actor.role === 'CUSTOMER') {
+        feedKeys.push(`feed:customer:${actor.userId}`);
+      }
+
+      ctx.userId = actor.userId;
+      ctx.role = actor.role;
+      ctx.feedKeys = feedKeys;
+      for (const fk of feedKeys) {
+        if (!this.rooms.has(fk)) {
+          this.rooms.set(fk, new Set());
+        }
+        this.rooms.get(fk)!.add(ctx);
+      }
+
+      this.sendJson(ws, {
+        type: 'SUBSCRIBED',
+        feedKeys,
+        role: actor.role,
+        timestamp: new Date().toISOString(),
+      });
       return;
     }
 
@@ -606,12 +691,22 @@ export class TrackingRealtimeGateway
     if (!orderId) return;
     const seq = this.nextSeq(orderId);
     const rawEvent = payload?.event || payload?.eventType;
-    const messageType =
-      rawEvent === 'TRY_AND_BUY_UPDATED'
-        ? 'TRY_AND_BUY_UPDATED'
-        : rawEvent === 'ORDER_ARRIVED'
-          ? 'ORDER_ARRIVED'
-          : 'ORDER_STATUS_UPDATE';
+    const allowedExplicitEvents = new Set([
+      'TRY_AND_BUY_UPDATED',
+      'TRY_AND_BUY_STARTED',
+      'ORDER_ARRIVED',
+      'ORDER_ACCEPTED',
+      'DELIVERY_ASSIGNMENT_CREATED',
+      'DELIVERY_ASSIGNMENT_FAILED',
+      'ORDER_READY_FOR_PICKUP',
+      'ORDER_PICKED_UP',
+      'ORDER_OUT_FOR_DELIVERY',
+      'ORDER_DELIVERED',
+      'ORDER_RETURNED',
+    ]);
+    const messageType = allowedExplicitEvents.has(rawEvent)
+      ? rawEvent
+      : 'ORDER_STATUS_UPDATE';
 
     const message = {
       type: messageType,
@@ -622,11 +717,23 @@ export class TrackingRealtimeGateway
       timestamp: new Date().toISOString(),
     };
 
-    // 1. Deliver to local clients in this instance
-    const clients = this.rooms.get(orderId);
-    if (clients && clients.size > 0) {
-      for (const client of clients) {
-        this.sendJson(client.ws, message);
+    // 1. Deliver to local order-room clients and authorized role feed rooms without duplicate sends
+    const deliveredSockets = new Set<WebSocket>();
+    const roomKeys: string[] = [orderId, 'feed:admin'];
+    if (payload?.vendorId) roomKeys.push(`feed:vendor:${payload.vendorId}`);
+    if (payload?.driverProfileId) roomKeys.push(`feed:driver:${payload.driverProfileId}`);
+    if (payload?.driverId) roomKeys.push(`feed:driver-user:${payload.driverId}`);
+    if (payload?.customerId) roomKeys.push(`feed:customer:${payload.customerId}`);
+
+    for (const rk of roomKeys) {
+      const clients = this.rooms.get(rk);
+      if (clients && clients.size > 0) {
+        for (const client of clients) {
+          if (!deliveredSockets.has(client.ws)) {
+            deliveredSockets.add(client.ws);
+            this.sendJson(client.ws, message);
+          }
+        }
       }
     }
 
@@ -644,7 +751,7 @@ export class TrackingRealtimeGateway
       });
     }
 
-    // 3. Handle terminal order close
+    // 3. Handle terminal order close (only close direct order-room watchers; keep dashboard feed sockets connected)
     if (TERMINAL_ORDER_STATUSES.includes(status as OrderStatus)) {
       this.scheduleTerminalClose(orderId, status);
     }
@@ -679,6 +786,17 @@ export class TrackingRealtimeGateway
         room.delete(ctx);
         if (room.size === 0) {
           this.rooms.delete(ctx.orderId);
+        }
+      }
+    }
+    if (Array.isArray(ctx.feedKeys)) {
+      for (const fk of ctx.feedKeys) {
+        const feedRoom = this.rooms.get(fk);
+        if (feedRoom) {
+          feedRoom.delete(ctx);
+          if (feedRoom.size === 0) {
+            this.rooms.delete(fk);
+          }
         }
       }
     }

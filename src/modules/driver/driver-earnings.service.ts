@@ -334,8 +334,24 @@ export class DriverEarningsService {
     const nextWeeklyMilestone =
       weeklyMilestones.find((m) => !m.reached) || weeklyMilestones[2];
 
+    const weekBounds = this.getWeekBounds(0);
+    const todayEnd = new Date(todayStart);
+    todayEnd.setHours(23, 59, 59, 999);
+
     return {
+      title: 'Delivery Partner Incentives',
+      description:
+        'Complete daily and weekly delivery milestones during active shifts to unlock bonus payouts directly in your earnings ledger.',
+      basePayoutPerOrder: DEFAULT_DELIVERY_PAYOUT_RUPEES,
+      floatingCashLimit: DEFAULT_FLOATING_CASH_LIMIT,
       dailyBonus: {
+        id: 'daily-bonus',
+        title: 'Daily Delivery Bonus',
+        description: `Complete up to ${dailyMilestones[dailyMilestones.length - 1].orders} deliveries today to earn up to ₹${dailyMilestones[dailyMilestones.length - 1].bonus} extra.`,
+        eligibility: 'All active KudiCart delivery partners with approved KYC.',
+        startsAt: todayStart.toISOString(),
+        endsAt: todayEnd.toISOString(),
+        periodLabel: 'Today (00:00 – 23:59)',
         completedOrders: todayDeliveries,
         targetOrders: nextDailyMilestone.orders,
         rewardEarned: dailyRewardEarned,
@@ -345,6 +361,13 @@ export class DriverEarningsService {
         milestones: dailyMilestones,
       },
       weeklyBonus: {
+        id: 'weekly-bonus',
+        title: 'Weekly Consistency & Target Bonus',
+        description: `Complete weekly delivery tiers and stay active across working days to earn up to ₹${weeklyMilestones[weeklyMilestones.length - 1].bonus}.`,
+        eligibility: `Maintain active shifts across ${weekBounds.label}.`,
+        startsAt: weekBounds.monday.toISOString(),
+        endsAt: weekBounds.sunday.toISOString(),
+        periodLabel: weekBounds.label,
         completedOrders: weeklyDeliveries,
         targetOrders: nextWeeklyMilestone.orders,
         rewardEarned: weeklyRewardEarned,
@@ -355,6 +378,50 @@ export class DriverEarningsService {
         status: weeklyDeliveries >= 75 ? 'COMPLETED' : 'IN_PROGRESS',
         milestones: weeklyMilestones,
       },
+    };
+  }
+
+  async getRateCard() {
+    this.ensureDbConnected();
+    const activeSurges = await this.prisma.driverSurge.findMany({
+      where: { isActive: true },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return {
+      basePayoutPerOrder: DEFAULT_DELIVERY_PAYOUT_RUPEES,
+      floatingCashLimit: DEFAULT_FLOATING_CASH_LIMIT,
+      payoutRules: [
+        {
+          id: 'base-order',
+          title: 'Standard Dark-Store Delivery',
+          amountLabel: `₹${DEFAULT_DELIVERY_PAYOUT_RUPEES} / order`,
+          description: 'Credited upon verified OTP handover & delivery completion.',
+        },
+        {
+          id: 'try-and-buy',
+          title: 'Try & Buy Round-Trip Delivery',
+          amountLabel: `₹${DEFAULT_DELIVERY_PAYOUT_RUPEES} + Store Reconciliation`,
+          description: 'Includes trial window completion and store return verification if applicable.',
+        },
+      ],
+      dailyMilestones: [
+        { orders: 5, bonus: 60 },
+        { orders: 10, bonus: 150 },
+        { orders: 15, bonus: 250 },
+      ],
+      weeklyMilestones: [
+        { orders: 25, bonus: 200 },
+        { orders: 50, bonus: 500 },
+        { orders: 75, bonus: 900 },
+      ],
+      activeSurges: activeSurges.map((s) => ({
+        id: s.id,
+        title: s.title,
+        area: s.area,
+        timeWindow: s.timeWindow,
+        bonusAmount: s.bonusAmount,
+      })),
     };
   }
 
@@ -369,9 +436,13 @@ export class DriverEarningsService {
       id: s.id,
       title: s.title,
       timeWindow: s.timeWindow,
+      bonusAmount: s.bonusAmount,
       bonusText: `+₹${s.bonusAmount} bonus per eligible delivery`,
       zone: s.area,
       urgency: 'High Demand',
+      description: `Earn an extra ₹${s.bonusAmount} per completed delivery in ${s.area} during ${s.timeWindow}.`,
+      eligibility: 'Active partners picking up eligible orders in the target zone and time window.',
+      startsAt: s.createdAt.toISOString(),
     }));
   }
 

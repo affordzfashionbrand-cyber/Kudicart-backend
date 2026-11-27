@@ -827,13 +827,14 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
       });
 
       const updated = await ordersService.assignDriver(orderId, 'drv-1', Role.ADMIN);
-      expect(updated.status).toBe('ASSIGNED');
+      expect(updated.status).toBe('READY_FOR_PICKUP');
+      expect(updated.deliveryAssignmentStatus).toBe('ASSIGNED');
       expect(updated.driverName).toBe('Rajesh Kumar');
     });
   });
 
   describe('8. Driver App Module & Fulfillment Workflows', () => {
-    async function seedDriverScenario(status: OrderStatus = OrderStatus.ASSIGNED) {
+    async function seedDriverScenario(status: OrderStatus = OrderStatus.READY_FOR_PICKUP) {
       const suffix = Math.random().toString(36).slice(2, 6);
       const drvUserId = `${runId}_drv_u_${suffix}`;
       const drvProfId = `${runId}_drv_p_${suffix}`;
@@ -900,6 +901,7 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
           },
           fulfillmentType: FulfillmentType.VENDOR,
           status,
+          deliveryAssignmentStatus: 'ASSIGNED',
           paymentMethod: PaymentMethod.COD,
           paymentStatus: PaymentStatus.PENDING,
           itemTotal: 1299,
@@ -931,7 +933,7 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
     });
 
     it('Driver Assigned Orders: retrieves orders assigned to driver with pickup and dropoff packet', async () => {
-      const { drvProfId, orderId } = await seedDriverScenario(OrderStatus.ASSIGNED);
+      const { drvProfId, orderId } = await seedDriverScenario(OrderStatus.READY_FOR_PICKUP);
       const assigned = await driverService.getAssignedOrders(drvProfId);
       expect(assigned.orders.length).toBeGreaterThan(0);
       expect(assigned.orders[0].pickupStore).toBeDefined();
@@ -943,17 +945,17 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
     });
 
     it('Driver Workflow: executes Pickup -> Out for Delivery -> Deliver with COD payment collection', async () => {
-      const { drvProfId, orderId } = await seedDriverScenario(OrderStatus.ASSIGNED);
+      const { drvProfId, orderId } = await seedDriverScenario(OrderStatus.READY_FOR_PICKUP);
 
       // 1. Accept
       const acceptRes = await driverService.acceptOrder(drvProfId, orderId);
       expect(acceptRes.success).toBe(true);
 
-      // 2. Pickup
+      // 2. Pickup (READY_FOR_PICKUP -> OUT_FOR_DELIVERY directly)
       const pickupRes = await driverService.pickupOrder(drvProfId, orderId);
-      expect(pickupRes.order.status).toBe('PICKED_UP');
+      expect(pickupRes.order.status).toBe('OUT_FOR_DELIVERY');
 
-      // 3. Out for Delivery
+      // 3. Out for Delivery (idempotent confirmation)
       const outRes = await driverService.outForDeliveryOrder(drvProfId, orderId);
       expect(outRes.order.status).toBe('OUT_FOR_DELIVERY');
 

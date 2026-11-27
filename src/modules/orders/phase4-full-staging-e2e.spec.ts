@@ -407,7 +407,7 @@ describe('Phase 4: Full Staging Integration, End-to-End Verification & Productio
     const candidateDriver = eligibleDrivers.find((d) => d.id === drvProf1 || d.id === drvProf2);
     expect(candidateDriver?.id).toBe(drvProf1);
 
-    // 3. Admin assigns to Driver 1 (triggers FCM alert)
+    // 3. Admin assigns to Driver 1 (triggers FCM alert; Order.status stays READY_FOR_PICKUP)
     const assignRes = await ordersService.assignDriver(
       orderId,
       drvProf1,
@@ -417,7 +417,8 @@ describe('Phase 4: Full Staging Integration, End-to-End Verification & Productio
     );
     expect(assignRes.driverId).toBe(drvUser1);
     expect(assignRes.driverProfileId).toBe(drvProf1);
-    expect(assignRes.status).toBe(OrderStatus.ASSIGNED);
+    expect(assignRes.status).toBe(OrderStatus.READY_FOR_PICKUP);
+    expect(assignRes.deliveryAssignmentStatus).toBe('ASSIGNED');
 
     // 4. Concurrency Race: Both drivers attempt to accept simultaneously
     const results = await Promise.allSettled([
@@ -433,11 +434,12 @@ describe('Phase 4: Full Staging Integration, End-to-End Verification & Productio
     const confirmedOrder = await prisma.order.findUnique({ where: { id: orderId } });
     expect(confirmedOrder?.driverId).toBe(drvUser1);
     expect(confirmedOrder?.driverProfileId).toBe(drvProf1);
-    expect(confirmedOrder?.status).toBe(OrderStatus.ASSIGNED);
+    expect(confirmedOrder?.status).toBe(OrderStatus.READY_FOR_PICKUP);
+    expect(confirmedOrder?.deliveryAssignmentStatus).toBe('ACCEPTED_BY_DELIVERY_PARTNER');
 
-    // Driver picks up order from store -> transitions to PICKED_UP
+    // Driver picks up order from store -> transitions to OUT_FOR_DELIVERY
     const pickupRes = await driverOrdersService.pickupOrder(drvProf1, orderId);
-    expect(pickupRes.order.status).toBe(OrderStatus.PICKED_UP);
+    expect(pickupRes.order.status).toBe(OrderStatus.OUT_FOR_DELIVERY);
   });
 
   it('verifies Live Delivery Tracking Telemetry & Multi-Instance Cross-Routing via Redis Pub/Sub', async () => {

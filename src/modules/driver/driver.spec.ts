@@ -647,7 +647,8 @@ describe('KudiCart Driver Partner Backend — Complete Domain & Security Test Su
             city: 'Bengaluru',
           },
           fulfillmentType: 'DARK_STORE',
-          status: 'ASSIGNED',
+          status: 'READY_FOR_PICKUP',
+          deliveryAssignmentStatus: 'ASSIGNED',
           paymentMethod: 'COD',
           paymentStatus: 'PENDING',
           itemTotal: 1200,
@@ -661,9 +662,10 @@ describe('KudiCart Driver Partner Backend — Complete Domain & Security Test Su
         ForbiddenException,
       );
 
-      // Authorized driver completes Pickup -> Out for Delivery -> Arrived (status stays OUT_FOR_DELIVERY per DCR-005) -> Deliver
+      // Authorized driver confirms Pickup -> immediately OUT_FOR_DELIVERY -> Arrived -> Deliver
       const pickup = await ordersService.pickupOrder(authProfId, orderId);
-      expect(pickup.order.status).toBe('PICKED_UP');
+      expect(pickup.order.status).toBe('OUT_FOR_DELIVERY');
+      expect(pickup.order.pickedUpAt).toBeTruthy();
 
       const out = await ordersService.outForDelivery(authProfId, orderId);
       expect(out.order.status).toBe('OUT_FOR_DELIVERY');
@@ -889,6 +891,67 @@ describe('KudiCart Driver Partner Backend — Complete Domain & Security Test Su
       expect(guard.canActivate(mockContext)).toBe(true);
       expect(guard.canActivate(mockContext)).toBe(true);
       expect(() => guard.canActivate(mockContext)).toThrow();
+    });
+  });
+
+  describe('9. Driver Audit Modules — OTP States, Approval, Hub Geofence & Rate Card', () => {
+    it('enforces invalid, already-used, and locked-out OTP error differentiation', async () => {
+      await authService.sendOtp('+91 98765 43210');
+      const code = authService.getOtpForTesting('+91 98765 43210')!;
+
+      await expect(authService.verifyOtp('+91 98765 43210', '000001')).rejects.toThrow(
+        'Invalid OTP. Please try again.',
+      );
+
+      const okRes = await authService.verifyOtp('+91 98765 43210', code);
+      expect(okRes.success).toBe(true);
+
+      // Reusing same verified OTP must fail with already-used message
+      await expect(authService.verifyOtp('+91 98765 43210', code)).rejects.toThrow(
+        'This OTP has already been used. Please request a new OTP.',
+      );
+    });
+
+    it('enforces 50m hub proximity on go-online when hub geofence is checked', async () => {
+      const hub = await prismaService.darkStoreHub.findFirst({
+        where: { isActive: true },
+        orderBy: { deliveryMinutes: 'asc' },
+      });
+      if (!hub) return;
+
+      await expect(
+        profileService.updateAvailability('drv-1', true, {
+          latitude: hub.lat + 0.005, // ~555m away
+          longitude: hub.lng,
+          accuracy: 15,
+          enforceHubProximity: true,
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      const nearRes = await profileService.updateAvailability('drv-1', true, {
+        latitude: hub.lat + 0.0001, // ~11m away
+        longitude: hub.lng,
+        accuracy: 12,
+        enforceHubProximity: true,
+      });
+      expect(nearRes.isOnline).toBe(true);
+      expect(nearRes.hubDistanceMeters).toBeLessThanOrEqual(50);
+    });
+
+    it('returns rate card, shift history, and real app-version status', async () => {
+      const rateCard = await earningsService.getRateCard();
+      expect(rateCard.basePayoutPerOrder).toBeGreaterThan(0);
+      expect(Array.isArray(rateCard.dailyMilestones)).toBe(true);
+
+      const ftHistory = await shiftsService.getHistory('drv-104', 0);
+      expect(ftHistory.mode).toBe('SHIFT_HISTORY');
+
+      const ptHistory = await shiftsService.getHistory('drv-1', 0);
+      expect(ptHistory.mode).toBe('SLOT_HISTORY');
+
+      const versionInfo = await profileService.getAppVersionStatus('1.0.0');
+      expect(versionInfo.currentVersion).toBe('1.0.0');
+      expect(typeof versionInfo.updateAvailable).toBe('boolean');
     });
   });
 });
