@@ -31,14 +31,34 @@ import {
 } from '../../common/contracts/order-contracts';
 import {
   GIFT_WRAP_FEE,
+  INCLUSIVE_GST_RATE,
   MAX_DARK_STORE_RADIUS_KM,
   allocateProRata,
+  computeInclusiveGstBreakdown,
   computeSplitOrderTotals,
   computeTryAndBuyFinancials,
   haversineDistanceKm,
 } from './order-pricing.util';
 import { deriveCustomerOrderOtp, hashOrderOtp } from './order-otp.util';
 import { createCheckoutSessionToken } from '../../common/utils/checkout-session.util';
+
+const CHECKOUT_PRODUCT_ID_ALIASES: Record<string, string> = {
+  '101': 'prod-2',
+  '102': 'prod-1',
+  '103': 'prod-3',
+  '104': 'prod-5',
+  '105': 'prod-6',
+  '106': 'prod-4',
+  '107': 'prod-10',
+  '108': 'prod-7',
+  '1': 'prod-1',
+  '2': 'prod-5',
+  '3': 'prod-9',
+  '4': 'prod-6',
+  '9': 'prod-4',
+};
+
+const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 
 const ORDER_WITH_RELATIONS = {
   items: true,
@@ -198,7 +218,10 @@ export class OrdersService {
       grandTotal: Math.round(order.grandTotal || 0),
       etaMinutes: order.etaMinutes ?? 0,
       isTryAndBuy: Boolean(order.isTryAndBuy),
-      deliveryInstructions: isVendorViewer ? null : (order.deliveryInstructions ?? null),
+      deliveryInstructions: order.deliveryInstructions ?? null,
+      needGstInvoice: Boolean(order.needGstInvoice),
+      customerGstin: order.customerGstin ?? null,
+      gstBusinessName: order.gstBusinessName ?? null,
       verificationPhotos: Array.isArray(order.verificationPhotos) ? order.verificationPhotos : [],
       deliveryAddress: formattedDeliveryAddress,
       arrivedAt: order.arrivedAt ? new Date(order.arrivedAt).toISOString() : null,
@@ -270,6 +293,15 @@ export class OrdersService {
   ): Promise<CheckoutResponseContract> {
     this.ensureDbConnected();
 
+    const cleanGstin = dto.customerGstin?.trim().toUpperCase() || null;
+    const cleanGstBusinessName = dto.gstBusinessName?.trim() || null;
+    const needGstInvoice = Boolean(dto.needGstInvoice || cleanGstin || cleanGstBusinessName);
+    if (cleanGstin && !GSTIN_REGEX.test(cleanGstin)) {
+      throw new BadRequestException(
+        'Invalid GSTIN format. Please enter a valid 15-character GSTIN (e.g. 29AABCU9603R1ZM).',
+      );
+    }
+
     const cleanIdempotencyKey = idempotencyKey?.trim();
     const requestHash = cleanIdempotencyKey
       ? crypto
@@ -284,6 +316,9 @@ export class OrdersService {
               giftWrap: dto.giftWrap ?? null,
               donationAmount: dto.donationAmount ?? null,
               deliveryInstructions: dto.deliveryInstructions?.trim() || null,
+              needGstInvoice,
+              customerGstin: cleanGstin,
+              gstBusinessName: cleanGstBusinessName,
               buyNowItem: dto.buyNowItem || null,
               items: dto.items || null,
             }),
@@ -339,8 +374,10 @@ export class OrdersService {
         throw new BadRequestException('Buy Now requires at least one product item');
       }
       for (const item of sourceItems) {
+        const rawPid = String(item.productId || '').trim();
+        const mappedPid = CHECKOUT_PRODUCT_ID_ALIASES[rawPid] || rawPid;
         rawRequestedItems.push({
-          productId: item.productId,
+          productId: mappedPid,
           size: item.size,
           trialSize: item.trialSize ?? null,
           quantity: Math.max(1, Math.floor(Number(item.quantity) || 1)),
@@ -445,7 +482,10 @@ export class OrdersService {
         image: product.image,
         vendorId: product.vendorId || 'vend-affordz-official',
         fulfillmentType: (product.fulfillmentType || 'DARK_STORE') as 'DARK_STORE' | 'VENDOR',
-        etaMinutes: product.darkStoreHub?.deliveryMinutes ?? 28,
+        etaMinutes:
+          product.fulfillmentType === 'VENDOR'
+            ? 2880
+            : (product.darkStoreHub?.deliveryMinutes ?? 19),
         itemTryAndBuyEligible,
         appliedCommissionRate,
         commissionAmount,
@@ -556,6 +596,16 @@ export class OrdersService {
       ) {
         throw new BadRequestException(`Coupon code '${rawCouponCode}' usage limit has been reached`);
       }
+      if (appliedCoupon.perUserLimit != null) {
+        const userUsedCount = await this.prisma.couponUsage.count({
+          where: { couponId: appliedCoupon.id, userId },
+        });
+        if (userUsedCount >= appliedCoupon.perUserLimit) {
+          throw new BadRequestException(
+            `Coupon '${appliedCoupon.code}' has already been used the maximum (${appliedCoupon.perUserLimit}) time(s) on your account`,
+          );
+        }
+      }
       if (combinedItemTotal < appliedCoupon.minOrderValue) {
         throw new BadRequestException(
           `Coupon '${rawCouponCode}' requires minimum order value of ₹${appliedCoupon.minOrderValue}`,
@@ -640,6 +690,16 @@ export class OrdersService {
     // Step 1: Atomic DB reservation (group, split orders, stock decrement, coupon increment, cart clear, outbox)
     const { createdGroup, createdOrders } = await this.prisma.$transaction(async (tx) => {
       if (appliedCoupon) {
+        if (appliedCoupon.perUserLimit != null) {
+          const userUsedCountTx = await tx.couponUsage.count({
+            where: { couponId: appliedCoupon.id, userId },
+          });
+          if (userUsedCountTx >= appliedCoupon.perUserLimit) {
+            throw new ConflictException(
+              `Coupon '${appliedCoupon.code}' has already been used on your account.`,
+            );
+          }
+        }
         const couponRes = await tx.coupon.updateMany({
           where: {
             id: appliedCoupon.id,
@@ -691,9 +751,22 @@ export class OrdersService {
           deliveryFeeTotal: groupDeliveryFeeTotal,
           taxesTotal: groupTaxesTotal,
           grandTotal: groupGrandTotal,
+          needGstInvoice,
+          customerGstin: cleanGstin,
+          gstBusinessName: cleanGstBusinessName,
           expiresAt,
         },
       });
+
+      if (appliedCoupon) {
+        await tx.couponUsage.create({
+          data: {
+            couponId: appliedCoupon.id,
+            userId,
+            checkoutGroupId: grp.id,
+          },
+        });
+      }
 
       const created: any[] = [];
       for (const plan of splitOrderPlans) {
@@ -723,6 +796,9 @@ export class OrdersService {
             etaMinutes: plan.bucket.etaMinutes,
             isTryAndBuy: plan.bucket.isTryAndBuy,
             deliveryInstructions: dto.deliveryInstructions?.trim() || null,
+            needGstInvoice,
+            customerGstin: cleanGstin,
+            gstBusinessName: cleanGstBusinessName,
             deliveryOtpHash: plan.otpHash,
             expiresAt,
             items: {
@@ -861,6 +937,11 @@ export class OrdersService {
           `Razorpay creation failed for group ${createdGroup.id}; running compensating rollback`,
         );
         if (appliedCoupon) {
+          await this.prisma.couponUsage
+            .deleteMany({
+              where: { checkoutGroupId: createdGroup.id },
+            })
+            .catch(() => {});
           await this.prisma.coupon
             .updateMany({
               where: { id: appliedCoupon.id, usedCount: { gt: 0 } },
@@ -1257,6 +1338,237 @@ export class OrdersService {
     return this.formatOrderResponse(order, role, userId);
   }
 
+  async getOrderInvoice(
+    id: string,
+    userId?: string,
+    role?: string,
+    driverId?: string,
+    vendorId?: string,
+  ) {
+    this.ensureDbConnected();
+    const cleanId = id.trim().replace(/^#/, '');
+
+    const order = await this.prisma.order.findFirst({
+      where: { OR: [{ id }, { id: cleanId }, { orderNumber: cleanId }] },
+      include: {
+        ...ORDER_WITH_RELATIONS,
+        customer: {
+          select: { id: true, name: true, phone: true, email: true },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException(`Order '${id}' not found`);
+    }
+
+    await this.assertOrderAccess(order, userId, role, driverId, vendorId);
+
+    const addr: any = order.deliveryAddress || order.address || {};
+    const invoiceNumber = `INV-${order.orderNumber || order.id}`;
+    const invoiceDate = (order.createdAt ? new Date(order.createdAt) : new Date()).toISOString();
+
+    const lineItems = (order.items || []).map((item: any) => {
+      const unitMrp = Math.round(item.price || 0);
+      const qty = Math.max(1, Number(item.quantity || 1));
+      const lineGross = unitMrp * qty;
+      const gst = computeInclusiveGstBreakdown(lineGross, INCLUSIVE_GST_RATE);
+      return {
+        id: item.id,
+        productId: item.productId,
+        title: item.title,
+        brand: item.brand,
+        size: item.size,
+        hsnCode: '6204',
+        quantity: qty,
+        unitMrp,
+        lineGross,
+        taxableValue: gst.taxableValue,
+        cgstRate: 2.5,
+        cgstAmount: gst.cgst,
+        sgstRate: 2.5,
+        sgstAmount: gst.sgst,
+        totalGst: gst.totalGst,
+      };
+    });
+
+    const netMerchandiseGross = Math.max(
+      0,
+      Math.round((order.itemTotal || 0) - (order.discountAmount || 0)),
+    );
+    const merchGst = computeInclusiveGstBreakdown(netMerchandiseGross, INCLUSIVE_GST_RATE);
+    const deliveryGst = computeInclusiveGstBreakdown(order.deliveryFee || 0, INCLUSIVE_GST_RATE);
+    const giftWrapGst = computeInclusiveGstBreakdown(order.giftWrapFee || 0, INCLUSIVE_GST_RATE);
+
+    const taxableSubtotal =
+      Math.round((merchGst.taxableValue + deliveryGst.taxableValue + giftWrapGst.taxableValue) * 100) / 100;
+    const cgstTotal =
+      Math.round((merchGst.cgst + deliveryGst.cgst + giftWrapGst.cgst) * 100) / 100;
+    const sgstTotal =
+      Math.round((merchGst.sgst + deliveryGst.sgst + giftWrapGst.sgst) * 100) / 100;
+    const totalGstIncluded = Math.round((cgstTotal + sgstTotal) * 100) / 100;
+
+    const sellerName =
+      order.vendor?.storeName ||
+      (order.fulfillmentType === 'DARK_STORE' ? 'Affordz Official Store' : 'Affordz Commerce Pvt Ltd');
+    const sellerAddress =
+      order.vendor?.address || 'Bengaluru Express Atelier Hub, Karnataka - 560038';
+    const sellerGstin = '29AABCU9603R1ZM';
+    const buyerName =
+      order.gstBusinessName ||
+      addr.recipientName ||
+      order.customer?.name ||
+      'Affordz Customer';
+    const buyerAddress = [addr.line1, addr.line2, addr.locality, addr.city, addr.state, addr.pincode]
+      .filter(Boolean)
+      .join(', ');
+
+    const esc = (v: unknown) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${esc(invoiceNumber)} — Affordz Tax Invoice</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #111111; margin: 0; padding: 24px; background: #FAF8F5; }
+    .sheet { max-width: 780px; margin: 0 auto; background: #FFFFFF; border: 1px solid #E8E5DF; border-radius: 16px; padding: 28px; }
+    .header { display: flex; justify-content: space-between; border-bottom: 2px solid #111111; padding-bottom: 16px; margin-bottom: 18px; }
+    .brand { font-size: 22px; font-weight: 800; letter-spacing: 0.5px; }
+    .badge { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #FF5A1F; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; font-size: 13px; }
+    .box { background: #FAF8F5; border: 1px solid #E8E5DF; border-radius: 10px; padding: 12px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 18px; font-size: 12.5px; }
+    th { text-align: left; background: #F4F1EA; padding: 9px 8px; border-bottom: 1px solid #D9D9D5; font-size: 11px; text-transform: uppercase; }
+    td { padding: 9px 8px; border-bottom: 1px solid #F0ECE4; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .totals { max-width: 340px; margin-left: auto; font-size: 13px; }
+    .totals-row { display: flex; justify-content: space-between; padding: 5px 0; }
+    .grand { border-top: 2px solid #111111; margin-top: 6px; padding-top: 8px; font-weight: 800; font-size: 16px; }
+    .note { margin-top: 18px; font-size: 11.5px; color: #6B6667; border-top: 1px solid #E8E5DF; padding-top: 12px; }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="header">
+      <div>
+        <div class="badge">TAX INVOICE (MRP GST-INCLUSIVE)</div>
+        <div class="brand">AFFORDZ</div>
+        <div style="font-size:12px;color:#6B6667;">${esc(sellerName)} • GSTIN: ${esc(sellerGstin)}</div>
+      </div>
+      <div style="text-align:right;font-size:12.5px;">
+        <div><strong>Invoice No:</strong> ${esc(invoiceNumber)}</div>
+        <div><strong>Order No:</strong> #${esc(order.orderNumber)}</div>
+        <div><strong>Date:</strong> ${esc(new Date(invoiceDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }))}</div>
+        <div><strong>Payment:</strong> ${esc(order.paymentMethod)} (${esc(order.paymentStatus)})</div>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="box">
+        <div style="font-size:10.5px;font-weight:700;color:#6B6667;text-transform:uppercase;margin-bottom:4px;">Sold By</div>
+        <div style="font-weight:700;">${esc(sellerName)}</div>
+        <div style="color:#4A4A4A;margin-top:2px;">${esc(sellerAddress)}</div>
+        <div style="color:#4A4A4A;margin-top:2px;">GSTIN: ${esc(sellerGstin)}</div>
+      </div>
+      <div class="box">
+        <div style="font-size:10.5px;font-weight:700;color:#6B6667;text-transform:uppercase;margin-bottom:4px;">Billed &amp; Shipped To</div>
+        <div style="font-weight:700;">${esc(buyerName)}</div>
+        ${order.customerGstin ? `<div style="color:#111111;font-weight:600;margin-top:2px;">Customer GSTIN: ${esc(order.customerGstin)}</div>` : ''}
+        <div style="color:#4A4A4A;margin-top:2px;">${esc(buyerAddress || 'Registered Address')}</div>
+        ${addr.recipientPhone || order.customer?.phone ? `<div style="color:#4A4A4A;margin-top:2px;">Phone: ${esc(addr.recipientPhone || order.customer?.phone)}</div>` : ''}
+      </div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Item &amp; HSN</th>
+          <th class="num">Qty</th>
+          <th class="num">MRP (Incl. GST)</th>
+          <th class="num">Taxable</th>
+          <th class="num">CGST (2.5%)</th>
+          <th class="num">SGST (2.5%)</th>
+          <th class="num">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${lineItems
+          .map(
+            (li) => `<tr>
+          <td><strong>${esc(li.title)}</strong><br/><span style="color:#6B6667;font-size:11px;">${esc(li.brand)} • Size ${esc(li.size)} • HSN ${esc(li.hsnCode)}</span></td>
+          <td class="num">${li.quantity}</td>
+          <td class="num">₹${li.unitMrp.toLocaleString('en-IN')}</td>
+          <td class="num">₹${li.taxableValue.toFixed(2)}</td>
+          <td class="num">₹${li.cgstAmount.toFixed(2)}</td>
+          <td class="num">₹${li.sgstAmount.toFixed(2)}</td>
+          <td class="num"><strong>₹${li.lineGross.toLocaleString('en-IN')}</strong></td>
+        </tr>`,
+          )
+          .join('')}
+      </tbody>
+    </table>
+    <div class="totals">
+      <div class="totals-row"><span>Items MRP Total (Incl. GST)</span><span>₹${Math.round(order.itemTotal || 0).toLocaleString('en-IN')}</span></div>
+      ${(order.discountAmount || 0) > 0 ? `<div class="totals-row" style="color:#15803D;"><span>Coupon Discount ${order.couponCode ? `(${esc(order.couponCode)})` : ''}</span><span>-₹${Math.round(order.discountAmount || 0).toLocaleString('en-IN')}</span></div>` : ''}
+      <div class="totals-row"><span>Delivery Fee</span><span>${(order.deliveryFee || 0) === 0 ? 'FREE' : `₹${Math.round(order.deliveryFee || 0).toLocaleString('en-IN')}`}</span></div>
+      ${(order.giftWrapFee || 0) > 0 ? `<div class="totals-row"><span>Artisan Gift Wrap</span><span>₹${Math.round(order.giftWrapFee || 0).toLocaleString('en-IN')}</span></div>` : ''}
+      ${(order.donationAmount || 0) > 0 ? `<div class="totals-row"><span>Weaver Foundation Donation</span><span>₹${Math.round(order.donationAmount || 0).toLocaleString('en-IN')}</span></div>` : ''}
+      <div class="totals-row" style="color:#6B6667;font-size:12px;"><span>Taxable Value</span><span>₹${taxableSubtotal.toFixed(2)}</span></div>
+      <div class="totals-row" style="color:#6B6667;font-size:12px;"><span>Included CGST (2.5%) + SGST (2.5%)</span><span>₹${totalGstIncluded.toFixed(2)} (Incl. in MRP)</span></div>
+      <div class="totals-row grand"><span>Grand Total Paid</span><span>₹${Math.round(order.grandTotal || 0).toLocaleString('en-IN')}</span></div>
+    </div>
+    <div class="note">
+      This is a computer-generated GST tax invoice. All product prices are inclusive of applicable GST (5% CGST+SGST included in MRP).
+    </div>
+  </div>
+</body>
+</html>`;
+
+    return {
+      invoiceNumber,
+      invoiceDate,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      paymentMethod: order.paymentMethod,
+      paymentStatus: order.paymentStatus,
+      mrpGstInclusive: true,
+      seller: {
+        name: sellerName,
+        address: sellerAddress,
+        gstin: sellerGstin,
+        placeOfSupply: 'Karnataka (29)',
+      },
+      buyer: {
+        name: buyerName,
+        phone: addr.recipientPhone || order.customer?.phone || null,
+        address: buyerAddress,
+        needGstInvoice: Boolean(order.needGstInvoice),
+        gstin: order.customerGstin || null,
+        businessName: order.gstBusinessName || null,
+      },
+      items: lineItems,
+      totals: {
+        itemTotal: Math.round(order.itemTotal || 0),
+        discountAmount: Math.round(order.discountAmount || 0),
+        couponCode: order.couponCode || null,
+        deliveryFee: Math.round(order.deliveryFee || 0),
+        giftWrapFee: Math.round(order.giftWrapFee || 0),
+        donationAmount: Math.round(order.donationAmount || 0),
+        taxableSubtotal,
+        cgstTotal,
+        sgstTotal,
+        totalGstIncluded,
+        grandTotal: Math.round(order.grandTotal || 0),
+      },
+      html,
+    };
+  }
+
   async trackOrder(
     id: string,
     userId?: string,
@@ -1288,6 +1600,27 @@ export class OrdersService {
       (order.deliveryAddress as any)?.latitude ?? order.address?.latitude ?? null;
     const customerLng =
       (order.deliveryAddress as any)?.longitude ?? order.address?.longitude ?? null;
+
+    let pickupCoordinates: { latitude: number; longitude: number } | null =
+      order.vendor?.latitude != null && order.vendor?.longitude != null
+        ? { latitude: order.vendor.latitude, longitude: order.vendor.longitude }
+        : null;
+    let hubName: string = order.vendor?.storeName || 'Affordz Express Hub';
+
+    if (order.fulfillmentType === 'DARK_STORE') {
+      const activeHub = await this.prisma.darkStoreHub
+        ?.findFirst?.({
+          where: { isActive: true },
+          select: { name: true, lat: true, lng: true },
+        })
+        .catch(() => null);
+      if (activeHub) {
+        hubName = activeHub.name || hubName;
+        if (!pickupCoordinates && activeHub.lat != null && activeHub.lng != null) {
+          pickupCoordinates = { latitude: activeHub.lat, longitude: activeHub.lng };
+        }
+      }
+    }
 
     let routeData: any = null;
     let computedEtaMinutes = order.etaMinutes ?? 0;
@@ -1327,6 +1660,8 @@ export class OrdersService {
       orderId: order.id,
       orderNumber: order.orderNumber,
       version: order.version,
+      fulfillmentType: order.fulfillmentType || 'DARK_STORE',
+      hubName,
       status: order.status,
       trackingActive: isLive,
       isArrived: Boolean(order.arrivedAt),
@@ -1348,6 +1683,11 @@ export class OrdersService {
         customerLat != null && customerLng != null
           ? { latitude: customerLat, longitude: customerLng }
           : null,
+      deliveryCoordinates:
+        customerLat != null && customerLng != null
+          ? { latitude: customerLat, longitude: customerLng }
+          : null,
+      pickupCoordinates,
       driver: canShowDriver
         ? {
             id: order.driverProfile!.id,

@@ -343,6 +343,11 @@ export class CreateCouponDto {
   usageLimit?: number;
 
   @IsOptional()
+  @IsNumber()
+  @Min(1)
+  perUserLimit?: number;
+
+  @IsOptional()
   @IsDateString()
   startDate?: string;
 
@@ -383,6 +388,11 @@ export class UpdateCouponDto {
   @IsNumber()
   @Min(1)
   usageLimit?: number | null;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  perUserLimit?: number | null;
 
   @IsOptional()
   @IsDateString()

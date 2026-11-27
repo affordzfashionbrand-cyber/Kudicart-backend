@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Param,
   Query,
   Body,
@@ -218,5 +219,46 @@ export class VendorController {
     @Body() body: { stock: number },
   ) {
     return this.vendorService.updateProductStock(user.id, user.role, id, body.stock);
+  }
+
+  // --- Promotional Banners (Admin Approval Workflow) ---
+
+  @Get('banners')
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async getBanners(@CurrentUser() user: AuthenticatedUser) {
+    return this.vendorService.getBanners(user.id, user.role);
+  }
+
+  @Post('banners')
+  @HttpCode(HttpStatus.CREATED)
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async createBanner(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body()
+    body: {
+      title: string;
+      subtitle?: string;
+      discountText?: string;
+      imageUrl: string;
+      placement?: 'HERO_CAROUSEL' | 'EDITORIAL_STRIP' | 'MODERN_REDEFINED';
+      targetGender?: string;
+      tag?: string;
+      actionType?: string;
+      actionValue?: string;
+    },
+  ) {
+    return this.vendorService.createBanner(user.id, user.role, body);
+  }
+
+  @Delete('banners/:id')
+  @UseGuards(FirebaseAuthGuard, RolesGuard)
+  @Roles(Role.VENDOR, Role.ADMIN)
+  async deleteBanner(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.vendorService.deleteBanner(user.id, user.role, id);
   }
 }

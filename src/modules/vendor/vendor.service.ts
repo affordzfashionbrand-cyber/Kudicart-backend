@@ -10,6 +10,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
 import { OrderTransitionService } from '../orders/order-transition.service';
+import { HomeContentService } from '../home-content/home-content.service';
 import { Role } from '../../common/enums/role.enum';
 import { FirebaseAdminService } from '../auth/firebase-admin.service';
 import { createJwtToken } from '../../common/utils/crypto.util';
@@ -56,6 +57,7 @@ export class VendorService {
     private readonly ordersService: OrdersService,
     private readonly orderTransition: OrderTransitionService,
     @Optional() private readonly firebaseAdmin?: FirebaseAdminService,
+    @Optional() private readonly homeContentService?: HomeContentService,
   ) {}
 
   private ensureDbConnected() {
@@ -654,5 +656,128 @@ export class VendorService {
       data: { stockQuantity: Number(stock) },
     });
     return { success: true, product: updated };
+  }
+
+  // --- Promotional Banners ---
+
+  async getBanners(userId: string, role: string) {
+    this.ensureDbConnected();
+    const vendor = await this.resolveVendor(userId, role);
+    const where: any = vendor ? { vendorId: vendor.id } : { vendorId: { not: null } };
+
+    const banners = await this.prisma.homeBanner.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        vendor: { select: { id: true, storeName: true } },
+      },
+    });
+
+    return {
+      vendorId: vendor?.id || null,
+      storeName: vendor?.storeName || 'All Vendors',
+      banners,
+    };
+  }
+
+  async createBanner(
+    userId: string,
+    role: string,
+    body: {
+      title?: string;
+      title1?: string;
+      subtitle?: string;
+      title2?: string;
+      discountText?: string;
+      imageUrl: string;
+      placement?: string;
+      targetGender?: string;
+      tag?: string;
+      actionType?: string;
+      actionValue?: string;
+    },
+  ) {
+    this.ensureDbConnected();
+    const vendor = await this.resolveVendor(userId, role);
+    if (!vendor) {
+      throw new ForbiddenException('Vendor store account is required to submit a promotional banner.');
+    }
+
+    const title1 = String(body.title || body.title1 || '').trim();
+    const imageUrl = String(body.imageUrl || '').trim();
+    if (!title1) {
+      throw new BadRequestException('Banner title is required.');
+    }
+    if (!imageUrl) {
+      throw new BadRequestException('Banner image URL is required.');
+    }
+
+    const validPlacements = new Set(['HERO_CAROUSEL', 'EDITORIAL_STRIP', 'MODERN_REDEFINED']);
+    const placement = validPlacements.has(String(body.placement || ''))
+      ? (body.placement as any)
+      : 'HERO_CAROUSEL';
+
+    const validActions = new Set(['CATEGORY', 'PRODUCT', 'BRAND', 'SEARCH_QUERY', 'NONE']);
+    const actionType = validActions.has(String(body.actionType || ''))
+      ? (body.actionType as any)
+      : 'BRAND';
+
+    const discountText = body.discountText ? String(body.discountText).trim() : null;
+    const tag = body.tag ? String(body.tag).trim() : discountText || vendor.storeName.toUpperCase();
+
+    const banner = await this.prisma.homeBanner.create({
+      data: {
+        vendorId: vendor.id,
+        placement,
+        tag,
+        title1,
+        title2: body.subtitle || body.title2 ? String(body.subtitle || body.title2).trim() : null,
+        discountText,
+        imageUrl,
+        targetGender: body.targetGender || 'All',
+        actionType,
+        actionValue: body.actionValue ? String(body.actionValue).trim() : vendor.storeName,
+        status: 'PENDING',
+        isActive: false,
+        displayOrder: 100,
+      },
+      include: {
+        vendor: { select: { id: true, storeName: true } },
+      },
+    });
+
+    await this.prisma.recordAuditEvent({
+      actorId: userId,
+      actorName: vendor.storeName,
+      actionType: 'VENDOR_BANNER_SUBMITTED',
+      entityId: banner.id,
+      entityType: 'HomeBanner',
+      summary: `Vendor ${vendor.storeName} submitted banner "${banner.title1}" for admin approval`,
+    });
+
+    return {
+      success: true,
+      message: 'Banner submitted for admin approval.',
+      banner,
+    };
+  }
+
+  async deleteBanner(userId: string, role: string, bannerId: string) {
+    this.ensureDbConnected();
+    const vendor = await this.resolveVendor(userId, role);
+    const existing = await this.prisma.homeBanner.findUnique({ where: { id: bannerId } });
+    if (!existing) {
+      throw new NotFoundException(`Banner '${bannerId}' not found.`);
+    }
+    if (vendor && existing.vendorId !== vendor.id) {
+      throw new ForbiddenException('Banner does not belong to your store.');
+    }
+
+    await this.prisma.homeBanner.delete({ where: { id: bannerId } });
+    if (existing.status === 'APPROVED' && this.homeContentService) {
+      await this.homeContentService.invalidateLayoutCache().catch(() => {});
+    }
+
+    return { success: true, message: 'Banner deleted.' };
   }
 }

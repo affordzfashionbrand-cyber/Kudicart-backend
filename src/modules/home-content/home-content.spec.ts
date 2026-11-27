@@ -272,5 +272,52 @@ describe('HomeContent CMS Module — Unit & Integration Test Suite', () => {
       );
       expect(reorderRes.success).toBe(true);
     });
+
+    it('enforces APPROVED-only banner visibility across PENDING -> APPROVED -> REJECTED workflow', async () => {
+      const actor = { id: 'ADM-001', name: 'Ops Admin', role: 'ADMIN' } as any;
+      const pendingBanner = await adminHomeContentController.createBanner(
+        {
+          placement: BannerPlacementEnum.HERO_CAROUSEL,
+          tag: 'VENDOR SPOTLIGHT',
+          title1: 'Festival',
+          title2: 'Banner.',
+          discountText: 'FLAT 30% OFF',
+          imageUrl: 'https://images.unsplash.com/photo-vendor-test.jpg',
+          targetGender: 'All',
+          actionType: DeepLinkActionTypeEnum.NONE,
+          isActive: false,
+          status: 'PENDING' as any,
+        },
+        actor,
+      );
+      testBannerIds.push(pendingBanner.id);
+
+      // Should NOT appear in public customer layout while PENDING
+      const pendingLayout = await homeContentController.getLayout('All');
+      expect(pendingLayout.data.banners.some((b: any) => b.id === pendingBanner.id)).toBe(false);
+
+      // Approve banner -> appears in public customer layout
+      const approved = await adminHomeContentController.approveBanner(pendingBanner.id, actor);
+      expect(approved.status).toBe('APPROVED');
+      expect(approved.isActive).toBe(true);
+
+      const approvedLayout = await homeContentController.getLayout('All');
+      const liveMatch = approvedLayout.data.banners.find((b: any) => b.id === pendingBanner.id);
+      expect(liveMatch).toBeDefined();
+      expect(liveMatch.discountText).toBe('FLAT 30% OFF');
+
+      // Reject banner -> saves comment and hides from public layout
+      const rejected = await adminHomeContentController.rejectBanner(
+        pendingBanner.id,
+        { rejectionComment: 'Image resolution too low' },
+        actor,
+      );
+      expect(rejected.status).toBe('REJECTED');
+      expect(rejected.isActive).toBe(false);
+      expect(rejected.rejectionComment).toBe('Image resolution too low');
+
+      const rejectedLayout = await homeContentController.getLayout('All');
+      expect(rejectedLayout.data.banners.some((b: any) => b.id === pendingBanner.id)).toBe(false);
+    });
   });
 });

@@ -1,11 +1,15 @@
 import {
+  BadRequestException,
   Injectable,
   Logger,
   NotFoundException,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { Role } from '../../common/enums/role.enum';
 import {
   DEFAULT_HOMEPAGE_SECTIONS,
   HOME_CONTENT_CACHE_PREFIX,
@@ -32,6 +36,7 @@ export class HomeContentService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly redis: RedisService,
+    @Optional() private readonly notificationsService?: NotificationsService,
   ) {}
 
   async onModuleInit() {
@@ -83,11 +88,12 @@ export class HomeContentService implements OnModuleInit {
       },
     });
 
-    // 3. Fetch active banners matching gender
+    // 3. Fetch active APPROVED banners matching gender
     const now = new Date();
     const banners = await this.prisma.homeBanner.findMany({
       where: {
         isActive: true,
+        status: 'APPROVED',
         OR: [
           { targetGender: 'All' },
           { targetGender: normalizedGender },
@@ -111,6 +117,7 @@ export class HomeContentService implements OnModuleInit {
       include: {
         category: { select: { id: true, name: true, slug: true } },
         product: { select: { id: true, title: true, brand: true, price: true } },
+        vendor: { select: { id: true, storeName: true } },
       },
     });
 
@@ -174,9 +181,13 @@ export class HomeContentService implements OnModuleInit {
           tag: b.tag,
           title1: b.title1,
           title2: b.title2,
+          discountText: b.discountText,
           imageUrl: b.imageUrl,
           mobileImageUrl: b.mobileImageUrl,
           targetGender: b.targetGender,
+          vendorId: b.vendorId,
+          vendorName: b.vendor?.storeName || null,
+          status: b.status,
           actionType: b.actionType,
           actionValue:
             b.actionValue ||
@@ -234,10 +245,14 @@ export class HomeContentService implements OnModuleInit {
     placement?: string;
     targetGender?: string;
     isActive?: boolean | string;
+    status?: string;
+    vendorId?: string;
   }) {
     const where: any = {};
     if (query?.placement) where.placement = query.placement;
     if (query?.targetGender) where.targetGender = query.targetGender;
+    if (query?.status && query.status !== 'ALL') where.status = query.status;
+    if (query?.vendorId) where.vendorId = query.vendorId;
     if (query?.isActive !== undefined) {
       where.isActive =
         query.isActive === true || query.isActive === 'true' || query.isActive === '1';
@@ -245,10 +260,11 @@ export class HomeContentService implements OnModuleInit {
 
     return this.prisma.homeBanner.findMany({
       where,
-      orderBy: { displayOrder: 'asc' },
+      orderBy: [{ status: 'asc' }, { displayOrder: 'asc' }, { createdAt: 'desc' }],
       include: {
         category: { select: { id: true, name: true, slug: true } },
         product: { select: { id: true, title: true, brand: true, price: true } },
+        vendor: { select: { id: true, storeName: true, userId: true } },
       },
     });
   }
@@ -259,6 +275,7 @@ export class HomeContentService implements OnModuleInit {
       include: {
         category: { select: { id: true, name: true, slug: true } },
         product: { select: { id: true, title: true, brand: true, price: true } },
+        vendor: { select: { id: true, storeName: true, userId: true } },
       },
     });
     if (!banner) throw new NotFoundException(`Banner with ID ${id} not found.`);
@@ -272,6 +289,9 @@ export class HomeContentService implements OnModuleInit {
         tag: dto.tag,
         title1: dto.title1,
         title2: dto.title2,
+        discountText: dto.discountText || null,
+        vendorId: dto.vendorId || null,
+        status: (dto.status as any) || 'APPROVED',
         imageUrl: dto.imageUrl,
         mobileImageUrl: dto.mobileImageUrl,
         targetGender: dto.targetGender || 'All',
@@ -283,6 +303,11 @@ export class HomeContentService implements OnModuleInit {
         isActive: dto.isActive ?? true,
         startDate: dto.startDate ? new Date(dto.startDate) : null,
         endDate: dto.endDate ? new Date(dto.endDate) : null,
+      },
+      include: {
+        category: { select: { id: true, name: true, slug: true } },
+        product: { select: { id: true, title: true, brand: true, price: true } },
+        vendor: { select: { id: true, storeName: true, userId: true } },
       },
     });
 
@@ -300,6 +325,107 @@ export class HomeContentService implements OnModuleInit {
     return banner;
   }
 
+  async approveBanner(id: string, actorId?: string, actorName?: string) {
+    const existing = await this.getBannerById(id);
+
+    const updated = await this.prisma.homeBanner.update({
+      where: { id },
+      data: {
+        status: 'APPROVED',
+        isActive: true,
+        rejectionComment: null,
+        reviewedBy: actorName || actorId || 'ADMIN',
+        reviewedAt: new Date(),
+      },
+      include: {
+        category: { select: { id: true, name: true, slug: true } },
+        product: { select: { id: true, title: true, brand: true, price: true } },
+        vendor: { select: { id: true, storeName: true, userId: true } },
+      },
+    });
+
+    await this.invalidateLayoutCache();
+    await this.prisma.recordAuditEvent({
+      actorId,
+      actorName,
+      actionType: 'BANNER_APPROVED',
+      entityId: updated.id,
+      entityType: 'HomeBanner',
+      summary: `Approved banner "${updated.title1}"${existing.vendor?.storeName ? ` for ${existing.vendor.storeName}` : ''}`,
+    });
+
+    if (existing.vendor?.userId && this.notificationsService) {
+      await this.notificationsService
+        .sendNotification({
+          recipientUserId: existing.vendor.userId,
+          recipientRole: Role.VENDOR,
+          category: 'SYSTEM',
+          title: 'Promotional Banner Approved',
+          body: `Your banner "${updated.title1}" has been approved and is now live on the customer home screen.`,
+          data: { bannerId: updated.id, status: 'APPROVED' },
+        })
+        .catch(() => {});
+    }
+
+    return updated;
+  }
+
+  async rejectBanner(
+    id: string,
+    rejectionComment: string,
+    actorId?: string,
+    actorName?: string,
+  ) {
+    const cleanComment = String(rejectionComment || '').trim();
+    if (!cleanComment) {
+      throw new BadRequestException('A rejection comment is required when rejecting a banner.');
+    }
+
+    const existing = await this.getBannerById(id);
+
+    const updated = await this.prisma.homeBanner.update({
+      where: { id },
+      data: {
+        status: 'REJECTED',
+        isActive: false,
+        rejectionComment: cleanComment,
+        reviewedBy: actorName || actorId || 'ADMIN',
+        reviewedAt: new Date(),
+      },
+      include: {
+        category: { select: { id: true, name: true, slug: true } },
+        product: { select: { id: true, title: true, brand: true, price: true } },
+        vendor: { select: { id: true, storeName: true, userId: true } },
+      },
+    });
+
+    await this.invalidateLayoutCache();
+    await this.prisma.recordAuditEvent({
+      actorId,
+      actorName,
+      actionType: 'BANNER_REJECTED',
+      entityId: updated.id,
+      entityType: 'HomeBanner',
+      summary: `Rejected banner "${updated.title1}": ${cleanComment}`,
+      changePayload: { rejectionComment: cleanComment },
+    });
+
+    if (existing.vendor?.userId && this.notificationsService) {
+      await this.notificationsService
+        .sendNotification({
+          recipientUserId: existing.vendor.userId,
+          recipientRole: Role.VENDOR,
+          category: 'ALERT',
+          title: 'Promotional Banner Needs Changes',
+          body: `Your banner "${updated.title1}" was rejected: ${cleanComment}`,
+          data: { bannerId: updated.id, status: 'REJECTED', rejectionComment: cleanComment },
+        })
+        .catch(() => {});
+    }
+
+    return updated;
+  }
+
   async updateBanner(
     id: string,
     dto: UpdateBannerDto,
@@ -315,6 +441,8 @@ export class HomeContentService implements OnModuleInit {
         ...(dto.tag !== undefined && { tag: dto.tag }),
         ...(dto.title1 !== undefined && { title1: dto.title1 }),
         ...(dto.title2 !== undefined && { title2: dto.title2 }),
+        ...(dto.discountText !== undefined && { discountText: dto.discountText }),
+        ...(dto.status !== undefined && { status: dto.status as any }),
         ...(dto.imageUrl !== undefined && { imageUrl: dto.imageUrl }),
         ...(dto.mobileImageUrl !== undefined && { mobileImageUrl: dto.mobileImageUrl }),
         ...(dto.targetGender !== undefined && { targetGender: dto.targetGender }),
@@ -604,6 +732,43 @@ export class HomeContentService implements OnModuleInit {
       summary: `Updated section configuration for "${updated.displayName}"`,
       changePayload: dto as any,
     });
+
+    if (
+      sectionKey === 'FLASH_DROP' &&
+      updated.isEnabled &&
+      dto.metadata?.suppressNotification !== true &&
+      dto.metadata?.notifyCustomers !== false &&
+      this.notificationsService
+    ) {
+      const meta = (updated.metadata && typeof updated.metadata === 'object'
+        ? updated.metadata
+        : {}) as Record<string, any>;
+      const notifTitle =
+        meta.notificationTitle ||
+        updated.title ||
+        'Flash Drop Live Now!';
+      const notifBody =
+        meta.notificationBody ||
+        updated.subtitle ||
+        'Limited-time curated drop is live now. Shop before the timer runs out!';
+
+      await this.notificationsService
+        .sendNotification({
+          recipientRole: Role.CUSTOMER,
+          category: 'ALERT',
+          title: String(notifTitle),
+          body: String(notifBody),
+          data: {
+            sectionKey: 'FLASH_DROP',
+            actionRoute: '/explore',
+            ...(meta.endsAt ? { endsAt: String(meta.endsAt) } : {}),
+            ...(meta.endsInMinutes ? { endsInMinutes: String(meta.endsInMinutes) } : {}),
+          },
+        })
+        .catch((err) => {
+          this.logger.warn(`Failed to send Flash Drop notification: ${err?.message}`);
+        });
+    }
 
     return updated;
   }

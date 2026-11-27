@@ -64,6 +64,18 @@ export class CheckoutDto {
   deliveryInstructions?: string;
 
   @IsOptional()
+  @IsBoolean()
+  needGstInvoice?: boolean;
+
+  @IsOptional()
+  @IsString()
+  customerGstin?: string;
+
+  @IsOptional()
+  @IsString()
+  gstBusinessName?: string;
+
+  @IsOptional()
   @ValidateNested()
   @Type(() => CheckoutItemDto)
   buyNowItem?: CheckoutItemDto;

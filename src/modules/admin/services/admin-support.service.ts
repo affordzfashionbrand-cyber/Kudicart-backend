@@ -1,15 +1,32 @@
 import {
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { AdminQueryDto } from '../dto/admin-query.dto';
 import { UpdateSupportTicketDto } from '../dto/admin-domain.dto';
+import { NotificationsService } from '../../notifications/notifications.service';
+import { Role } from '../../../common/enums/role.enum';
+
+function formatTimeAgo(dateValue?: Date | string | null): string {
+  if (!dateValue) return 'Just now';
+  const ts = dateValue instanceof Date ? dateValue.getTime() : new Date(dateValue).getTime();
+  if (!Number.isFinite(ts)) return 'Just now';
+  const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (diffSec < 60) return 'Just now';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return `${Math.floor(diffSec / 86400)}d ago`;
+}
 
 @Injectable()
 export class AdminSupportService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly notificationsService?: NotificationsService,
+  ) {}
 
   private ensureDb() {
     if (!this.prisma.isConnectedToDb) {
@@ -18,14 +35,33 @@ export class AdminSupportService {
   }
 
   private formatTicket(t: any) {
+    const orderItems = Array.isArray(t.order?.items) ? t.order.items : [];
+    const orderProductSummary =
+      orderItems.length > 0
+        ? orderItems
+            .map((it: any) => `${it.quantity || 1}x ${it.title || 'Item'}`)
+            .join(', ')
+        : t.order?.orderNumber
+          ? `Order #${t.order.orderNumber}`
+          : 'General Support Inquiry';
+    const addr = (t.order?.deliveryAddress as any) || t.order?.address || null;
+    const locationParts = [addr?.locality, addr?.city].filter(Boolean);
+    const location = locationParts.length > 0 ? locationParts.join(', ') : 'Customer Account';
+
     return {
       id: t.id,
       userId: t.userId,
       orderId: t.orderId,
       orderNumber: t.order?.orderNumber || '',
+      orderAmount: Number(t.order?.grandTotal || 0),
+      orderDeliveryStatus: t.order?.status || 'N/A',
+      orderProductSummary,
+      location,
+      timeAgo: formatTimeAgo(t.createdAt),
       customerName: t.user?.name || 'Customer',
       customerEmail: t.user?.email || '',
       customerPhone: t.user?.phone || '',
+      customerTier: 'Verified Customer',
       subject: t.title,
       title: t.title,
       description: t.description || '',
@@ -47,7 +83,12 @@ export class AdminSupportService {
     const rows = await this.prisma.supportTicket.findMany({
       include: {
         user: true,
-        order: true,
+        order: {
+          include: {
+            items: true,
+            address: true,
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -112,7 +153,12 @@ export class AdminSupportService {
       },
       include: {
         user: true,
-        order: true,
+        order: {
+          include: {
+            items: true,
+            address: true,
+          },
+        },
       },
     });
 
@@ -138,7 +184,12 @@ export class AdminSupportService {
       },
       include: {
         user: true,
-        order: true,
+        order: {
+          include: {
+            items: true,
+            address: true,
+          },
+        },
       },
     });
 
@@ -169,7 +220,12 @@ export class AdminSupportService {
         },
         include: {
           user: true,
-          order: true,
+          order: {
+            include: {
+              items: true,
+              address: true,
+            },
+          },
         },
       });
 
@@ -193,6 +249,27 @@ export class AdminSupportService {
 
       return row;
     });
+
+    if (this.notificationsService && updated.userId) {
+      const statusLabel = updated.status.replace(/_/g, ' ');
+      const bodyText = updated.resolutionRemarks
+        ? `Support update (${statusLabel}): ${updated.resolutionRemarks}`
+        : `Your support ticket #${updated.id} is now ${statusLabel}.`;
+      void this.notificationsService
+        .sendNotification({
+          recipientUserId: updated.userId,
+          recipientRole: Role.CUSTOMER,
+          category: 'ALERT',
+          title: `Concierge Update • #${updated.id}`,
+          body: bodyText,
+          data: {
+            ticketId: updated.id,
+            ...(updated.orderId ? { orderId: updated.orderId } : {}),
+            route: '/support',
+          },
+        })
+        .catch(() => {});
+    }
 
     return {
       success: true,

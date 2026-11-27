@@ -184,10 +184,10 @@ describe('Phase 4: Full Staging Integration, End-to-End Verification & Productio
       createdGroupIds.push(order.checkoutGroupId);
     }
 
-    // 2. Server-side financial calculations
+    // 2. Server-side financial calculations (MRP is GST-inclusive: no extra tax added on top of MRP)
     expect(order.itemTotal).toBe(3000); // 1500 * 2
-    expect(order.taxes).toBe(150);     // 5% GST
-    expect(order.grandTotal).toBe(3150);
+    expect(order.taxes).toBe(0);
+    expect(order.grandTotal).toBe(3000);
     expect(order.paymentMethod).toBe(PaymentMethod.RAZORPAY);
     expect(order.paymentStatus).toBe(PaymentStatus.PENDING);
 

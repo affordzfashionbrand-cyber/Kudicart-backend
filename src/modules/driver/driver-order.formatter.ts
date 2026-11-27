@@ -52,6 +52,7 @@ export function formatOrderPacket(order: any, _legacyStore?: any, explicitTryAnd
     fulfillmentType: order.fulfillmentType || 'DARK_STORE',
     orderType: isTryAndBuy ? 'TRY_AND_BUY' : 'STANDARD',
     isTryAndBuy,
+    deliveryInstructions: order.deliveryInstructions ?? null,
     status: order.status,
     arrivedAt: order.arrivedAt ? new Date(order.arrivedAt).toISOString() : null,
     isArrived: Boolean(order.arrivedAt),

@@ -363,9 +363,11 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
   });
 
   describe('4. Address Module', () => {
-    it('Address CRUD: creates address, sets default, and lists customer addresses', async () => {
+    it('Address CRUD: creates address with receiver details, sets default, and lists customer addresses', async () => {
       const newAddr = await addressService.addAddress('usr-1', {
         label: 'Studio Workspace',
+        recipientName: 'Riya Menon',
+        recipientPhone: '+91 98450 22334',
         line1: '12th Cross, 4th Main, HAL 2nd Stage',
         locality: 'Indiranagar',
         city: 'Bengaluru',
@@ -375,6 +377,8 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
 
       expect(newAddr.id).toBeDefined();
       expect(newAddr.isDefault).toBe(true);
+      expect(newAddr.recipientName).toBe('Riya Menon');
+      expect(newAddr.recipientPhone).toBe('+91 98450 22334');
 
       const addresses = await addressService.getAddresses('usr-1');
       expect(addresses.length).toBeGreaterThanOrEqual(2);
@@ -427,15 +431,15 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
       return { userId, prodId };
     }
 
-    it('Cart: authoritative pricing breakdown (5% GST, ₹40 Delivery Fee)', async () => {
+    it('Cart: authoritative pricing breakdown (MRP GST-inclusive, ₹40 Delivery Fee)', async () => {
       const { userId, prodId } = await seedCartCustomerAndProduct(1299, 10);
       await cartService.addItem(userId, prodId, 'Size M', 1);
 
       const cart = await cartService.getCart(userId);
       expect(cart.itemTotal).toBe(1299);
       expect(cart.deliveryFee).toBe(40);
-      expect(cart.taxes).toBe(65);
-      expect(cart.grandTotal).toBe(1404);
+      expect(cart.taxes).toBe(0);
+      expect(cart.grandTotal).toBe(1339);
     });
 
     it('Cart: prevents adding items when requested quantity exceeds available stock', async () => {
@@ -486,12 +490,13 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
       expect(cart.itemTotal).toBe(2598);
       expect(cart.deliveryFee).toBe(0); // Free above 1499
 
-      // Apply 10% coupon (max 300) -> 260
+      // Apply 10% coupon (max 300) -> 260 (MRP is GST-inclusive, so extra taxes = 0)
       const couponRes = await cartService.applyCoupon(userId, couponCode);
       expect(couponRes.coupon).toBeDefined();
       expect(couponRes.coupon?.code).toBe(couponCode);
       expect(couponRes.discountAmount).toBe(260); // 10% of 2598 = 260
-      expect(couponRes.grandTotal).toBe(2598 - 260 + 0 + Math.round(2598 * 0.05));
+      expect(couponRes.taxes).toBe(0);
+      expect(couponRes.grandTotal).toBe(2598 - 260);
 
       // Remove coupon
       const removed = await cartService.removeCoupon(userId);
@@ -601,6 +606,24 @@ describe('KudiCart Backend — Customer & Driver Apps Full Business Logic & Stat
           paymentMethod: PaymentMethod.COD,
         }),
       ).rejects.toThrow(BadRequestException);
+    });
+
+    it('Checkout: enforces 3.0 km maximum Dark Store service radius', async () => {
+      const { userId, addrId, prodId } = await seedOrderFixture(10);
+      // Move address ~4.5 km away from hub-pozhichalur (12.9818, 80.1384)
+      await prismaService.address.update({
+        where: { id: addrId },
+        data: { latitude: 13.0220, longitude: 80.1384 },
+      });
+
+      await expect(
+        ordersService.checkout(userId, {
+          addressId: addrId,
+          paymentMethod: PaymentMethod.COD,
+          isBuyNow: true,
+          buyNowItem: { productId: prodId, size: 'Size M', quantity: 1 },
+        }),
+      ).rejects.toThrow(/maximum 3 km/i);
     });
 
     it('Live Tracking: produces 8 milestone states and rider information', async () => {

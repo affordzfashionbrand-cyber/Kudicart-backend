@@ -763,8 +763,8 @@ describe('DCR-012..DCR-015 & PostgreSQL Consolidation Compliance', () => {
             city: 'Bengaluru',
             state: 'Karnataka',
             pincode: '560038',
-            latitude: 12.9716,
-            longitude: 77.5946,
+            latitude: 12.9765,
+            longitude: 77.6385,
           },
         ],
       });

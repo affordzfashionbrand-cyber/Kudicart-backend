@@ -1,9 +1,14 @@
 export const GIFT_WRAP_FEE = 35;
 export const FREE_DELIVERY_THRESHOLD = 1499;
 export const STANDARD_DELIVERY_FEE = 40;
-export const GST_TAX_RATE = 0.05;
+/**
+ * MRP is GST-inclusive for customer checkout pricing (Phase 4.5);
+ * no extra GST line is added on top of item prices.
+ */
+export const GST_TAX_RATE = 0;
+export const INCLUSIVE_GST_RATE = 0.05;
 export const DEFAULT_COMMISSION_RATE = 12.5;
-export const MAX_DARK_STORE_RADIUS_KM = 8.0;
+export const MAX_DARK_STORE_RADIUS_KM = 3.0;
 
 export function roundRupees(value: number): number {
   return Math.round(Number.isFinite(value) ? value : 0);
@@ -164,6 +169,35 @@ export function computeTryAndBuyFinancials(params: {
     finalPayableTotal,
     refundAmount,
     amountDue,
+  };
+}
+
+export function computeInclusiveGstBreakdown(
+  grossInclusiveAmount: number,
+  gstRate: number = INCLUSIVE_GST_RATE,
+) {
+  const gross = Math.max(0, roundCurrency2(grossInclusiveAmount));
+  if (gross <= 0 || gstRate <= 0) {
+    return {
+      grossAmount: gross,
+      taxableValue: gross,
+      totalGst: 0,
+      cgst: 0,
+      sgst: 0,
+      gstRatePercent: 0,
+    };
+  }
+  const taxableValue = roundCurrency2(gross / (1 + gstRate));
+  const totalGst = roundCurrency2(gross - taxableValue);
+  const cgst = roundCurrency2(totalGst / 2);
+  const sgst = roundCurrency2(totalGst - cgst);
+  return {
+    grossAmount: gross,
+    taxableValue,
+    totalGst,
+    cgst,
+    sgst,
+    gstRatePercent: Math.round(gstRate * 1000) / 10,
   };
 }
 

@@ -516,7 +516,19 @@ export class PaymentsService {
       }
     };
     document.getElementById('pay-btn').onclick = function () {
+      if (typeof Razorpay === 'undefined') {
+        document.getElementById('status-msg').textContent = 'Payment gateway failed to load. Please retry.';
+        return;
+      }
       const rzp = new Razorpay(options);
+      rzp.on('payment.failed', function (res) {
+        if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'RAZORPAY_FAILED', payload: res }));
+          return;
+        }
+        document.getElementById('status-msg').textContent = 'Payment failed. Returning to Affordz...';
+        window.location.href = buildCallbackUrl('failed', null);
+      });
       rzp.open();
     };
   </script>

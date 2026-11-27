@@ -48,11 +48,15 @@ export class AdminHomeContentController {
     @Query('placement') placement?: string,
     @Query('targetGender') targetGender?: string,
     @Query('isActive') isActive?: string,
+    @Query('status') status?: string,
+    @Query('vendorId') vendorId?: string,
   ) {
     return this.homeContentService.listBanners({
       placement,
       targetGender,
       isActive,
+      status,
+      vendorId,
     });
   }
 
@@ -93,6 +97,30 @@ export class AdminHomeContentController {
     @CurrentUser() actor: AuthenticatedUser,
   ) {
     return this.homeContentService.deleteBanner(id, actor?.id, actor?.name);
+  }
+
+  @Post('banners/:id/approve')
+  @HttpCode(HttpStatus.OK)
+  async approveBanner(
+    @Param('id') id: string,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.homeContentService.approveBanner(id, actor?.id, actor?.name);
+  }
+
+  @Post('banners/:id/reject')
+  @HttpCode(HttpStatus.OK)
+  async rejectBanner(
+    @Param('id') id: string,
+    @Body() body: { rejectionComment: string },
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.homeContentService.rejectBanner(
+      id,
+      body?.rejectionComment,
+      actor?.id,
+      actor?.name,
+    );
   }
 
   // =========================================================================

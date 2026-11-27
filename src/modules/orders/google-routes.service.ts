@@ -168,6 +168,7 @@ export class GoogleRoutesService {
           'routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline',
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
     });
 
     if (!response.ok) {

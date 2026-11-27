@@ -131,12 +131,23 @@ export class CartService {
       });
 
       const now = new Date();
+      let perUserExceeded = false;
+      if (coupon && coupon.perUserLimit !== null && coupon.perUserLimit !== undefined) {
+        const userUsedCount = await this.prisma.couponUsage.count({
+          where: { couponId: coupon.id, userId: canonicalUserId },
+        });
+        if (userUsedCount >= coupon.perUserLimit) {
+          perUserExceeded = true;
+        }
+      }
+
       if (
         coupon &&
         coupon.isActive &&
         coupon.startDate <= now &&
         coupon.endDate >= now &&
         (coupon.usageLimit === null || coupon.usedCount < coupon.usageLimit) &&
+        !perUserExceeded &&
         itemTotal >= coupon.minOrderValue
       ) {
         if (coupon.discountType === 'PERCENTAGE') {
@@ -373,6 +384,7 @@ export class CartService {
 
   async applyCoupon(userId: string, code: string) {
     this.ensureDbConnected();
+    const canonicalUserId = await this.resolveCanonicalUserId(userId);
     const cleanCode = (code || '').trim().toUpperCase();
     const coupon = await this.prisma.coupon.findFirst({
       where: { code: { equals: cleanCode, mode: 'insensitive' } },
@@ -391,20 +403,34 @@ export class CartService {
       throw new BadRequestException(`Coupon '${cleanCode}' usage limit reached`);
     }
 
-    const currentCart = await this.getCart(userId);
+    if (coupon.perUserLimit !== null && coupon.perUserLimit !== undefined) {
+      const userUsedCount = await this.prisma.couponUsage.count({
+        where: { couponId: coupon.id, userId: canonicalUserId },
+      });
+      if (userUsedCount >= coupon.perUserLimit) {
+        throw new BadRequestException(
+          `Coupon '${coupon.code}' has already been used the maximum (${coupon.perUserLimit}) time(s) on your account.`,
+        );
+      }
+    }
+
+    const currentCart = await this.getCart(canonicalUserId);
+    if (currentCart.itemTotal <= 0) {
+      throw new BadRequestException('Add items to your bag before applying a coupon.');
+    }
     if (currentCart.itemTotal < coupon.minOrderValue) {
       throw new BadRequestException(
         `Minimum order value of ₹${coupon.minOrderValue} required for coupon '${coupon.code}'`,
       );
     }
 
-    const cart = await this.ensureUserCart(userId);
+    const cart = await this.ensureUserCart(canonicalUserId);
     await this.prisma.cart.update({
       where: { id: cart.id },
       data: { couponCode: coupon.code },
     });
 
-    return this.getCart(userId);
+    return this.getCart(canonicalUserId);
   }
 
   async removeCoupon(userId: string) {

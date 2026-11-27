@@ -501,16 +501,16 @@ describe('Order Management End-to-End HTTP + WS + PostgreSQL Integration', () =>
     expect(secondOrder.giftWrapFee).toBe(0);
     expect(darkOrder.itemTotal).toBe(1000);
     expect(darkOrder.deliveryFee).toBe(40);
-    expect(darkOrder.taxes).toBe(50);
+    expect(darkOrder.taxes).toBe(0);
     expect(darkOrder.discountAmount).toBe(100);
 
     expect(vendorOrder.itemTotal).toBe(1200);
     expect(vendorOrder.deliveryFee).toBe(40);
-    expect(vendorOrder.taxes).toBe(60);
+    expect(vendorOrder.taxes).toBe(0);
     expect(vendorOrder.discountAmount).toBe(120);
 
-    // Group totals: 2200 itemTotal + 80 delivery + 110 tax + 35 giftWrap + 25 donation - 220 discount = 2230
-    expect(checkoutRes.body.grandTotal).toBe(2230);
+    // Group totals: 2200 itemTotal + 80 delivery + 0 extra tax (MRP inclusive) + 35 giftWrap + 25 donation - 220 discount = 2120
+    expect(checkoutRes.body.grandTotal).toBe(2120);
     expect(checkoutRes.body.donationAmount).toBe(25);
 
     // Group RBAC check: owner succeeds, outsider blocked 403

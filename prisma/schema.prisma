@@ -91,6 +91,7 @@ model User {
   deviceTokens    DeviceToken[]
   notifications   Notification[]
   idempotencyKeys IdempotencyKey[]
+  couponUsages    CouponUsage[]
 }
 
 model Address {
@@ -162,6 +163,7 @@ model Vendor {
   orders          Order[]        @relation("VendorOrders")
   ledgerEntries   LedgerEntry[]
   payouts         VendorPayout[]
+  banners         HomeBanner[]
   
   // Added fields to match service expectations
   isOnline                Boolean                    @default(true)
@@ -263,19 +265,34 @@ model ProductStock {
 }
 
 model Coupon {
-  id            String       @id @default(uuid())
-  code          String       @unique
-  discountType  DiscountType @default(PERCENTAGE)
+  id            String        @id @default(uuid())
+  code          String        @unique
+  discountType  DiscountType  @default(PERCENTAGE)
   discountValue Float
-  minOrderValue Float        @default(0)
+  minOrderValue Float         @default(0)
   maxDiscount   Float?
   usageLimit    Int?
-  usedCount     Int          @default(0)
-  startDate     DateTime     @default(now())
+  perUserLimit  Int?          @default(1)
+  usedCount     Int           @default(0)
+  startDate     DateTime      @default(now())
   endDate       DateTime
-  isActive      Boolean      @default(true)
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  usages        CouponUsage[]
+}
+
+model CouponUsage {
+  id              String   @id @default(uuid())
+  couponId        String
+  coupon          Coupon   @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checkoutGroupId String?
+  usedAt          DateTime @default(now())
+
+  @@index([couponId, userId])
+  @@index([checkoutGroupId])
 }
 
 model Cart {
@@ -323,6 +340,9 @@ model CheckoutGroup {
   deliveryFeeTotal  Float                @default(0)
   taxesTotal        Float                @default(0)
   grandTotal        Float
+  needGstInvoice    Boolean              @default(false)
+  customerGstin     String?
+  gstBusinessName   String?
   expiresAt         DateTime?
   createdAt         DateTime             @default(now())
   updatedAt         DateTime             @updatedAt
@@ -368,6 +388,9 @@ model Order {
   couponCode           String?
   discountAmount       Float                @default(0)
   deliveryInstructions String?
+  needGstInvoice       Boolean              @default(false)
+  customerGstin        String?
+  gstBusinessName      String?
   verificationPhotos   String[]             @default([])
   deliveryOtpHash      String?
   arrivedAt          DateTime?
@@ -803,6 +826,12 @@ enum BannerPlacement {
   PROMO_POPUP
 }
 
+enum BannerApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 enum DeepLinkActionType {
   CATEGORY
   PRODUCT
@@ -813,32 +842,43 @@ enum DeepLinkActionType {
 }
 
 model HomeBanner {
-  id              String             @id @default(uuid())
-  placement       BannerPlacement    @default(HERO_CAROUSEL)
-  tag             String?            // e.g. "DROP_04 • 00:28" or "TODAY'S LOOK"
-  title1          String             // e.g. "Fashion,"
-  title2          String?            // e.g. "now."
-  imageUrl        String             // Cloudinary asset URL
-  mobileImageUrl  String?            // Optional high-density mobile aspect ratio
-  targetGender    String             @default("All") // "All" | "Men" | "Women" | "Kids"
-  
-  // Dynamic Deep-Linking
-  actionType      DeepLinkActionType @default(CATEGORY)
-  actionValue     String?            // categoryId, productId, brand name, search query, or URL
-  categoryId      String?
-  category        Category?          @relation(fields: [categoryId], references: [id], onDelete: SetNull)
-  productId       String?
-  product         Product?           @relation(fields: [productId], references: [id], onDelete: SetNull)
+  id               String               @id @default(uuid())
+  placement        BannerPlacement      @default(HERO_CAROUSEL)
+  tag              String?              // e.g. "DROP_04 • 00:28" or "TODAY'S LOOK"
+  title1           String               // e.g. "Fashion,"
+  title2           String?              // e.g. "now."
+  discountText     String?              // e.g. "FLAT 30% OFF"
+  imageUrl         String               // Cloudinary / Supabase Storage asset URL
+  mobileImageUrl   String?              // Optional high-density mobile aspect ratio
+  targetGender     String               @default("All") // "All" | "Men" | "Women" | "Kids"
 
-  displayOrder    Int                @default(0)
-  isActive        Boolean            @default(true)
-  startDate       DateTime?          // Scheduled start
-  endDate         DateTime?          // Scheduled expiration
-  
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
+  // Vendor submission & Admin approval workflow
+  vendorId         String?
+  vendor           Vendor?              @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  status           BannerApprovalStatus @default(APPROVED)
+  rejectionComment String?
+  reviewedBy       String?
+  reviewedAt       DateTime?
+
+  // Dynamic Deep-Linking
+  actionType       DeepLinkActionType   @default(CATEGORY)
+  actionValue      String?              // categoryId, productId, brand name, search query, or URL
+  categoryId       String?
+  category         Category?            @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  productId        String?
+  product          Product?             @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  displayOrder     Int                  @default(0)
+  isActive         Boolean              @default(true)
+  startDate        DateTime?            // Scheduled start
+  endDate          DateTime?            // Scheduled expiration
+
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
 
   @@index([placement, isActive, displayOrder])
+  @@index([vendorId, status])
+  @@index([status, isActive, displayOrder])
 }
 
 model BankOffer {

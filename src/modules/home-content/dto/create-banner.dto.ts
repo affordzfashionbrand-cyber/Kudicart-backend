@@ -43,6 +43,18 @@ export class CreateBannerDto {
   title2?: string;
 
   @IsString()
+  @IsOptional()
+  discountText?: string;
+
+  @IsString()
+  @IsOptional()
+  vendorId?: string;
+
+  @IsString()
+  @IsOptional()
+  status?: 'PENDING' | 'APPROVED' | 'REJECTED';
+
+  @IsString()
   @IsNotEmpty()
   imageUrl: string;
 

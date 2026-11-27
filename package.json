@@ -29,6 +29,7 @@
     "prisma:push": "prisma db push",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:seed": "ts-node prisma/seed.ts",
+    "prisma:seed:admin": "ts-node prisma/seed-admin-products.ts",
     "postinstall": "prisma generate",
     "validate:deps": "node scripts/validate-dependencies.js",
     "sync:contracts": "node scripts/sync-contracts.js",

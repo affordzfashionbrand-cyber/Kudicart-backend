@@ -6,6 +6,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { GetProductsDto } from './dto/get-products.dto';
 import { SearchSuggestionsDto } from './dto/search-suggestions.dto';
+import { MAX_DARK_STORE_RADIUS_KM } from '../orders/order-pricing.util';
 
 export interface SearchSuggestionItem {
   text: string;
@@ -261,10 +262,14 @@ export class CatalogService {
 
   async getDarkStores() {
     this.ensureDbConnected();
-    return this.prisma.darkStoreHub.findMany({
+    const hubs = await this.prisma.darkStoreHub.findMany({
       where: { isActive: true },
       orderBy: [{ deliveryMinutes: 'asc' }, { name: 'asc' }],
     });
+    return hubs.map((h) => ({
+      ...h,
+      maxRadiusKm: MAX_DARK_STORE_RADIUS_KM,
+    }));
   }
 
   async getStores() {
@@ -298,6 +303,7 @@ export class CatalogService {
       lat: h.lat,
       lng: h.lng,
       deliveryMinutes: h.deliveryMinutes,
+      maxRadiusKm: MAX_DARK_STORE_RADIUS_KM,
       productsCount: h._count?.products ?? 0,
       isOnline: h.isActive,
     }));
@@ -329,6 +335,7 @@ export class CatalogService {
     return this.prisma.coupon.findMany({
       where: {
         isActive: true,
+        startDate: { lte: now },
         endDate: { gte: now },
       },
       orderBy: { createdAt: 'desc' },

@@ -171,6 +171,9 @@ export interface OrderContract {
   rejectedByVendor?: boolean;
   expiresAt?: string | null;
   deliveryInstructions?: string | null;
+  needGstInvoice?: boolean;
+  customerGstin?: string | null;
+  gstBusinessName?: string | null;
   verificationPhotos?: string[];
   createdAt: string;
   updatedAt: string;
@@ -183,6 +186,9 @@ export interface CheckoutRequestContract {
   paymentMethod: PaymentMethod;
   couponCode?: string;
   deliveryInstructions?: string;
+  needGstInvoice?: boolean;
+  customerGstin?: string;
+  gstBusinessName?: string;
   isTryAndBuy?: boolean;
   giftWrap?: boolean;
   donationAmount?: number;

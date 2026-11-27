@@ -3,11 +3,14 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateTicketDto } from './dto/create-ticket.dto';
+import { NotificationsService } from '../notifications/notifications.service';
+import { Role } from '../../common/enums/role.enum';
 
 export const CANONICAL_SUPPORT_CATEGORIES = [
   'DELIVERY',
@@ -54,7 +57,10 @@ const CATEGORY_ALIAS_MAP: Record<string, CanonicalSupportCategory> = {
 
 @Injectable()
 export class SupportService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly notificationsService?: NotificationsService,
+  ) {}
 
   private ensureDbConnected() {
     if (!this.prisma.isConnectedToDb) {
@@ -129,7 +135,7 @@ export class SupportService {
       resolvedOrderId = order.id;
     }
 
-    return this.prisma.supportTicket.create({
+    const created = await this.prisma.supportTicket.create({
       data: {
         id: `tkt-${randomUUID().slice(0, 8)}`,
         userId: canonicalUserId,
@@ -141,6 +147,24 @@ export class SupportService {
         status: 'OPEN',
       },
     });
+
+    if (this.notificationsService) {
+      void this.notificationsService
+        .sendNotification({
+          recipientRole: Role.ADMIN,
+          category: 'ALERT',
+          title: `New Support Ticket #${created.id}`,
+          body: `${created.title} (${priority} • ${category})`,
+          data: {
+            ticketId: created.id,
+            ...(resolvedOrderId ? { orderId: resolvedOrderId } : {}),
+            route: '/admin/support',
+          },
+        })
+        .catch(() => {});
+    }
+
+    return created;
   }
 
   async getTickets(userId: string) {

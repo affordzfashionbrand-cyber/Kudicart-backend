@@ -5,11 +5,14 @@ import {
   Patch,
   Body,
   Param,
+  Query,
+  Res,
   Headers,
   UseGuards,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
+import { Response } from 'express';
 import { OrdersService } from './orders.service';
 import { CheckoutDto } from './dto/checkout.dto';
 import { AssignDriverDto } from './dto/assign-driver.dto';
@@ -85,6 +88,34 @@ export class OrdersController {
     @Param('id') id: string,
   ) {
     return this.ordersService.getOrderById(id, user.id, user.role, user.driverId, user.vendorId);
+  }
+
+  @Get(':id/invoice')
+  async getOrderInvoice(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Query('format') format?: string,
+    @Query('download') download?: string,
+    @Res({ passthrough: true }) res?: Response,
+  ) {
+    const invoice = await this.ordersService.getOrderInvoice(
+      id,
+      user.id,
+      user.role,
+      user.driverId,
+      user.vendorId,
+    );
+    if (format?.toLowerCase() === 'html' && res) {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      if (download === '1' || download === 'true') {
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="Affordz-Invoice-${invoice.orderNumber || invoice.invoiceNumber}.html"`,
+        );
+      }
+      return invoice.html;
+    }
+    return invoice;
   }
 
   @Get(':id/track')

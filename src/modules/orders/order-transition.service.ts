@@ -141,6 +141,32 @@ export class OrderTransitionService {
             data: { stockQuantity: { increment: item.quantity || 1 } },
           });
         }
+
+        // Release per-user coupon usage only if no active non-cancelled/non-failed orders remain in checkoutGroup
+        if (existing.checkoutGroupId) {
+          const remainingActiveOrders = await tx.order.count({
+            where: {
+              checkoutGroupId: existing.checkoutGroupId,
+              status: { notIn: ['CANCELLED', 'FAILED'] },
+            },
+          });
+          if (remainingActiveOrders === 0) {
+            const releasedUsages = await tx.couponUsage.findMany({
+              where: { checkoutGroupId: existing.checkoutGroupId },
+            });
+            if (releasedUsages.length > 0) {
+              await tx.couponUsage.deleteMany({
+                where: { checkoutGroupId: existing.checkoutGroupId },
+              });
+              for (const usage of releasedUsages) {
+                await tx.coupon.updateMany({
+                  where: { id: usage.couponId, usedCount: { gt: 0 } },
+                  data: { usedCount: { decrement: 1 } },
+                });
+              }
+            }
+          }
+        }
       }
 
       const transitionNote =

@@ -3,11 +3,12 @@ import { VendorController } from './vendor.controller';
 import { VendorService } from './vendor.service';
 import { OrdersService } from '../orders/orders.service';
 import { OrdersDomainModule } from '../orders/orders-domain.module';
+import { HomeContentModule } from '../home-content/home-content.module';
 import { CartService } from '../cart/cart.service';
 import { FirebaseAdminService } from '../auth/firebase-admin.service';
 
 @Module({
-  imports: [OrdersDomainModule],
+  imports: [OrdersDomainModule, HomeContentModule],
   controllers: [VendorController],
   providers: [
     VendorService,
